@@ -1,62 +1,81 @@
 # myx
 
-A lean, beautiful terminal Spotify player — built in Rust with [ratatui](https://ratatui.rs)
-and [librespot](https://github.com/librespot-org/librespot). Streams natively as a
-Spotify Connect device, with **album-art-reactive theming**, a live **FFT visualizer**,
-**synced lyrics**, and full library browsing — all in the terminal.
+A lean, beautiful terminal Spotify player in Rust. Streams natively as a Spotify
+Connect device — with album-art-reactive theming, a live audio visualizer, and
+synced lyrics.
 
-> Requires **Spotify Premium** (Spotify Connect streaming is Premium-only).
+<p align="center"><img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/myx.png" alt="myx — the whole interface recolors to the album art" width="100%"></p>
 
-## Features
+<p align="center">
+  <img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/theme-1.png" width="32%">
+  <img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/theme-2.png" width="32%">
+  <img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/theme-3.png" width="32%">
+</p>
 
-- 🎨 **Album-art-reactive theming** — the whole UI recolors to the current cover, cross-fading on every track change
-- 🌊 **Live FFT visualizer** — a smooth, color-graded spectrum driven by the actual audio
-- 🎤 **Time-synced lyrics** — karaoke scroll via [lrclib](https://lrclib.net)
-- 📚 **Full library** — Home feed, Recently Played, Playlists, Liked Songs, Albums, Artists
-- 🔍 **Search** the whole catalog — songs, artists, albums, playlists
-- 📻 **Song radio** — start a station from any track (via librespot's internal protocol)
-- 🎯 **Drill-in navigation** — open an artist → popular tracks + albums; open albums/playlists
-- ⚡ **Context actions** (`a`) — like, add to queue/playlist, follow, go to artist/album, copy link
-- 🔀 Shuffle, repeat, volume, and a live queue view
-- 💾 **Session resume** — reopens on your last track, at your position, in the same context
+> Requires **Spotify Premium**. Linux & macOS — album art is crispest on kitty,
+> WezTerm, or foot.
 
 ## Install
 
 ```bash
-cargo install --path .    # or: cargo build --release
+# Arch (AUR)
+yay -S myx
+
+# macOS / Linux (Homebrew)
+brew install HaseebKhalid1507/homebrew-tap/myx
+
+# Cargo (crates.io)
+cargo install myx
+
+# Prebuilt binary (Linux x86_64 · macOS)
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/HaseebKhalid1507/Myx/releases/latest/download/myx-installer.sh | sh
 ```
 
-You'll need your own Spotify app client ID — free, and takes a minute:
+Or grab a `.deb` / archive from [Releases](https://github.com/HaseebKhalid1507/Myx/releases),
+or build from source: `cargo install --path .`.
 
-1. Go to the [Spotify developer dashboard](https://developer.spotify.com/dashboard) → **Create app**
+## Get started
+
+You need a free Spotify app client ID (one minute):
+
+1. [Spotify developer dashboard](https://developer.spotify.com/dashboard) → **Create app**
 2. Add the redirect URI `http://127.0.0.1:8989/login`
-3. Copy the **Client ID**, then either:
-   ```bash
-   export MYX_CLIENT_ID=<your-client-id>
-   # or:
-   mkdir -p ~/.config/myx && echo -n "<your-client-id>" > ~/.config/myx/client_id
-   ```
+3. Copy the **Client ID** and set it:
 
-No secret is needed (myx uses OAuth PKCE). Requires **Spotify Premium**.
+```bash
+export MYX_CLIENT_ID=<your-client-id>
+```
 
-## Keybinds
+Then run:
+
+```bash
+myx
+```
+
+First launch opens your browser to log in (OAuth PKCE — no secret needed). Then
+browse with `↑↓` and hit `⏎` to play. After that, just `myx`.
+
+## Keys
 
 ```
-⇥ / [ ]      switch library section        ← →        switch view (Now Playing / Lyrics / Queue)
-↑↓ / j k     move selection                ⏎          play / open
-/            search                        a          actions menu
-space / p    play · pause                  n / b      next · prev
-+ / -        volume                        s          shuffle
-Esc          back                          q          quit
+⇥ / [ ]    switch section        ← →      switch view
+↑↓ / j k   move                  ⏎        play / open
+/          search                a        actions
+space      play · pause          n / b    next · prev
+⇧ ← →      seek                  s        shuffle
++ / -      volume                R        repeat
+o          sort                  r        reload
+q          quit
 ```
+
+Mouse works too — click tabs, click a track, double-click to play.
 
 ## Credits
 
-Built on the shoulders of open source — see [NOTICE](NOTICE). In short: the streaming
-engine adapts pieces of [spotify-player](https://github.com/aome510/spotify-player)
-(MIT, © Thang Pham), the visual language reinterprets
-[noodle](https://github.com/wilfredinni/noodle), and it all rides on
-[librespot](https://github.com/librespot-org/librespot).
+Streaming adapts pieces of [spotify-player](https://github.com/aome510/spotify-player)
+(MIT, © Thang Pham); visual language after [noodle](https://github.com/wilfredinni/noodle);
+built on [ratatui](https://ratatui.rs) and [librespot](https://github.com/librespot-org/librespot).
+See [NOTICE](NOTICE).
 
 ## License
 

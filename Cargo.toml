@@ -88,3 +88,17 @@ panic = "abort"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Debian packaging (audit H7): the binary links libasound2 (librespot ALSA) and
+# libssl3 (native-tls), so the .deb must declare them or `dpkg -i` installs a
+# binary that fails to start with missing shared libraries.
+[package.metadata.deb]
+depends = "libasound2, libssl3"
+section = "sound"
+priority = "optional"
+assets = [
+    ["target/release/myx", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/myx/README.md", "644"],
+    ["LICENSE", "usr/share/doc/myx/LICENSE", "644"],
+    ["NOTICE", "usr/share/doc/myx/NOTICE", "644"],
+]

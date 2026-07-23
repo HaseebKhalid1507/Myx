@@ -145,7 +145,10 @@ fn exchange_code_for_token(code: &str, verifier: &str) -> Result<String> {
 
     std::thread::scope(|s| {
         s.spawn(|| {
-            let token = reqwest::blocking::Client::new()
+            let token = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default()
                 .post(SPOTIFY_TOKEN_URL)
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .body(body)

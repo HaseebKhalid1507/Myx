@@ -372,6 +372,18 @@ struct App {
     sort: SortMode,
     // Last-rendered progress-bar rect (for click-to-seek).
     bar_rect: Option<Rect>,
+    // Last-rendered sidebar scrollbar track + item count (drag-to-scroll).
+    scroll_rect: Option<Rect>,
+    scroll_len: usize,
+    // Last-rendered volume-meter bar region (click/drag to set volume).
+    vol_rect: Option<Rect>,
+    // Timestamp of last Ctrl-C — a second press within 1.5s quits.
+    last_ctrl_c: Option<Instant>,
+    // Mouse hit rects: view tabs, library list viewport (+its offset), last click.
+    tab_rects: Vec<(RightView, Rect)>,
+    lib_rect: Option<Rect>,
+    lib_offset: usize,
+    last_click: Option<(u16, Instant)>,
 }
 
 impl App {
@@ -461,22 +473,21 @@ impl App {
         }
         if item.is_play {
             // Special synthetic rows: play the Liked list (optionally shuffled).
-            if item.uri == "myx:action:liked-shuffle" || item.uri == "myx:action:liked-play" {
-                let shuffle = item.uri.ends_with("shuffle");
+            if item.uri == "myx:action:liked-play" {
                 let uris: Vec<String> = self.library.liked.iter().filter(|i| i.is_track).map(|i| i.uri.clone()).collect();
                 if !uris.is_empty() {
-                    self.shuffle = shuffle;
                     self.source = PlaySource::Liked;
                     self.source_name = "Liked Songs".to_string();
                     self.status = "starting Liked Songs…".to_string();
-                    let _ = self.engine.play_tracks(uris, None, shuffle);
+                    // Honour the current shuffle toggle instead of a dedicated row.
+                    if let Err(e) = self.engine.play_tracks(uris, None, self.shuffle) { self.status = format!("couldn't play: {e:#}"); }
                 }
                 return Activated::None;
             }
             self.status = format!("starting {}…", item.name);
             self.source = PlaySource::Context(item.uri.clone());
             self.source_name = self.details.last().map(|d| d.title.clone()).unwrap_or_default();
-            let _ = self.engine.play_context(item.uri, self.shuffle);
+            if let Err(e) = self.engine.play_context(item.uri, self.shuffle) { self.status = format!("couldn't play: {e:#}"); }
             return Activated::None;
         }
         if item.is_track {
@@ -492,7 +503,7 @@ impl App {
                 self.source = PlaySource::Context(ctx.clone());
                 self.source_name = d.title.clone();
                 self.status = format!("starting {}…", item.name);
-                let _ = self.engine.play_context_at(ctx, Some(item.uri.clone()), 0, self.shuffle);
+                if let Err(e) = self.engine.play_context_at(ctx, Some(item.uri.clone()), 0, self.shuffle) { self.status = format!("couldn't play: {e:#}"); }
                 return Activated::None;
             }
             // Section track list.
@@ -505,7 +516,7 @@ impl App {
                 self.source = PlaySource::None;
                 self.source_name = self.section.label().to_string();
             }
-            let _ = self.engine.play_tracks(uris, Some(item.uri.clone()), self.shuffle);
+            if let Err(e) = self.engine.play_tracks(uris, Some(item.uri.clone()), self.shuffle) { self.status = format!("couldn't play: {e:#}"); }
             return Activated::None;
         }
         // Otherwise it's a context (artist / album / playlist) — open it.
@@ -526,7 +537,7 @@ async fn main() -> Result<()> {
 
     // Restore last session first, so the engine starts at the saved volume.
     let saved = SavedState::load();
-    let init_vol = if saved.volume == 0 { 50 } else { saved.volume.min(100) };
+    let init_vol = if saved.volume == 0 { 80 } else { saved.volume.min(100) };
 
     println!("myx: connecting to Spotify…");
     let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
@@ -578,7 +589,7 @@ async fn main() -> Result<()> {
         selected: 0,
         shuffle: saved.shuffle,
         repeat: saved.repeat,
-        volume: if saved.volume == 0 { 50 } else { saved.volume.min(100) },
+        volume: if saved.volume == 0 { 80 } else { saved.volume.min(100) },
         queue: saved.queue,
         queue_uris: saved.queue_uris,
         input_mode: false,
@@ -597,6 +608,14 @@ async fn main() -> Result<()> {
         source_name: saved.source_name.clone(),
         sort: SortMode::Added,
         bar_rect: None,
+        scroll_rect: None,
+        scroll_len: 0,
+        vol_rect: None,
+        last_ctrl_c: None,
+        tab_rects: Vec::new(),
+        lib_rect: None,
+        lib_offset: 0,
+        last_click: None,
     };
 
     let res = run_ui(&mut terminal, app, ev_rx).await;
@@ -625,7 +644,7 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
     let (menu_tx, menu_rx) = flume::unbounded::<ActionMenu>();
     let (astatus_tx, astatus_rx) = flume::unbounded::<String>();
     let (pstate_tx, pstate_rx) = flume::unbounded::<PlaybackState>();
-    let (radio_tx, radio_rx) = flume::unbounded::<Vec<String>>();
+    let (radio_tx, radio_rx) = flume::unbounded::<Result<Vec<String>, String>>();
     let (libdone_tx, libdone_rx) = flume::unbounded::<bool>();
     spawn_library_fetch(app.webapi.clone(), lib_tx.clone(), libdone_tx.clone());
 
@@ -686,6 +705,33 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
                         app.status = "library failed — press r to reload".to_string();
                     }
                 }
+                // Radio results are drained here (not as a `select!` arm) for the
+                // same reason as the library: under the biased 16ms frame tick a
+                // pure recv arm starves and the station never plays.
+                while let Ok(rad) = radio_rx.try_recv() {
+                    match rad {
+                        Ok(uris) if !uris.is_empty() => {
+                            if let Err(e) = app.engine.play_tracks(uris, None, false) {
+                                app.status = format!("couldn't play radio: {e:#}");
+                            }
+                            app.playback_started = true;
+                            app.status = "radio started".to_string();
+                            // Grab the freshly-populated station queue shortly after.
+                            let webapi = app.webapi.clone();
+                            let tx = queue_tx.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(1500)).await;
+                                spawn_queue_fetch(webapi, tx);
+                            });
+                        }
+                        Ok(_) => {
+                            app.status = "radio: no tracks returned".to_string();
+                        }
+                        Err(e) => {
+                            app.status = format!("radio failed: {e}");
+                        }
+                    }
+                }
 
                 let animating = app.fade.is_some()
                     || app.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false);
@@ -718,13 +764,111 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
                             break;
                         }
                     }
-                    Ok(Event::Mouse(m)) if m.kind == MouseEventKind::Down(MouseButton::Left) => {
-                        // Click the progress bar to seek there.
-                        if let Some(bar) = app.bar_rect {
-                            if m.row == bar.y && m.column >= bar.x && m.column < bar.x + bar.width && bar.width > 0 {
-                                if let Some(dur) = app.now.as_ref().map(|n| n.duration_ms) {
-                                    let frac = (m.column - bar.x) as f32 / bar.width as f32;
-                                    app.seek_to((frac * dur as f32) as u32);
+                    Ok(Event::Mouse(m)) if matches!(
+                        m.kind,
+                        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
+                    ) =>
+                    {
+                        let is_down = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
+                        let mut consumed = false;
+                        // Drag the sidebar scrollbar (2-col grab target) to scroll.
+                        if let Some(sb) = app.scroll_rect {
+                            if m.column + 1 >= sb.x
+                                && m.column <= sb.x
+                                && m.row >= sb.y
+                                && m.row < sb.y + sb.height
+                                && sb.height > 0
+                            {
+                                consumed = true;
+                                let total = app.scroll_len;
+                                if total > 1 {
+                                    let denom = sb.height.saturating_sub(1).max(1) as f32;
+                                    let frac = (m.row - sb.y) as f32 / denom;
+                                    let sel = (frac * (total - 1) as f32).round() as usize;
+                                    app.selected = sel.min(total - 1);
+                                    app.normalize_selection();
+                                }
+                            }
+                        }
+                        // Click/drag the volume meter bars to set volume.
+                        if !consumed {
+                            if let Some(vr) = app.vol_rect {
+                                if m.row == vr.y && m.column >= vr.x && m.column < vr.x + vr.width && vr.width > 0 {
+                                    consumed = true;
+                                    let offset = (m.column - vr.x) as u32;
+                                    let vol = (((offset + 1) * 100) / vr.width as u32).min(100) as u8;
+                                    app.volume = vol;
+                                    let _ = app.engine.set_volume(vol_u16(app.volume));
+                                }
+                            }
+                        }
+                        // Otherwise an initial click on the progress bar seeks.
+                        if !consumed && is_down {
+                            if let Some(bar) = app.bar_rect {
+                                if m.row == bar.y && m.column >= bar.x && m.column < bar.x + bar.width && bar.width > 0 {
+                                    if let Some(dur) = app.now.as_ref().map(|n| n.duration_ms) {
+                                        let frac = (m.column - bar.x) as f32 / bar.width as f32;
+                                        app.seek_to((frac * dur as f32) as u32);
+                                    }
+                                }
+                            }
+                        }
+                        // View-tab click -> switch the right pane.
+                        if !consumed && is_down {
+                            let hit = app
+                                .tab_rects
+                                .iter()
+                                .find(|(_, r)| m.row == r.y && m.column >= r.x && m.column < r.x + r.width)
+                                .map(|(v, _)| *v);
+                            if let Some(v) = hit {
+                                app.view = v;
+                                consumed = true;
+                            }
+                        }
+                        // Library click -> select; double-click (same row <400ms) -> activate.
+                        if !consumed && is_down {
+                            if let Some(lr) = app.lib_rect {
+                                if m.column >= lr.x
+                                    && m.column < lr.x + lr.width
+                                    && m.row >= lr.y
+                                    && m.row < lr.y + lr.height
+                                {
+                                    let idx = app.lib_offset + (m.row - lr.y) as usize;
+                                    let selectable = app
+                                        .cur_items()
+                                        .get(idx)
+                                        .map(|it| !it.is_header)
+                                        .unwrap_or(false);
+                                    if selectable {
+                                        app.selected = idx;
+                                        let now = Instant::now();
+                                        let dbl = app
+                                            .last_click
+                                            .map(|(r0, t0)| r0 == m.row && now.duration_since(t0) < Duration::from_millis(400))
+                                            .unwrap_or(false);
+                                        if dbl {
+                                            app.last_click = None;
+                                            let quit = handle_key(
+                                                &mut app,
+                                                KeyCode::Enter,
+                                                KeyModifiers::empty(),
+                                                &lib_tx,
+                                                &queue_tx,
+                                                &search_tx,
+                                                &detail_tx,
+                                                &menu_tx,
+                                                &astatus_tx,
+                                                &radio_tx,
+                                                &libdone_tx,
+                                            );
+                                            if quit {
+                                                save_state(&app);
+                                                break;
+                                            }
+                                        } else {
+                                            app.last_click = Some((m.row, now));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -770,8 +914,13 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
                 }
             }
             menu = menu_rx.recv_async() => {
-                if let Ok(menu) = menu {
-                    if !menu.items.is_empty() {
+                if let Ok(mut menu) = menu {
+                    // Enrich only an already-open menu (don't reopen a closed one),
+                    // preserving the user's current selection across the swap.
+                    if app.actions.is_some() && !menu.items.is_empty() {
+                        if let Some(open) = app.actions.as_ref() {
+                            menu.selected = open.selected.min(menu.items.len() - 1);
+                        }
                         app.actions = Some(menu);
                     }
                 }
@@ -804,23 +953,6 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
                     spawn_queue_fetch(app.webapi.clone(), queue_tx.clone());
                 }
             }
-            rad = radio_rx.recv_async() => {
-                if let Ok(uris) = rad {
-                    if !uris.is_empty() {
-                        // Seed first, similar tracks queue up behind it.
-                        let _ = app.engine.play_tracks(uris, None, false);
-                        app.playback_started = true;
-                        app.status = "radio started".to_string();
-                        // Grab the freshly-populated station queue shortly after.
-                        let webapi = app.webapi.clone();
-                        let tx = queue_tx.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_millis(1500)).await;
-                            spawn_queue_fetch(webapi, tx);
-                        });
-                    }
-                }
-            }
         }
     }
     Ok(())
@@ -828,26 +960,33 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
 
 /// Resume the persisted playback source at the last track/position — the
 /// faithful reboot resume (real context ⇒ real queue continuation).
-fn resume_source(app: &mut App, radio_tx: &flume::Sender<Vec<String>>) {
+fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Vec<String>, String>>) {
     let track = app.now.as_ref().map(|n| n.uri.clone()).filter(|u| !u.is_empty());
     let pos = app.now.as_ref().map(|n| n.position_ms).unwrap_or(0);
     match app.source.clone() {
         PlaySource::Context(ctx) => {
-            let _ = app.engine.play_context_at(ctx, track, pos, app.shuffle);
+            if let Err(e) = app.engine.play_context_at(ctx, track, pos, app.shuffle) { app.status = format!("couldn't play: {e:#}"); }
         }
         PlaySource::Radio(seed) => {
             let session = app.engine.session();
             let tx = radio_tx.clone();
             app.status = "resuming radio…".to_string();
             tokio::spawn(async move {
-                if let Ok(uris) = engine::radio_tracks(&session, &seed).await {
-                    let _ = tx.send(uris);
-                }
+                let res = match tokio::time::timeout(
+                    Duration::from_secs(12),
+                    engine::radio_tracks(&session, &seed),
+                )
+                .await
+                {
+                    Ok(r) => r.map_err(|e| e.to_string()),
+                    Err(_) => Err("timed out (mercury radio endpoint unresponsive)".to_string()),
+                };
+                let _ = tx.send(res);
             });
         }
         PlaySource::Liked if !app.library.liked.is_empty() => {
             let uris: Vec<String> = app.library.liked.iter().map(|i| i.uri.clone()).collect();
-            let _ = app.engine.play_tracks(uris, track, app.shuffle);
+            if let Err(e) = app.engine.play_tracks(uris, track, app.shuffle) { app.status = format!("couldn't play: {e:#}"); }
         }
         _ => {
             // No known context — resume the last track followed by the saved
@@ -858,11 +997,11 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Vec<String>>) {
                     uris.push(u.clone());
                 }
                 uris.extend(app.queue_uris.iter().cloned());
-                let _ = app.engine.play_tracks(uris, track, app.shuffle);
+                if let Err(e) = app.engine.play_tracks(uris, track, app.shuffle) { app.status = format!("couldn't play: {e:#}"); }
             } else {
                 match track {
-                    Some(uri) => { let _ = app.engine.play_track_at(uri, pos); }
-                    None => { let _ = app.engine.play(); }
+                    Some(uri) => { if let Err(e) = app.engine.play_track_at(uri, pos) { app.status = format!("couldn't play: {e:#}"); } }
+                    None => { if let Err(e) = app.engine.play() { app.status = format!("couldn't play: {e:#}"); } }
                 }
             }
         }
@@ -881,10 +1020,21 @@ fn handle_key(
     detail_tx: &flume::Sender<(String, String, Vec<LibItem>)>,
     menu_tx: &flume::Sender<ActionMenu>,
     astatus_tx: &flume::Sender<String>,
-    radio_tx: &flume::Sender<Vec<String>>,
+    radio_tx: &flume::Sender<Result<Vec<String>, String>>,
     libdone_tx: &flume::Sender<bool>,
 ) -> bool {
     // --- Actions menu captures input while open ---
+    // Double-press Ctrl-C to quit (works from anywhere). Single press arms it.
+    if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
+        let now = Instant::now();
+        if app.last_ctrl_c.map(|t| now.duration_since(t) < Duration::from_millis(1500)).unwrap_or(false) {
+            return true;
+        }
+        app.last_ctrl_c = Some(now);
+        app.status = "press Ctrl-C again to quit".to_string();
+        return false;
+    }
+
     if app.actions.is_some() {
         handle_action_key(app, code, detail_tx, astatus_tx);
         return false;
@@ -923,9 +1073,8 @@ fn handle_key(
             } else if app.searching {
                 app.searching = false;
                 app.selected = 0;
-            } else {
-                return true;
             }
+            // Nothing to back out of — Esc no longer quits (use q or Ctrl-C twice).
         }
         KeyCode::Char(' ') | KeyCode::Char('p') => {
             if app.playback_started {
@@ -973,7 +1122,8 @@ fn handle_key(
             let item = app.cur_items().get(app.selected).cloned();
             if let Some(item) = item {
                 if !item.is_header && !item.is_play {
-                    app.status = "…".to_string();
+                    // Instant menu (no network), then enrich when the API returns.
+                    app.actions = Some(build_action_menu(None, &item));
                     spawn_action_menu(app.webapi.clone(), item, menu_tx.clone());
                 }
             }
@@ -1016,9 +1166,16 @@ fn handle_key(
                     let session = app.engine.session();
                     let tx = radio_tx.clone();
                     tokio::spawn(async move {
-                        if let Ok(uris) = engine::radio_tracks(&session, &uri).await {
-                            let _ = tx.send(uris);
-                        }
+                        let res = match tokio::time::timeout(
+                            Duration::from_secs(12),
+                            engine::radio_tracks(&session, &uri),
+                        )
+                        .await
+                        {
+                            Ok(r) => r.map_err(|e| e.to_string()),
+                            Err(_) => Err("timed out (mercury radio endpoint unresponsive)".to_string()),
+                        };
+                        let _ = tx.send(res);
                     });
                 }
                 Activated::None => {}
@@ -1083,7 +1240,7 @@ fn handle_action_key(
             }
         }
         ActionKind::Play { uri } => {
-            let _ = app.engine.play_context(uri, app.shuffle);
+            if let Err(e) = app.engine.play_context(uri, app.shuffle) { app.status = format!("couldn't play: {e:#}"); }
             app.actions = None;
         }
         ActionKind::Open { uri, name } => {
@@ -1139,25 +1296,28 @@ fn copy_to_clipboard(text: &str) -> bool {
 fn spawn_action_menu(webapi: Arc<Mutex<WebApi>>, item: LibItem, tx: flume::Sender<ActionMenu>) {
     tokio::task::spawn_blocking(move || {
         if let Some(token) = token_of(&webapi) {
-            let _ = tx.send(build_action_menu(&token, &item));
+            let _ = tx.send(build_action_menu(Some(&token), &item));
         }
     });
 }
 
 /// Build the context menu for `item`, checking saved/following state and
 /// resolving related artist/album links up front.
-fn build_action_menu(token: &str, item: &LibItem) -> ActionMenu {
+fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
     let mut parts = item.uri.split(':');
     parts.next();
     let kind = parts.next().unwrap_or("");
     let id = parts.next().unwrap_or("").to_string();
     let uri = item.uri.clone();
-    let client = reqwest::blocking::Client::new();
+    // Only build the blocking client for the enriched (Some token) path; the
+    // instant (None) path runs on the async loop where dropping reqwest's inner
+    // runtime would panic.
+    let client = token.map(|_| http_client());
     let mut items = Vec::new();
 
     match kind {
         "track" => {
-            let saved = api_contains(token, &format!("https://api.spotify.com/v1/me/tracks/contains?ids={id}"));
+            let saved = token.map(|t| api_contains(t, &format!("https://api.spotify.com/v1/me/tracks/contains?ids={id}"))).unwrap_or(false);
             items.push(ActionItem {
                 label: if saved { "♥  Remove from Liked".into() } else { "♡  Add to Liked".into() },
                 kind: ActionKind::ToggleLike { id: id.clone(), saved },
@@ -1165,7 +1325,7 @@ fn build_action_menu(token: &str, item: &LibItem) -> ActionMenu {
             items.push(ActionItem { label: "＋  Add to Queue".into(), kind: ActionKind::Queue { uri: uri.clone() } });
             items.push(ActionItem { label: "≡  Add to Playlist…".into(), kind: ActionKind::AddToPlaylistMenu { track_uri: uri.clone() } });
             // Resolve the track's artist + album for "Go to" navigation.
-            if let Some(v) = get_json(&client, &format!("https://api.spotify.com/v1/tracks/{id}"), token) {
+            if let Some(v) = client.as_ref().zip(token).and_then(|(c, t)| get_json(c, &format!("https://api.spotify.com/v1/tracks/{id}"), t)) {
                 if let (Some(au), Some(an)) = (v["artists"][0]["uri"].as_str(), v["artists"][0]["name"].as_str()) {
                     items.push(ActionItem { label: format!("→  Go to Artist ({an})"), kind: ActionKind::Open { uri: au.to_string(), name: an.to_string() } });
                 }
@@ -1176,24 +1336,24 @@ fn build_action_menu(token: &str, item: &LibItem) -> ActionMenu {
             items.push(ActionItem { label: "⧉  Copy Link".into(), kind: ActionKind::CopyLink { uri } });
         }
         "artist" => {
-            let following = api_contains(token, &format!("https://api.spotify.com/v1/me/following/contains?type=artist&ids={id}"));
+            let following = token.map(|t| api_contains(t, &format!("https://api.spotify.com/v1/me/following/contains?type=artist&ids={id}"))).unwrap_or(false);
             items.push(ActionItem {
                 label: if following { "Unfollow".into() } else { "Follow".into() },
                 kind: ActionKind::ToggleFollowArtist { id, following },
             });
-            items.push(ActionItem { label: "▶  Play".into(), kind: ActionKind::Play { uri: uri.clone() } });
+            items.push(ActionItem { label: "▶︎  Play".into(), kind: ActionKind::Play { uri: uri.clone() } });
             items.push(ActionItem { label: "→  Open".into(), kind: ActionKind::Open { uri: uri.clone(), name: item.name.clone() } });
             items.push(ActionItem { label: "⧉  Copy Link".into(), kind: ActionKind::CopyLink { uri } });
         }
         "album" => {
-            let saved = api_contains(token, &format!("https://api.spotify.com/v1/me/albums/contains?ids={id}"));
+            let saved = token.map(|t| api_contains(t, &format!("https://api.spotify.com/v1/me/albums/contains?ids={id}"))).unwrap_or(false);
             items.push(ActionItem {
                 label: if saved { "Remove from Library".into() } else { "Save Album".into() },
                 kind: ActionKind::ToggleSaveAlbum { id: id.clone(), saved },
             });
-            items.push(ActionItem { label: "▶  Play".into(), kind: ActionKind::Play { uri: uri.clone() } });
+            items.push(ActionItem { label: "▶︎  Play".into(), kind: ActionKind::Play { uri: uri.clone() } });
             items.push(ActionItem { label: "→  Open Album".into(), kind: ActionKind::Open { uri: uri.clone(), name: item.name.clone() } });
-            if let Some(v) = get_json(&client, &format!("https://api.spotify.com/v1/albums/{id}"), token) {
+            if let Some(v) = client.as_ref().zip(token).and_then(|(c, t)| get_json(c, &format!("https://api.spotify.com/v1/albums/{id}"), t)) {
                 if let (Some(au), Some(an)) = (v["artists"][0]["uri"].as_str(), v["artists"][0]["name"].as_str()) {
                     items.push(ActionItem { label: format!("→  Go to Artist ({an})"), kind: ActionKind::Open { uri: au.to_string(), name: an.to_string() } });
                 }
@@ -1202,7 +1362,7 @@ fn build_action_menu(token: &str, item: &LibItem) -> ActionMenu {
         }
         "playlist" => {
             items.push(ActionItem { label: "＋  Add to Your Library".into(), kind: ActionKind::FollowPlaylist { id } });
-            items.push(ActionItem { label: "▶  Play".into(), kind: ActionKind::Play { uri: uri.clone() } });
+            items.push(ActionItem { label: "▶︎  Play".into(), kind: ActionKind::Play { uri: uri.clone() } });
             items.push(ActionItem { label: "→  Open".into(), kind: ActionKind::Open { uri: uri.clone(), name: item.name.clone() } });
             items.push(ActionItem { label: "⧉  Copy Link".into(), kind: ActionKind::CopyLink { uri } });
         }
@@ -1222,7 +1382,7 @@ fn spawn_action(webapi: Arc<Mutex<WebApi>>, kind: ActionKind, tx: flume::Sender<
 }
 
 fn run_action(token: &str, kind: ActionKind) -> String {
-    let client = reqwest::blocking::Client::new();
+    let client = http_client();
     match kind {
         ActionKind::ToggleLike { id, saved } => {
             let m = if saved { "DELETE" } else { "PUT" };
@@ -1287,7 +1447,7 @@ fn api_modify(client: &reqwest::blocking::Client, token: &str, method: &str, url
 }
 
 fn api_contains(token: &str, url: &str) -> bool {
-    let client = reqwest::blocking::Client::new();
+    let client = http_client();
     get_json(&client, url, token)
         .and_then(|v| v.get(0).and_then(|b| b.as_bool()))
         .unwrap_or(false)
@@ -1403,12 +1563,25 @@ fn apply_meta(
 
 /// Temporary-but-useful diagnostics for startup/library failures. Kept out of
 /// the TUI because alternate-screen rendering hides stderr.
+/// Optional debug log — silent unless `MYX_LOG` is set. Writes to
+/// ~/.cache/myx/myx.log (user-owned dir 0700, file 0600) instead of a
+/// world-writable fixed /tmp path (audit H5).
 fn liblog(msg: impl AsRef<str>) {
     use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if std::env::var_os("MYX_LOG").is_none() {
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let dir = std::path::PathBuf::from(home).join(".cache/myx");
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/myx-library.log")
+        .mode(0o600)
+        .open(dir.join("myx.log"))
     {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1419,7 +1592,16 @@ fn liblog(msg: impl AsRef<str>) {
 }
 
 fn token_of(webapi: &Arc<Mutex<WebApi>>) -> Option<String> {
-    let token = webapi.lock().ok()?.cached_token();
+    // Refresh when the token is expiring so long sessions don't silently go
+    // read-only (audit H1). Only holds the lock across the network call in the
+    // rare refresh window; otherwise this is just a cheap clone.
+    let token = {
+        let mut w = webapi.lock().ok()?;
+        match w.valid_token() {
+            Ok(t) => t,
+            Err(_) => w.cached_token(),
+        }
+    };
     (!token.is_empty()).then_some(token)
 }
 
@@ -1482,7 +1664,7 @@ fn spawn_library_fetch(
         let artist_from = |a: &serde_json::Value| -> Option<LibItem> {
             Some(LibItem::ctx(
                 a["name"].as_str()?.to_string(),
-                "artist".into(),
+                String::new(),
                 a["uri"].as_str()?.to_string(),
             ))
         };
@@ -1546,8 +1728,8 @@ fn spawn_library_fetch(
         // Liked can be huge — stream it in as pages arrive so the count climbs live.
         // Prepend Shuffle/Play action rows (shuffle first).
         let mut liked: Vec<LibItem> = vec![
-            LibItem::play("🔀  Shuffle Liked Songs".into(), "myx:action:liked-shuffle".into()),
-            LibItem::play("▶  Play Liked Songs".into(), "myx:action:liked-play".into()),
+            LibItem::play("▶︎  Play Liked Songs".into(), "myx:action:liked-play".into()),
+            LibItem::header("Songs"),
         ];
         let mut url = Some("https://api.spotify.com/v1/me/tracks?limit=50".to_string());
         let mut pages = 0;
@@ -1619,7 +1801,7 @@ fn spawn_queue_fetch(webapi: Arc<Mutex<WebApi>>, tx: flume::Sender<Vec<(String, 
 
 /// Returns (display, uri) for each queued item.
 fn fetch_queue_blocking(token: &str) -> Vec<(String, String)> {
-    let client = reqwest::blocking::Client::new();
+    let client = http_client();
     let Some(v) = get_json(&client, "https://api.spotify.com/v1/me/player/queue", token) else {
         return Vec::new();
     };
@@ -1650,7 +1832,7 @@ fn fetch_track_meta(webapi: &Arc<Mutex<WebApi>>, track_id: &str) -> TrackMeta {
         theme: None,
     };
     let Some(token) = token_of(webapi) else { return empty() };
-    let client = reqwest::blocking::Client::new();
+    let client = http_client();
     let Some(v) = get_json(&client, &format!("https://api.spotify.com/v1/tracks/{track_id}"), &token)
     else {
         return empty();
@@ -1684,7 +1866,7 @@ fn spawn_search(webapi: Arc<Mutex<WebApi>>, query: String, tx: flume::Sender<Vec
 }
 
 fn search_blocking(token: &str, query: &str) -> Vec<LibItem> {
-    let client = reqwest::blocking::Client::new();
+    let client = http_client();
     let url = format!(
         "https://api.spotify.com/v1/search?q={}&type=track,artist,album,playlist&limit=6",
         urlencode(query)
@@ -1755,7 +1937,7 @@ fn search_blocking(token: &str, query: &str) -> Vec<LibItem> {
 // --- Lyrics (lrclib) ---
 
 fn fetch_lyrics_blocking(artist: &str, title: &str, album: &str, duration_ms: u32) -> (Vec<(u32, String)>, bool) {
-    let client = reqwest::blocking::Client::new();
+    let client = http_client();
     let url = format!(
         "https://lrclib.net/api/get?artist_name={}&track_name={}&album_name={}&duration={}",
         urlencode(artist),
@@ -1850,14 +2032,14 @@ fn spawn_detail_fetch(
 }
 
 fn fetch_detail_blocking(token: &str, uri: &str, name: &str) -> (String, Vec<LibItem>) {
-    let client = reqwest::blocking::Client::new();
+    let client = http_client();
     let mut parts = uri.split(':');
     parts.next(); // "spotify"
     let kind = parts.next().unwrap_or("");
     let id = parts.next().unwrap_or("");
 
     // "Play all" row first.
-    let mut items = vec![LibItem::play(format!("▶ Play {name}"), uri.to_string())];
+    let mut items = vec![LibItem::play(format!("▶︎ Play {name}"), uri.to_string())];
 
     match kind {
         "artist" => {
@@ -1963,7 +2145,7 @@ struct PlaybackState {
 }
 
 fn fetch_playback_state(token: &str) -> Option<PlaybackState> {
-    let client = reqwest::blocking::Client::new();
+    let client = http_client();
     let resp = client
         .get("https://api.spotify.com/v1/me/player")
         .bearer_auth(token)
@@ -1986,7 +2168,7 @@ fn fetch_playback_state(token: &str) -> Option<PlaybackState> {
 /// Transfer the current server-side playback onto the myx device (with its full
 /// context + queue + position). `play=false` transfers paused.
 fn transfer_playback(token: &str, device_id: &str, play: bool) -> bool {
-    let client = reqwest::blocking::Client::new();
+    let client = http_client();
     client
         .put("https://api.spotify.com/v1/me/player")
         .bearer_auth(token)
@@ -2046,7 +2228,15 @@ fn render(f: &mut Frame, app: &mut App) {
     .split(area);
 
     // Header: wordmark + view tabs (right-aligned) + status.
-    let mut header = gradient_line("myx", &[theme.primary, theme.accent]);
+    // Fullwidth wordmark (each letter = 2 cells) reads as a bigger "myx"
+    // than the terminal font allows on a single row; bolded for weight.
+    let mut header: Vec<Span> = gradient_line("\u{FF2D}\u{FF39}\u{FF38}", &[theme.primary, theme.accent])
+        .into_iter()
+        .map(|mut sp| {
+            sp.style = sp.style.add_modifier(Modifier::BOLD);
+            sp
+        })
+        .collect();
     if !app.status.is_empty() {
         header.push(Span::styled(format!("   {}", app.status), theme.muted()));
     }
@@ -2055,6 +2245,21 @@ fn render(f: &mut Frame, app: &mut App) {
         Paragraph::new(Line::from(view_tabs(app, theme))).alignment(Alignment::Right),
         rows[0],
     );
+    // Per-tab hit rects for the mouse (mirrors view_tabs: "\u2190\u2192 " prefix + labels joined by " \u00b7 ").
+    let mut total: usize = 3; // "\u2190\u2192 "
+    for (i, v) in RightView::ALL.iter().enumerate() {
+        if i > 0 { total += 3; } // " \u00b7 "
+        total += v.label().chars().count();
+    }
+    let mut tx_x = rows[0].right().saturating_sub(total as u16).saturating_add(3);
+    let mut tabs = Vec::with_capacity(RightView::ALL.len());
+    for (i, v) in RightView::ALL.iter().enumerate() {
+        if i > 0 { tx_x = tx_x.saturating_add(3); }
+        let w = v.label().chars().count() as u16;
+        tabs.push((*v, Rect { x: tx_x, y: rows[0].y, width: w, height: 1 }));
+        tx_x = tx_x.saturating_add(w);
+    }
+    app.tab_rects = tabs;
 
     let body = Layout::horizontal([Constraint::Percentage(30), Constraint::Min(24)])
         .spacing(3)
@@ -2092,9 +2297,9 @@ fn view_tabs<'a>(app: &App, theme: Theme) -> Vec<Span<'a>> {
     spans
 }
 
-fn render_library(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
+fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     f.render_widget(Block::default().style(theme.panel()), area);
-    let inner = area.inner(Margin::new(1, 0));
+    let inner = area.inner(Margin::new(2, 1));
     if inner.height < 2 {
         return;
     }
@@ -2142,9 +2347,11 @@ fn render_library(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         return;
     }
     let cap = (inner.bottom() - list_top) as usize;
-    let items = app.cur_items();
+    let total_items = app.cur_items().len();
 
-    if items.is_empty() {
+    if total_items == 0 {
+        app.scroll_rect = None;
+        app.lib_rect = None;
         f.render_widget(
             Paragraph::new(Line::from(Span::styled("(empty)", theme.muted())))
                 .block(Block::default().style(theme.panel())),
@@ -2154,8 +2361,13 @@ fn render_library(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     }
 
     let offset = if app.selected >= cap { app.selected + 1 - cap } else { 0 };
-    let max = inner.width.saturating_sub(2) as usize;
+    app.lib_rect = Some(Rect { x: inner.x, y: list_top, width: inner.width, height: cap as u16 });
+    app.lib_offset = offset;
+    let overflow = total_items > cap && inner.width > 2;
+    // Reserve an extra gutter column for the scrollbar (+1 char of padding).
+    let max = inner.width.saturating_sub(if overflow { 3 } else { 2 }) as usize;
 
+    let items = app.cur_items();
     for (row, item) in items.iter().skip(offset).take(cap).enumerate() {
         let idx = offset + row;
         let y = list_top + row as u16;
@@ -2186,15 +2398,49 @@ fn render_library(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         let mut spans = vec![Span::styled(format!(" {label}"), style)];
         if !item.subtitle.is_empty() {
             let used = label.chars().count() + 1;
-            let room = max.saturating_sub(used + 2);
+            let room = max.saturating_sub(used + 3);
             if room > 3 {
+                spans.push(Span::styled(" · ", Style::default().fg(theme.border_dimmest.into())));
                 spans.push(Span::styled(
-                    format!("  {}", truncate(&item.subtitle, room)),
-                    theme.muted(),
+                    truncate(&item.subtitle, room),
+                    theme.muted().add_modifier(Modifier::DIM),
                 ));
             }
         }
         f.render_widget(Paragraph::new(Line::from(spans)).block(block), rect);
+    }
+
+    // Subtle scrollbar: a hairline 1/8 track with a slightly denser 1/4 thumb,
+    // in the right gutter. Shown only on overflow; the track rect is stashed on
+    // `app` so mouse drags can scroll it.
+    if overflow {
+        let total = total_items;
+        let sb_x = inner.right();
+        let track_h = cap;
+        let thumb_h = ((cap * cap + total - 1) / total).max(1).min(track_h);
+        let travel = track_h - thumb_h;
+        let max_off = total - cap;
+        let thumb_y0 = if max_off == 0 { 0 } else { (offset * travel + max_off / 2) / max_off };
+        for i in 0..track_h {
+            let y = list_top + i as u16;
+            if y >= inner.bottom() {
+                break;
+            }
+            let in_thumb = i >= thumb_y0 && i < thumb_y0 + thumb_h;
+            let (glyph, color) = if in_thumb {
+                ("\u{258E}", theme.text_muted)   // 1/4 block - thumb
+            } else {
+                ("\u{258F}", theme.border_dimmest) // 1/8 block - track
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(glyph, Style::default().fg(color.into()))),
+                Rect { x: sb_x, y, width: 1, height: 1 },
+            );
+        }
+        app.scroll_rect = Some(Rect { x: sb_x, y: list_top, width: 1, height: track_h as u16 });
+        app.scroll_len = total;
+    } else {
+        app.scroll_rect = None;
     }
 }
 
@@ -2292,33 +2538,21 @@ fn center_v(area: Rect, height: u16) -> Rect {
 fn render_now_strip(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
 
-    // Record the bar geometry (after the "m:ss " label) for click-to-seek.
+    // Volume meter (top row, far right).
+    render_volume(f, app, theme, rows[0]);
+
+    // Seek/progress bar (bottom row). Record bar geometry for click-to-seek.
     let pos = app.position_ms();
     let left_len = format!("{} ", fmt_ms(pos)).chars().count() as u16;
     let right_len = format!(" {}", fmt_ms(app.now.as_ref().map(|n| n.duration_ms).unwrap_or(0))).chars().count() as u16;
     let bar_w = rows[1].width.saturating_sub(left_len + right_len);
     app.bar_rect = Some(Rect { x: rows[1].x + left_len, y: rows[1].y, width: bar_w, height: 1 });
+    render_progress(f, app, theme, rows[1]);
+}
 
-    // Track line (left) + volume meter (far right).
-    let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(13)]).split(rows[0]);
-
-    let track_line = match &app.now {
-        Some(n) => {
-            let (glyph, gc) = if n.is_playing { ("▶ ", theme.success) } else { ("⏸ ", theme.warning) };
-            Line::from(vec![
-                Span::styled(glyph, Style::default().fg(gc.into())),
-                Span::styled(
-                    n.title.clone(),
-                    Style::default().fg(theme.text.into()).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("  {}", n.artist), theme.muted()),
-            ])
-        }
-        None => Line::from(Span::styled("— nothing playing —", theme.muted())),
-    };
-    f.render_widget(Paragraph::new(track_line), cols[0]);
-
-    // Volume meter: a graduated ramp (small → tall) + percentage, right-aligned.
+/// The volume meter — a graduated ramp + percentage, right-aligned in `area`.
+/// Stashes the 8-bar region on `app` for click/drag control.
+fn render_volume(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     const VLEV: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let filled = (app.volume as usize * VLEV.len() + 50) / 100;
     let mut vspans: Vec<Span> = Vec::with_capacity(VLEV.len() + 1);
@@ -2327,9 +2561,15 @@ fn render_now_strip(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
         vspans.push(Span::styled(ch.to_string(), Style::default().fg(color.into())));
     }
     vspans.push(Span::styled(format!(" {:>3}%", app.volume), theme.muted()));
-    f.render_widget(Paragraph::new(Line::from(vspans)).alignment(Alignment::Right), cols[1]);
-
-    render_progress(f, app, theme, rows[1]);
+    f.render_widget(Paragraph::new(Line::from(vspans)).alignment(Alignment::Right), area);
+    // 8-bar region for click/drag. Content is 13 cells (8 bars + " NNN%"),
+    // right-aligned, so the bars start 13 cells in from the right edge.
+    app.vol_rect = Some(Rect {
+        x: area.right().saturating_sub(13),
+        y: area.y,
+        width: VLEV.len() as u16,
+        height: 1,
+    });
 }
 
 /// Convert a 0..=100 percentage to librespot's 0..=65535 volume range.
@@ -2342,40 +2582,70 @@ fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     if inner.height == 0 {
         return;
     }
+    let max = inner.width as usize;
+
+    // Header: current track title + "artist · album", above the lyrics.
+    let mut lyrics_area = inner;
+    if let Some(n) = app.now.as_ref() {
+        let head = Layout::vertical([
+            Constraint::Length(1), // title
+            Constraint::Length(1), // artist / album
+            Constraint::Length(1), // spacer
+            Constraint::Min(1),    // lyrics
+        ])
+        .split(inner);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                truncate(&n.title, max),
+                Style::default().fg(theme.text.into()).add_modifier(Modifier::BOLD),
+            )))
+            .alignment(Alignment::Center),
+            head[0],
+        );
+        let sub = if n.album.is_empty() {
+            n.artist.clone()
+        } else {
+            format!("{} · {}", n.artist, n.album)
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(truncate(&sub, max), theme.muted())))
+                .alignment(Alignment::Center),
+            head[1],
+        );
+        lyrics_area = head[3];
+    }
+
     if app.lyrics.is_empty() {
-        let msg = if app.now.is_some() { "♪  no lyrics for this track" } else { "♪  nothing playing" };
+        let msg = if app.now.is_some() { "♪︎  no lyrics for this track" } else { "♪︎  nothing playing" };
         f.render_widget(
             Paragraph::new(msg).style(theme.muted()).alignment(Alignment::Center),
-            center_v(inner, 1),
+            center_v(lyrics_area, 1),
         );
         return;
     }
 
-    let h = inner.height as usize;
+    let h = lyrics_area.height as usize;
     let pos = app.position_ms();
     let cur = if app.lyrics_synced {
         app.lyrics.iter().rposition(|(t, _)| *t <= pos).unwrap_or(0)
     } else {
         0
     };
-    // Center the current line within the pane.
     let start = cur.saturating_sub(h / 2);
-    let max = inner.width as usize;
 
     let mut lines: Vec<Line> = Vec::with_capacity(h);
     for (i, (_, text)) in app.lyrics.iter().enumerate().skip(start).take(h) {
         let style = if app.lyrics_synced && i == cur {
             Style::default().fg(theme.primary.into()).add_modifier(Modifier::BOLD)
         } else if app.lyrics_synced && i < cur {
-            // Already-sung lines fade more than upcoming ones.
             Style::default().fg(theme.border_subtle.into())
         } else {
             theme.muted()
         };
-        let txt = if text.is_empty() { "♪".to_string() } else { truncate(text, max) };
+        let txt = if text.is_empty() { "♪︎".to_string() } else { truncate(text, max) };
         lines.push(Line::from(Span::styled(txt, style)));
     }
-    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), lyrics_area);
 }
 
 fn render_visualizer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
@@ -2494,7 +2764,7 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         key("a"), lbl(" actions   "),
         key("q"), lbl(" quit"),
     ]);
-    f.render_widget(Paragraph::new(line), area);
+    f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
 
 /// Context actions menu — a centered overlay list.
@@ -2550,6 +2820,20 @@ fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         lines.push(Line::raw(""));
     }
 
+    // Now playing — the current track, above the up-next list.
+    if let Some(n) = app.now.as_ref() {
+        lines.push(Line::from(Span::styled("NOW PLAYING", theme.heading())));
+        lines.push(Line::from(vec![
+            Span::styled("   ", theme.muted()),
+            Span::styled(
+                truncate(&n.title, max.saturating_sub(3)),
+                Style::default().fg(theme.text.into()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {}", n.artist), theme.muted()),
+        ]));
+        lines.push(Line::raw(""));
+    }
+
     lines.push(Line::from(Span::styled("UP NEXT", theme.heading())));
     lines.push(Line::raw(""));
 
@@ -2580,6 +2864,15 @@ fn fmt_ms(ms: u32) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+/// A blocking HTTP client with a timeout so a stalled network can't wedge a
+/// worker thread forever (audit H2).
+fn http_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_default()
+}
+
 // ------------------------------------------------------------------ terminal
 
 /// Hold an exclusive lock so only one myx runs at a time. Returns the lock file
@@ -2607,6 +2900,17 @@ fn acquire_single_instance_lock() -> std::fs::File {
 }
 
 fn init_terminal() -> Result<Term> {
+    // Restore the terminal on panic so a crash doesn't strand the user in a
+    // raw-mode / alt-screen shell (audit H6). Runs before the default hook (and
+    // before the abort under panic=abort).
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let mut out = io::stdout();
+        let _ = execute!(out, crossterm::event::DisableMouseCapture, LeaveAlternateScreen, crossterm::cursor::Show);
+        let _ = disable_raw_mode();
+        default_hook(info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;

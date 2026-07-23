@@ -95,10 +95,11 @@ impl WebApi {
         let client_id = resolve_client_id()?;
 
         if let Some(mut w) = Self::from_cache(&client_id) {
-            if w.is_expiring() {
-                let _ = w.refresh();
-            }
-            if !w.access_token.is_empty() {
+            // Only trust a cached token that's either fresh or successfully
+            // refreshed; a stale token whose refresh fails falls through to a
+            // clean interactive re-auth instead of poisoning the whole session.
+            let usable = if w.is_expiring() { w.refresh().is_ok() } else { true };
+            if usable && !w.access_token.is_empty() {
                 return Ok(w);
             }
         }
@@ -178,9 +179,11 @@ impl WebApi {
     }
 
     fn save(&self) {
+        use std::os::unix::fs::PermissionsExt;
         let Some(path) = Self::cache_path() else { return };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
         }
         let c = Cached {
             client_id: self.client_id.clone(),
@@ -190,7 +193,13 @@ impl WebApi {
             scopes: scopes_tag(),
         };
         if let Ok(json) = serde_json::to_string(&c) {
-            let _ = std::fs::write(path, json);
+            // Write atomically, then tighten to 0600 so the refresh token is not
+            // world-readable (audit H4).
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+                let _ = std::fs::rename(&tmp, &path);
+            }
         }
     }
 }
@@ -294,7 +303,10 @@ fn post_token_form(params: &[(&str, &str)]) -> Result<serde_json::Value> {
         .map(|(k, v)| format!("{k}={}", urlencode(v)))
         .collect::<Vec<_>>()
         .join("&");
-    let json = reqwest::blocking::Client::new()
+    let json = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default()
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
