@@ -1386,64 +1386,73 @@ fn run_action(token: &str, kind: ActionKind) -> String {
     match kind {
         ActionKind::ToggleLike { id, saved } => {
             let m = if saved { "DELETE" } else { "PUT" };
-            if api_modify(&client, token, m, &format!("https://api.spotify.com/v1/me/tracks?ids={id}")) {
-                if saved { "removed from Liked".into() } else { "added to Liked ♥".into() }
-            } else {
-                "action failed".into()
+            match api_modify(&client, token, m, &format!("https://api.spotify.com/v1/me/tracks?ids={id}")) {
+                Ok(()) => if saved { "removed from Liked".into() } else { "added to Liked ♥ (press r to refresh)".into() },
+                Err(e) => format!("like failed: {e}"),
             }
         }
         ActionKind::Queue { uri } => {
-            if api_modify(&client, token, "POST", &format!("https://api.spotify.com/v1/me/player/queue?uri={}", urlencode(&uri))) {
-                "added to queue".into()
-            } else {
-                "queue failed (needs active playback)".into()
+            match api_modify(&client, token, "POST", &format!("https://api.spotify.com/v1/me/player/queue?uri={}", urlencode(&uri))) {
+                Ok(()) => "added to queue".into(),
+                Err(e) => format!("queue failed: {e} (start playback first)"),
             }
         }
         ActionKind::AddToPlaylist { playlist_id, track_uri } => {
-            if api_modify(&client, token, "POST", &format!("https://api.spotify.com/v1/playlists/{playlist_id}/tracks?uris={}", urlencode(&track_uri))) {
-                "added to playlist".into()
-            } else {
-                "add failed".into()
+            match api_modify(&client, token, "POST", &format!("https://api.spotify.com/v1/playlists/{playlist_id}/tracks?uris={}", urlencode(&track_uri))) {
+                Ok(()) => "added to playlist".into(),
+                Err(e) => format!("add failed: {e}"),
             }
         }
         ActionKind::ToggleFollowArtist { id, following } => {
             let m = if following { "DELETE" } else { "PUT" };
-            if api_modify(&client, token, m, &format!("https://api.spotify.com/v1/me/following?type=artist&ids={id}")) {
-                if following { "unfollowed".into() } else { "following".into() }
-            } else {
-                "action failed".into()
+            match api_modify(&client, token, m, &format!("https://api.spotify.com/v1/me/following?type=artist&ids={id}")) {
+                Ok(()) => if following { "unfollowed".into() } else { "following".into() },
+                Err(e) => format!("follow failed: {e}"),
             }
         }
         ActionKind::ToggleSaveAlbum { id, saved } => {
             let m = if saved { "DELETE" } else { "PUT" };
-            if api_modify(&client, token, m, &format!("https://api.spotify.com/v1/me/albums?ids={id}")) {
-                if saved { "removed album".into() } else { "saved album".into() }
-            } else {
-                "action failed".into()
+            match api_modify(&client, token, m, &format!("https://api.spotify.com/v1/me/albums?ids={id}")) {
+                Ok(()) => if saved { "removed album".into() } else { "saved album".into() },
+                Err(e) => format!("album action failed: {e}"),
             }
         }
         ActionKind::FollowPlaylist { id } => {
-            if api_modify(&client, token, "PUT", &format!("https://api.spotify.com/v1/playlists/{id}/followers")) {
-                "added to library".into()
-            } else {
-                "action failed".into()
+            match api_modify(&client, token, "PUT", &format!("https://api.spotify.com/v1/playlists/{id}/followers")) {
+                Ok(()) => "added to library".into(),
+                Err(e) => format!("add failed: {e}"),
             }
         }
         _ => String::new(),
     }
 }
 
-fn api_modify(client: &reqwest::blocking::Client, token: &str, method: &str, url: &str) -> bool {
-    let req = match method {
-        "PUT" => client.put(url),
-        "DELETE" => client.delete(url),
-        _ => client.post(url),
-    };
-    req.bearer_auth(token)
-        .header("Content-Length", "0")
-        .send()
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+/// Returns Ok on 2xx, else a short reason (HTTP status / network) so the UI can
+/// say WHY instead of a generic "action failed". Retries once on 429.
+fn api_modify(client: &reqwest::blocking::Client, token: &str, method: &str, url: &str) -> Result<(), String> {
+    for attempt in 0..2 {
+        let req = match method {
+            "PUT" => client.put(url),
+            "DELETE" => client.delete(url),
+            _ => client.post(url),
+        };
+        match req.bearer_auth(token).header("Content-Length", "0").send() {
+            Ok(r) if r.status().is_success() => return Ok(()),
+            Ok(r) if r.status().as_u16() == 429 && attempt == 0 => {
+                let wait = r
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(1)
+                    .min(5);
+                std::thread::sleep(Duration::from_secs(wait));
+            }
+            Ok(r) => return Err(format!("HTTP {}", r.status().as_u16())),
+            Err(e) => return Err(if e.is_timeout() { "timeout".into() } else { "network error".into() }),
+        }
+    }
+    Err("rate limited".into())
 }
 
 fn api_contains(token: &str, url: &str) -> bool {
