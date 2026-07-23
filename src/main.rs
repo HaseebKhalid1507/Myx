@@ -75,11 +75,11 @@ enum Section {
 impl Section {
     const ALL: [Section; 6] = [
         Section::Home,
-        Section::Recent,
-        Section::Playlists,
         Section::Liked,
+        Section::Playlists,
         Section::Albums,
         Section::Artists,
+        Section::Recent,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -390,6 +390,19 @@ impl App {
             return Activated::None;
         }
         if item.is_play {
+            // Special synthetic rows: play the Liked list (optionally shuffled).
+            if item.uri == "myx:action:liked-shuffle" || item.uri == "myx:action:liked-play" {
+                let shuffle = item.uri.ends_with("shuffle");
+                let uris: Vec<String> = self.library.liked.iter().filter(|i| i.is_track).map(|i| i.uri.clone()).collect();
+                if !uris.is_empty() {
+                    self.shuffle = shuffle;
+                    self.source = PlaySource::Liked;
+                    self.source_name = "Liked Songs".to_string();
+                    self.status = "starting Liked Songs…".to_string();
+                    let _ = self.engine.play_tracks(uris, None, shuffle);
+                }
+                return Activated::None;
+            }
             self.status = format!("starting {}…", item.name);
             self.source = PlaySource::Context(item.uri.clone());
             self.source_name = self.details.last().map(|d| d.title.clone()).unwrap_or_default();
@@ -1331,7 +1344,11 @@ fn spawn_library_fetch(webapi: Arc<Mutex<WebApi>>, tx: flume::Sender<(Section, V
         let _ = tx.send((Section::Artists, fetch_all_pages(&client, "https://api.spotify.com/v1/me/following?type=artist&limit=50", &token, Some("artists"), 5, |it| artist_from(it))));
 
         // Liked can be huge — stream it in as pages arrive so the count climbs live.
-        let mut liked: Vec<LibItem> = Vec::new();
+        // Prepend Shuffle/Play action rows (shuffle first).
+        let mut liked: Vec<LibItem> = vec![
+            LibItem::play("🔀  Shuffle Liked Songs".into(), "myx:action:liked-shuffle".into()),
+            LibItem::play("▶  Play Liked Songs".into(), "myx:action:liked-play".into()),
+        ];
         let mut url = Some("https://api.spotify.com/v1/me/tracks?limit=50".to_string());
         let mut pages = 0;
         while let Some(u) = url.take() {
