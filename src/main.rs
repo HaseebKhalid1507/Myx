@@ -112,20 +112,57 @@ struct LibItem {
     is_track: bool,
     is_header: bool,
     is_play: bool,
+    order: u32, // original fetch position (for the "Added" sort)
 }
 
 impl LibItem {
     fn track(name: String, subtitle: String, uri: String) -> Self {
-        Self { name, subtitle, uri, is_track: true, is_header: false, is_play: false }
+        Self { name, subtitle, uri, is_track: true, is_header: false, is_play: false, order: 0 }
     }
     fn ctx(name: String, subtitle: String, uri: String) -> Self {
-        Self { name, subtitle, uri, is_track: false, is_header: false, is_play: false }
+        Self { name, subtitle, uri, is_track: false, is_header: false, is_play: false, order: 0 }
     }
     fn play(name: String, uri: String) -> Self {
-        Self { name, subtitle: String::new(), uri, is_track: false, is_header: false, is_play: true }
+        Self { name, subtitle: String::new(), uri, is_track: false, is_header: false, is_play: true, order: 0 }
     }
     fn header(name: &str) -> Self {
-        Self { name: name.to_string(), subtitle: String::new(), uri: String::new(), is_track: false, is_header: true, is_play: false }
+        Self { name: name.to_string(), subtitle: String::new(), uri: String::new(), is_track: false, is_header: true, is_play: false, order: 0 }
+    }
+}
+
+/// Sort order for browsable lists.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortMode {
+    Added,
+    Title,
+    Artist,
+}
+
+impl SortMode {
+    fn label(self) -> &'static str {
+        match self {
+            SortMode::Added => "added",
+            SortMode::Title => "title",
+            SortMode::Artist => "artist",
+        }
+    }
+    fn next(self) -> SortMode {
+        match self {
+            SortMode::Added => SortMode::Title,
+            SortMode::Title => SortMode::Artist,
+            SortMode::Artist => SortMode::Added,
+        }
+    }
+}
+
+/// Sort a list in place, keeping leading header/play rows pinned at the top.
+fn sort_list(items: &mut [LibItem], mode: SortMode) {
+    let pin = items.iter().take_while(|i| i.is_header || i.is_play).count();
+    let tail = &mut items[pin..];
+    match mode {
+        SortMode::Added => tail.sort_by_key(|i| i.order),
+        SortMode::Title => tail.sort_by_key(|i| i.name.to_lowercase()),
+        SortMode::Artist => tail.sort_by_key(|i| i.subtitle.to_lowercase()),
     }
 }
 
@@ -189,6 +226,16 @@ impl Library {
             Section::Liked => &self.liked,
             Section::Albums => &self.albums,
             Section::Artists => &self.artists,
+        }
+    }
+    fn items_mut(&mut self, s: Section) -> &mut Vec<LibItem> {
+        match s {
+            Section::Home => &mut self.home,
+            Section::Recent => &mut self.recent,
+            Section::Playlists => &mut self.playlists,
+            Section::Liked => &mut self.liked,
+            Section::Albums => &mut self.albums,
+            Section::Artists => &mut self.artists,
         }
     }
     fn is_empty(&self) -> bool {
@@ -326,6 +373,7 @@ struct App {
     // What's playing (context/radio/liked), for faithful resume on reboot.
     source: PlaySource,
     source_name: String,
+    sort: SortMode,
 }
 
 impl App {
@@ -340,6 +388,15 @@ impl App {
             &self.search_results
         } else {
             self.library.items(self.section)
+        }
+    }
+    fn cur_list_mut(&mut self) -> &mut Vec<LibItem> {
+        if let Some(d) = self.details.last_mut() {
+            &mut d.items
+        } else if self.searching {
+            &mut self.search_results
+        } else {
+            self.library.items_mut(self.section)
         }
     }
     fn position_ms(&self) -> u32 {
@@ -520,6 +577,7 @@ async fn main() -> Result<()> {
         reclaimed: false,
         source: saved.source.clone(),
         source_name: saved.source_name.clone(),
+        sort: SortMode::Added,
     };
 
     let res = run_ui(&mut terminal, app, ev_rx).await;
@@ -600,8 +658,12 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
                 if let Ok(meta) = m { apply_meta(&mut app, meta, &lyrics_tx); }
             }
             lib = lib_rx.recv_async() => {
-                if let Ok((section, items)) = lib {
+                if let Ok((section, mut items)) = lib {
+                    for (i, it) in items.iter_mut().enumerate() {
+                        it.order = i as u32;
+                    }
                     app.library.set(section, items);
+                    sort_list(app.library.items_mut(section), app.sort);
                     if section == app.section {
                         app.normalize_selection();
                     }
@@ -823,6 +885,13 @@ fn handle_key(
         KeyCode::Char('r') => {
             app.status = "loading library…".to_string();
             spawn_library_fetch(app.webapi.clone(), lib_tx.clone());
+        }
+        KeyCode::Char('o') => {
+            app.sort = app.sort.next();
+            let m = app.sort;
+            sort_list(app.cur_list_mut(), m);
+            app.selected = app.first_selectable();
+            app.status = format!("sorted by {}", m.label());
         }
         KeyCode::Char('a') => {
             let item = app.cur_items().get(app.selected).cloned();
@@ -1912,7 +1981,7 @@ fn render_library(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
             Span::styled("  (Esc)", theme.muted()),
         ])
     } else {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled("‹ ", theme.muted()),
             Span::styled(app.section.label(), theme.heading()),
             Span::styled(" ›", theme.muted()),
@@ -1920,7 +1989,11 @@ fn render_library(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
                 format!("  {}/{} · {}", app.section.index() + 1, Section::ALL.len(), app.cur_items().len()),
                 theme.muted(),
             ),
-        ])
+        ];
+        if app.sort != SortMode::Added {
+            spans.push(Span::styled(format!("  ⇅{}", app.sort.label()), Style::default().fg(theme.accent.into())));
+        }
+        Line::from(spans)
     };
     f.render_widget(
         Paragraph::new(head).block(Block::default().style(theme.panel())),
@@ -2269,6 +2342,7 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         key("⏎"), lbl(" play   "),
         key("␣"), lbl(" pause   "),
         key("n/b"), lbl(" skip   "),
+        key("o"), lbl(" sort   "),
         key("+/-"), lbl(" vol   "),
         Span::styled("s", Style::default().fg(on(app.shuffle).into())),
         lbl(" shuffle   "),
