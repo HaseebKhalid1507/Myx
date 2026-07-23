@@ -1,0 +1,22 @@
+myx — Third-party attribution
+=============================
+
+myx is an independent project, but it reuses and adapts some MIT-licensed code,
+and its interface is inspired by other open-source work. Credit where due:
+
+spotify-player  (https://github.com/aome510/spotify-player)
+    Copyright (c) 2021 Thang Pham — MIT License
+    The following files are adapted from that project:
+      * src/audio/visualizer.rs   — the real-time FFT visualization sink
+      * src/engine/auth.rs        — the OAuth 2.0 PKCE flow
+    Additionally, the librespot streaming/Spirc wiring, the mercury-based radio
+    lookup, and the "reclaim playback via device transfer" approach were learned
+    by studying spotify-player's source.
+
+noodle  (https://github.com/wilfredinni/noodle)
+    The visual design language (layered backgrounds, left-bar focus, semantic
+    theme tokens, gradient badges) is a ratatui reinterpretation of noodle's
+    OpenTUI aesthetic. No code is shared; the theme palettes were ported as data.
+
+librespot  (https://github.com/librespot-org/librespot)
+    The Spotify Connect streaming engine myx is built on. MIT License.

@@ -1,0 +1,12 @@
+/target
+
+# local runtime caches (auth tokens, saved state)
+.cache/
+
+# copyrighted demo cover art (fetched at runtime, not shipped)
+assets/*.jpg
+assets/*.png
+
+# editor / os cruft
+**/*.rs.bk
+.DS_Store
