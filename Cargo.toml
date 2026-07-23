@@ -1,11 +1,12 @@
 [package]
 name = "myx"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A lean, beautiful terminal Spotify player"
 authors = ["Haseeb Khalid"]
 license = "MIT"
 repository = "https://github.com/HaseebKhalid1507/Myx"
+homepage = "https://github.com/HaseebKhalid1507/Myx"
 readme = "README.md"
 keywords = ["spotify", "tui", "music", "player", "ratatui"]
 categories = ["command-line-utilities", "multimedia::audio"]

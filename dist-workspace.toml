@@ -17,6 +17,10 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
+# Homebrew formula → your tap (native cargo-dist publisher).
+publish-jobs = ["homebrew"]
+tap = "HaseebKhalid1507/homebrew-tap"
+allow-dirty = ["ci"]
 # Skip checking whether the specified configuration files are up to date
 
 # librespot needs ALSA + OpenSSL dev headers on the Linux build runner.

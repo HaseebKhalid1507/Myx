@@ -278,14 +278,61 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
+  publish-homebrew-formula:
+    needs:
+      - plan
+      - host
+    runs-on: "ubuntu-22.04"
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PLAN: ${{ needs.plan.outputs.val }}
+      GITHUB_USER: "axo bot"
+      GITHUB_EMAIL: "admin+bot@axo.dev"
+    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: true
+          repository: "HaseebKhalid1507/homebrew-tap"
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      # So we have access to the formula
+      - name: Fetch homebrew formulae
+        uses: actions/download-artifact@v7
+        with:
+          pattern: artifacts-*
+          path: Formula/
+          merge-multiple: true
+      # This is extra complex because you can make your Formula name not match your app name
+      # so we need to find releases with a *.rb file, and publish with that filename.
+      - name: Commit formula files
+        run: |
+          git config --global user.name "${GITHUB_USER}"
+          git config --global user.email "${GITHUB_EMAIL}"
+
+          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith(".rb")] | any)'); do
+            filename=$(echo "$release" | jq '.artifacts[] | select(endswith(".rb"))' --raw-output)
+            name=$(echo "$filename" | sed "s/\.rb$//")
+            version=$(echo "$release" | jq .app_version --raw-output)
+
+            export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+            brew update
+            # We avoid reformatting user-provided data such as the app description and homepage.
+            brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
+
+            git add "Formula/${filename}"
+            git commit -m "${name} ${version}"
+          done
+          git push
+
   announce:
     needs:
       - plan
       - host
+      - publish-homebrew-formula
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' }}
+    if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -294,3 +341,137 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  # ── Custom publish jobs (crates.io + .deb + AUR) — hand-appended ──
+  publish-crates:
+    needs: [plan, host]
+    if: ${{ always() && needs.host.result == 'success' && !fromJson(needs.plan.outputs.val).announcement_is_prerelease }}
+    runs-on: "ubuntu-22.04"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev pkg-config
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if out=$(cargo publish 2>&1); then
+            echo "$out"
+          else
+            code=$?; echo "$out"
+            if echo "$out" | grep -qiE "already (uploaded|exists)"; then
+              echo "already published — skipping"
+            else
+              echo "::error::crates publish failed (exit $code)"; exit 1
+            fi
+          fi
+
+  publish-deb:
+    needs: [plan, host]
+    if: ${{ always() && needs.host.result == 'success' && !fromJson(needs.plan.outputs.val).announcement_is_prerelease }}
+    runs-on: "ubuntu-22.04"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev pkg-config
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+      - name: Build .deb
+        run: cargo deb
+      - name: Upload .deb to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DEB=$(find target -name "*.deb" | head -1)
+          gh release upload "${{ needs.plan.outputs.tag }}" "$DEB" --clobber
+
+  publish-aur:
+    needs: [plan, host]
+    if: ${{ always() && needs.host.result == 'success' && !fromJson(needs.plan.outputs.val).announcement_is_prerelease }}
+    runs-on: "ubuntu-22.04"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Update AUR PKGBUILD
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          VERSION="${{ needs.plan.outputs.tag }}"
+          VERSION="${VERSION#v}"
+          TAR_URL="https://github.com/HaseebKhalid1507/Myx/archive/refs/tags/${{ needs.plan.outputs.tag }}.tar.gz"
+          SHA256=$(curl -sL "$TAR_URL" | sha256sum | cut -d' ' -f1)
+
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          echo -e "Host aur.archlinux.org\n  IdentityFile ~/.ssh/aur\n  User aur" >> ~/.ssh/config
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+
+          git clone ssh://aur@aur.archlinux.org/myx.git /tmp/aur-myx || \
+            git clone ssh://aur@aur.archlinux.org/myx.git /tmp/aur-myx
+          cd /tmp/aur-myx
+
+          cat > PKGBUILD << PKG
+          # Maintainer: Haseeb Khalid <haseebkhalid1507@gmail.com>
+          pkgname=myx
+          pkgver=${VERSION}
+          pkgrel=1
+          pkgdesc="A lean, beautiful terminal Spotify player"
+          arch=('x86_64' 'aarch64')
+          url="https://github.com/HaseebKhalid1507/Myx"
+          license=('MIT')
+          depends=('gcc-libs' 'alsa-lib' 'openssl')
+          makedepends=('cargo' 'alsa-lib' 'openssl')
+          options=(!lto)
+          source=("\$url/archive/refs/tags/v\$pkgver.tar.gz")
+          sha256sums=('${SHA256}')
+
+          prepare() {
+            cd "Myx-\$pkgver"
+            export RUSTUP_TOOLCHAIN=stable
+            cargo fetch --locked --target "\$(rustc -vV | sed -n 's/host: //p')"
+          }
+
+          build() {
+            cd "Myx-\$pkgver"
+            export RUSTUP_TOOLCHAIN=stable
+            export CARGO_TARGET_DIR=target
+            cargo build --frozen --release
+          }
+
+          package() {
+            cd "Myx-\$pkgver"
+            install -Dm755 "target/release/myx" "\$pkgdir/usr/bin/myx"
+            install -Dm644 LICENSE "\$pkgdir/usr/share/licenses/\$pkgname/LICENSE"
+          }
+          PKG
+
+          cat > .SRCINFO << SRC
+          pkgbase = myx
+          	pkgdesc = A lean, beautiful terminal Spotify player
+          	pkgver = ${VERSION}
+          	pkgrel = 1
+          	url = https://github.com/HaseebKhalid1507/Myx
+          	arch = x86_64
+          	arch = aarch64
+          	license = MIT
+          	makedepends = cargo
+          	makedepends = alsa-lib
+          	makedepends = openssl
+          	depends = gcc-libs
+          	depends = alsa-lib
+          	depends = openssl
+          	options = !lto
+          	source = https://github.com/HaseebKhalid1507/Myx/archive/refs/tags/v${VERSION}.tar.gz
+          	sha256sums = ${SHA256}
+
+          pkgname = myx
+          SRC
+
+          git config user.name "Haseeb Khalid"
+          git config user.email "haseebkhalid1507@gmail.com"
+          git add -A
+          git commit -m "Update to ${VERSION}" || exit 0
+          git push
