@@ -69,3 +69,9 @@ path = "examples/theme_demo.rs"
 name = "probe"
 path = "examples/probe.rs"
 required-features = ["streaming"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
