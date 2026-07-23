@@ -2271,14 +2271,7 @@ fn render_actions_overlay(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let rect = Rect { x, y, width: w, height: h };
 
     f.render_widget(Clear, rect);
-    f.render_widget(
-        Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(theme.border_active.into()))
-            .style(theme.element()),
-        rect,
-    );
+    f.render_widget(Block::default().style(theme.element()), rect);
     let inner = rect.inner(Margin::new(2, 1));
     let max = inner.width as usize;
     let mut lines = vec![
