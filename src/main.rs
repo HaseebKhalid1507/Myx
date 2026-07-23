@@ -307,6 +307,8 @@ struct SavedState {
     last_position_ms: u32,
     queue: Vec<String>,
     #[serde(default)]
+    queue_uris: Vec<String>,
+    #[serde(default)]
     source: PlaySource,
     #[serde(default)]
     source_name: String,
@@ -350,6 +352,7 @@ struct App {
     repeat: bool,
     volume: u8, // 0..=100 (mirrors the 50% mixer default)
     queue: Vec<String>,
+    queue_uris: Vec<String>,
     // Search
     input_mode: bool,
     query: String,
@@ -563,6 +566,7 @@ async fn main() -> Result<()> {
         repeat: saved.repeat,
         volume: if saved.volume == 0 { 50 } else { saved.volume.min(100) },
         queue: saved.queue,
+        queue_uris: saved.queue_uris,
         input_mode: false,
         query: String::new(),
         searching: false,
@@ -599,7 +603,7 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
 
     let (meta_tx, meta_rx) = flume::unbounded::<TrackMeta>();
     let (lib_tx, lib_rx) = flume::unbounded::<(Section, Vec<LibItem>)>();
-    let (queue_tx, queue_rx) = flume::unbounded::<Vec<String>>();
+    let (queue_tx, queue_rx) = flume::unbounded::<Vec<(String, String)>>();
     let (search_tx, search_rx) = flume::unbounded::<Vec<LibItem>>();
     let (lyrics_tx, lyrics_rx) = flume::unbounded::<(Vec<(u32, String)>, bool)>();
     let (detail_tx, detail_rx) = flume::unbounded::<(String, String, Vec<LibItem>)>();
@@ -677,7 +681,8 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
                 // the restored/last-known snapshot.
                 if let Ok(q) = q {
                     if !q.is_empty() {
-                        app.queue = q;
+                        app.queue = q.iter().map(|(d, _)| d.clone()).collect();
+                        app.queue_uris = q.into_iter().map(|(_, u)| u).collect();
                     }
                 }
             }
@@ -786,10 +791,20 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Vec<String>>) {
             let _ = app.engine.play_tracks(uris, track, app.shuffle);
         }
         _ => {
-            // Fallback: single last track at position.
-            match track {
-                Some(uri) => { let _ = app.engine.play_track_at(uri, pos); }
-                None => { let _ = app.engine.play(); }
+            // No known context — resume the last track followed by the saved
+            // queue so playback actually continues past the first song.
+            if !app.queue_uris.is_empty() {
+                let mut uris = Vec::with_capacity(app.queue_uris.len() + 1);
+                if let Some(u) = &track {
+                    uris.push(u.clone());
+                }
+                uris.extend(app.queue_uris.iter().cloned());
+                let _ = app.engine.play_tracks(uris, track, app.shuffle);
+            } else {
+                match track {
+                    Some(uri) => { let _ = app.engine.play_track_at(uri, pos); }
+                    None => { let _ = app.engine.play(); }
+                }
             }
         }
     }
@@ -801,7 +816,7 @@ fn handle_key(
     app: &mut App,
     code: KeyCode,
     lib_tx: &flume::Sender<(Section, Vec<LibItem>)>,
-    queue_tx: &flume::Sender<Vec<String>>,
+    queue_tx: &flume::Sender<Vec<(String, String)>>,
     search_tx: &flume::Sender<Vec<LibItem>>,
     detail_tx: &flume::Sender<(String, String, Vec<LibItem>)>,
     menu_tx: &flume::Sender<ActionMenu>,
@@ -1228,6 +1243,7 @@ fn save_state(app: &App) {
         last_duration_ms: app.now.as_ref().map(|n| n.duration_ms).unwrap_or(0),
         last_position_ms: app.position_ms(),
         queue: app.queue.clone(),
+        queue_uris: app.queue_uris.clone(),
         source: app.source.clone(),
         source_name: app.source_name.clone(),
     };
@@ -1472,7 +1488,7 @@ fn fetch_all_pages(
     out
 }
 
-fn spawn_queue_fetch(webapi: Arc<Mutex<WebApi>>, tx: flume::Sender<Vec<String>>) {
+fn spawn_queue_fetch(webapi: Arc<Mutex<WebApi>>, tx: flume::Sender<Vec<(String, String)>>) {
     tokio::task::spawn_blocking(move || {
         let q = match token_of(&webapi) {
             Some(token) => fetch_queue_blocking(&token),
@@ -1482,7 +1498,8 @@ fn spawn_queue_fetch(webapi: Arc<Mutex<WebApi>>, tx: flume::Sender<Vec<String>>)
     });
 }
 
-fn fetch_queue_blocking(token: &str) -> Vec<String> {
+/// Returns (display, uri) for each queued item.
+fn fetch_queue_blocking(token: &str) -> Vec<(String, String)> {
     let client = reqwest::blocking::Client::new();
     let Some(v) = get_json(&client, "https://api.spotify.com/v1/me/player/queue", token) else {
         return Vec::new();
@@ -1493,8 +1510,9 @@ fn fetch_queue_blocking(token: &str) -> Vec<String> {
             arr.iter()
                 .filter_map(|it| {
                     let name = it["name"].as_str()?;
+                    let uri = it["uri"].as_str()?.to_string();
                     let artist = it["artists"][0]["name"].as_str().unwrap_or("");
-                    Some(format!("{name} — {artist}"))
+                    Some((format!("{name} — {artist}"), uri))
                 })
                 .collect()
         })
