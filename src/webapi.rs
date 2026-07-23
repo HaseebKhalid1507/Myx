@@ -20,9 +20,6 @@ const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 const REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
 const REDIRECT_ADDR: &str = "127.0.0.1:8989";
 
-/// Default client id (Haseeb's registered myx app). Override with `MYX_CLIENT_ID`.
-pub const DEFAULT_CLIENT_ID: &str = "REDACTED";
-
 const SCOPES: &[&str] = &[
     "playlist-read-private",
     "playlist-read-collaborative",
@@ -42,6 +39,34 @@ const SCOPES: &[&str] = &[
 /// A short fingerprint of the granted scopes, so a scope change forces re-auth.
 fn scopes_tag() -> String {
     SCOPES.join(",")
+}
+
+/// Resolve the Spotify app client id: `MYX_CLIENT_ID` env var, else
+/// `~/.config/myx/client_id`. No default is bundled — every user brings their
+/// own app (create one free at the Spotify developer dashboard).
+fn resolve_client_id() -> Result<String> {
+    if let Ok(id) = std::env::var("MYX_CLIENT_ID") {
+        let id = id.trim().to_string();
+        if !id.is_empty() {
+            return Ok(id);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let path = std::path::PathBuf::from(home).join(".config/myx/client_id");
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            let id = s.trim().to_string();
+            if !id.is_empty() {
+                return Ok(id);
+            }
+        }
+    }
+    bail!(
+        "No Spotify client id found.\n\
+         Create a free app at https://developer.spotify.com/dashboard\n\
+         (add redirect URI http://127.0.0.1:8989/login), then either:\n\
+         \x20 export MYX_CLIENT_ID=<your-client-id>\n\
+         \x20 or write it to ~/.config/myx/client_id"
+    )
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -67,8 +92,7 @@ impl WebApi {
     /// Blocking: opens a browser + listens for the redirect. Call off the async
     /// thread (e.g. `spawn_blocking`) and before entering the alternate screen.
     pub fn init() -> Result<Self> {
-        let client_id =
-            std::env::var("MYX_CLIENT_ID").unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
+        let client_id = resolve_client_id()?;
 
         if let Some(mut w) = Self::from_cache(&client_id) {
             if w.is_expiring() {

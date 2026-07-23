@@ -26,9 +26,18 @@ Spotify Connect device, with **album-art-reactive theming**, a live **FFT visual
 cargo install --path .    # or: cargo build --release
 ```
 
-You'll need a Spotify app client ID (free, from the
-[developer dashboard](https://developer.spotify.com/dashboard)) with the redirect URI
-`http://127.0.0.1:8989/login`. Set it via `MYX_CLIENT_ID`, or use the default.
+You'll need your own Spotify app client ID — free, and takes a minute:
+
+1. Go to the [Spotify developer dashboard](https://developer.spotify.com/dashboard) → **Create app**
+2. Add the redirect URI `http://127.0.0.1:8989/login`
+3. Copy the **Client ID**, then either:
+   ```bash
+   export MYX_CLIENT_ID=<your-client-id>
+   # or:
+   mkdir -p ~/.config/myx && echo -n "<your-client-id>" > ~/.config/myx/client_id
+   ```
+
+No secret is needed (myx uses OAuth PKCE). Requires **Spotify Premium**.
 
 ## Keybinds
 
