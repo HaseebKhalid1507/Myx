@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "myx"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -2155,6 +2155,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "vergen",
 ]
 
 [[package]]

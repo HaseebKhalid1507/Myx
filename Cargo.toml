@@ -1,6 +1,6 @@
 [package]
 name = "myx"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A lean, beautiful terminal Spotify player"
 authors = ["Haseeb Khalid"]
@@ -34,6 +34,11 @@ serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 anyhow = { version = "1", optional = true }
 open = { version = "5", optional = true }
+
+# Pins librespot-core's transitive `vergen` build-dep to a working version so a
+# fresh `cargo install` (which ignores Cargo.lock) resolves correctly.
+[build-dependencies]
+vergen = "=9.0.6"
 
 [features]
 default = ["streaming"]
