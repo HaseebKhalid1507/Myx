@@ -163,6 +163,10 @@ impl Engine {
     pub fn set_volume(&self, vol: u16) -> Result<()> {
         self.spirc.set_volume(vol).context("set volume")
     }
+    /// Seek to an absolute position in the current track.
+    pub fn seek(&self, position_ms: u32) -> Result<()> {
+        self.spirc.set_position_ms(position_ms).context("seek")
+    }
     /// This device's Spotify Connect id — used to transfer playback back to myx.
     pub fn device_id(&self) -> String {
         self.session.device_id().to_string()

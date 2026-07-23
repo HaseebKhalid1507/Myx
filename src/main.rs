@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -35,7 +37,6 @@ use myx::webapi::WebApi;
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 const FADE_MS: u64 = 300;
-const FRAME_MS: u64 = 22;
 
 // ------------------------------------------------------------------ model
 
@@ -377,6 +378,8 @@ struct App {
     source: PlaySource,
     source_name: String,
     sort: SortMode,
+    // Last-rendered progress-bar rect (for click-to-seek).
+    bar_rect: Option<Rect>,
 }
 
 impl App {
@@ -410,6 +413,21 @@ impl App {
             Some(n) => n.position_ms.min(n.duration_ms),
             None => 0,
         }
+    }
+    /// Seek to an absolute position (clamped), updating the local display too.
+    fn seek_to(&mut self, position_ms: u32) {
+        let Some(dur) = self.now.as_ref().map(|n| n.duration_ms) else { return };
+        let new = position_ms.min(dur);
+        let _ = self.engine.seek(new);
+        if let Some(n) = self.now.as_mut() {
+            n.position_ms = new;
+            n.position_at = Instant::now();
+        }
+    }
+    /// Seek by a relative delta in milliseconds.
+    fn seek_by(&mut self, delta_ms: i64) {
+        let cur = self.position_ms() as i64;
+        self.seek_to((cur + delta_ms).max(0) as u32);
     }
     /// First non-header index (where a fresh selection should land).
     fn first_selectable(&self) -> usize {
@@ -506,7 +524,7 @@ impl App {
 
 // ------------------------------------------------------------------ main
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -582,6 +600,7 @@ async fn main() -> Result<()> {
         source: saved.source.clone(),
         source_name: saved.source_name.clone(),
         sort: SortMode::Added,
+        bar_rect: None,
     };
 
     let res = run_ui(&mut terminal, app, ev_rx).await;
@@ -628,12 +647,15 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
         }
     }
 
-    let mut frame = tokio::time::interval(Duration::from_millis(FRAME_MS));
     let mut frame_count: u64 = 0;
 
     loop {
+        let animating = app.fade.is_some()
+            || app.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false);
+        let frame_delay = std::time::Duration::from_millis(if animating { 16 } else { 100 });
+
         tokio::select! {
-            _ = frame.tick() => {
+            _ = tokio::time::sleep(frame_delay) => {
                 advance_fade(&mut app);
                 terminal.draw(|f| render(f, &mut app))?;
                 frame_count += 1;
@@ -651,11 +673,26 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
                 handle_engine_event(&mut app, ev, &meta_tx);
             }
             ev = in_rx.recv_async() => {
-                let Ok(Event::Key(key)) = ev else { continue };
-                if key.kind != KeyEventKind::Press { continue; }
-                if handle_key(&mut app, key.code, &lib_tx, &queue_tx, &search_tx, &detail_tx, &menu_tx, &astatus_tx, &radio_tx) {
-                    save_state(&app);
-                    break;
+                match ev {
+                    Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                        let quit = handle_key(&mut app, key.code, key.modifiers, &lib_tx, &queue_tx, &search_tx, &detail_tx, &menu_tx, &astatus_tx, &radio_tx);
+                        if quit {
+                            save_state(&app);
+                            break;
+                        }
+                    }
+                    Ok(Event::Mouse(m)) if m.kind == MouseEventKind::Down(MouseButton::Left) => {
+                        // Click the progress bar to seek there.
+                        if let Some(bar) = app.bar_rect {
+                            if m.row == bar.y && m.column >= bar.x && m.column < bar.x + bar.width && bar.width > 0 {
+                                if let Some(dur) = app.now.as_ref().map(|n| n.duration_ms) {
+                                    let frac = (m.column - bar.x) as f32 / bar.width as f32;
+                                    app.seek_to((frac * dur as f32) as u32);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             m = meta_rx.recv_async() => {
@@ -815,6 +852,7 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Vec<String>>) {
 fn handle_key(
     app: &mut App,
     code: KeyCode,
+    mods: KeyModifiers,
     lib_tx: &flume::Sender<(Section, Vec<LibItem>)>,
     queue_tx: &flume::Sender<Vec<(String, String)>>,
     search_tx: &flume::Sender<Vec<LibItem>>,
@@ -928,7 +966,9 @@ fn handle_key(
             app.section = app.section.shift(-1);
             app.selected = app.first_selectable();
         }
-        // Arrow keys rotate the right-pane view (Now Playing / Lyrics / Queue).
+        // Arrow keys rotate the right-pane view; Shift+arrows seek ±5s.
+        KeyCode::Right if mods.contains(KeyModifiers::SHIFT) => app.seek_by(5_000),
+        KeyCode::Left if mods.contains(KeyModifiers::SHIFT) => app.seek_by(-5_000),
         KeyCode::Right => {
             app.view = app.view.shift(1);
             if app.view == RightView::Queue && (app.reclaimed || app.playback_started) {
@@ -2170,8 +2210,15 @@ fn center_v(area: Rect, height: u16) -> Rect {
 }
 
 /// Slim persistent bottom strip: play state + track, then the progress bar.
-fn render_now_strip(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
+fn render_now_strip(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
+
+    // Record the bar geometry (after the "m:ss " label) for click-to-seek.
+    let pos = app.position_ms();
+    let left_len = format!("{} ", fmt_ms(pos)).chars().count() as u16;
+    let right_len = format!(" {}", fmt_ms(app.now.as_ref().map(|n| n.duration_ms).unwrap_or(0))).chars().count() as u16;
+    let bar_w = rows[1].width.saturating_sub(left_len + right_len);
+    app.bar_rect = Some(Rect { x: rows[1].x + left_len, y: rows[1].y, width: bar_w, height: 1 });
 
     // Track line (left) + volume meter (far right).
     let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(13)]).split(rows[0]);
@@ -2360,6 +2407,7 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         key("⏎"), lbl(" play   "),
         key("␣"), lbl(" pause   "),
         key("n/b"), lbl(" skip   "),
+        key("⇧←→"), lbl(" seek   "),
         key("o"), lbl(" sort   "),
         key("+/-"), lbl(" vol   "),
         Span::styled("s", Style::default().fg(on(app.shuffle).into())),
@@ -2458,13 +2506,13 @@ fn fmt_ms(ms: u32) -> String {
 fn init_terminal() -> Result<Term> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
     Ok(Terminal::new(CrosstermBackend::new(stdout))?)
 }
 
 fn restore_terminal(terminal: &mut Term) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), crossterm::event::DisableMouseCapture, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
 }
