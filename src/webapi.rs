@@ -122,6 +122,13 @@ impl WebApi {
         Ok(self.access_token.clone())
     }
 
+    /// Clone the current token without performing network I/O. The main thread
+    /// refreshes during initialization; background tasks use this to avoid one
+    /// slow refresh holding the shared mutex and stalling every API worker.
+    pub fn cached_token(&self) -> String {
+        self.access_token.clone()
+    }
+
     fn is_expiring(&self) -> bool {
         now() + 60 >= self.expires_at
     }

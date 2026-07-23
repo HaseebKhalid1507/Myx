@@ -239,14 +239,6 @@ impl Library {
             Section::Artists => &mut self.artists,
         }
     }
-    fn is_empty(&self) -> bool {
-        self.home.is_empty()
-            && self.recent.is_empty()
-            && self.playlists.is_empty()
-            && self.liked.is_empty()
-            && self.albums.is_empty()
-            && self.artists.is_empty()
-    }
     fn set(&mut self, s: Section, items: Vec<LibItem>) {
         match s {
             Section::Home => self.home = items,
@@ -528,6 +520,10 @@ impl App {
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Refuse to start a second instance — two myx's racing on the shared Web API
+    // token cache corrupts the OAuth refresh dance (Spotify rotates refresh tokens).
+    let _instance_lock = acquire_single_instance_lock();
+
     // Restore last session first, so the engine starts at the saved volume.
     let saved = SavedState::load();
     let init_vol = if saved.volume == 0 { 50 } else { saved.volume.min(100) };
@@ -630,7 +626,8 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
     let (astatus_tx, astatus_rx) = flume::unbounded::<String>();
     let (pstate_tx, pstate_rx) = flume::unbounded::<PlaybackState>();
     let (radio_tx, radio_rx) = flume::unbounded::<Vec<String>>();
-    spawn_library_fetch(app.webapi.clone(), lib_tx.clone());
+    let (libdone_tx, libdone_rx) = flume::unbounded::<bool>();
+    spawn_library_fetch(app.webapi.clone(), lib_tx.clone(), libdone_tx.clone());
 
     // Reclaim server-side playback: read live state + transfer it onto myx so the
     // full context + queue + position come back.
@@ -648,18 +645,58 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
     }
 
     let mut frame_count: u64 = 0;
+    let mut lib_attempts: u32 = 0;
+    // A persistent interval must live OUTSIDE the select loop. Recreating a
+    // `sleep()` every loop starves forever when player events are continuously
+    // ready: the future gets cancelled/reset before its deadline. That was the
+    // frozen-UI bug.
+    let mut frame = tokio::time::interval(Duration::from_millis(16));
+    frame.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_draw = Instant::now() - Duration::from_millis(100);
 
     loop {
-        let animating = app.fade.is_some()
-            || app.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false);
-        let frame_delay = std::time::Duration::from_millis(if animating { 16 } else { 100 });
-
         tokio::select! {
-            _ = tokio::time::sleep(frame_delay) => {
-                advance_fade(&mut app);
-                terminal.draw(|f| render(f, &mut app))?;
-                frame_count += 1;
-                if frame_count.is_multiple_of(240) {
+            biased;
+            _ = frame.tick() => {
+                // Drain library updates deterministically before rendering. Keeping
+                // this solely as a select arm could starve under a hot player-event
+                // stream / 60fps visualizer — which looked like a frozen library.
+                while let Ok((section, mut items)) = lib_rx.try_recv() {
+                    let count = items.len();
+                    liblog(format!("ui: received {} rows for {}", count, section.label()));
+                    for (i, it) in items.iter_mut().enumerate() {
+                        it.order = i as u32;
+                    }
+                    app.library.set(section, items);
+                    sort_list(app.library.items_mut(section), app.sort);
+                    if section == app.section {
+                        app.normalize_selection();
+                    }
+                    app.status = format!("loaded {}", section.label());
+                }
+                while let Ok(got_any) = libdone_rx.try_recv() {
+                    if got_any {
+                        lib_attempts = 0;
+                        app.status.clear();
+                    } else if lib_attempts < 2 {
+                        lib_attempts += 1;
+                        app.status = "retrying library…".to_string();
+                        spawn_library_fetch(app.webapi.clone(), lib_tx.clone(), libdone_tx.clone());
+                    } else {
+                        app.status = "library failed — press r to reload".to_string();
+                    }
+                }
+
+                let animating = app.fade.is_some()
+                    || app.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false);
+                let target = Duration::from_millis(if animating { 16 } else { 100 });
+                if last_draw.elapsed() >= target {
+                    advance_fade(&mut app);
+                    terminal.draw(|f| render(f, &mut app))?;
+                    last_draw = Instant::now();
+                    frame_count += 1;
+                }
+                if frame_count > 0 && frame_count.is_multiple_of(240) {
                     // Refresh the live queue while playing so the snapshot stays
                     // current, then persist it (survives reboot).
                     if app.playback_started || app.reclaimed {
@@ -675,7 +712,7 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
             ev = in_rx.recv_async() => {
                 match ev {
                     Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        let quit = handle_key(&mut app, key.code, key.modifiers, &lib_tx, &queue_tx, &search_tx, &detail_tx, &menu_tx, &astatus_tx, &radio_tx);
+                        let quit = handle_key(&mut app, key.code, key.modifiers, &lib_tx, &queue_tx, &search_tx, &detail_tx, &menu_tx, &astatus_tx, &radio_tx, &libdone_tx);
                         if quit {
                             save_state(&app);
                             break;
@@ -697,21 +734,6 @@ async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<Engine
             }
             m = meta_rx.recv_async() => {
                 if let Ok(meta) = m { apply_meta(&mut app, meta, &lyrics_tx); }
-            }
-            lib = lib_rx.recv_async() => {
-                if let Ok((section, mut items)) = lib {
-                    for (i, it) in items.iter_mut().enumerate() {
-                        it.order = i as u32;
-                    }
-                    app.library.set(section, items);
-                    sort_list(app.library.items_mut(section), app.sort);
-                    if section == app.section {
-                        app.normalize_selection();
-                    }
-                    if !app.library.is_empty() {
-                        app.status.clear();
-                    }
-                }
             }
             q = queue_rx.recv_async() => {
                 // Don't let an empty live queue (e.g. a bare resumed track) wipe
@@ -860,6 +882,7 @@ fn handle_key(
     menu_tx: &flume::Sender<ActionMenu>,
     astatus_tx: &flume::Sender<String>,
     radio_tx: &flume::Sender<Vec<String>>,
+    libdone_tx: &flume::Sender<bool>,
 ) -> bool {
     // --- Actions menu captures input while open ---
     if app.actions.is_some() {
@@ -937,7 +960,7 @@ fn handle_key(
         }
         KeyCode::Char('r') => {
             app.status = "loading library…".to_string();
-            spawn_library_fetch(app.webapi.clone(), lib_tx.clone());
+            spawn_library_fetch(app.webapi.clone(), lib_tx.clone(), libdone_tx.clone());
         }
         KeyCode::Char('o') => {
             app.sort = app.sort.next();
@@ -1378,8 +1401,26 @@ fn apply_meta(
 
 // ------------------------------------------------------------------ web api
 
+/// Temporary-but-useful diagnostics for startup/library failures. Kept out of
+/// the TUI because alternate-screen rendering hides stderr.
+fn liblog(msg: impl AsRef<str>) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/myx-library.log")
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let _ = writeln!(f, "{ts:.3} {}", msg.as_ref());
+    }
+}
+
 fn token_of(webapi: &Arc<Mutex<WebApi>>) -> Option<String> {
-    webapi.lock().ok()?.valid_token().ok()
+    let token = webapi.lock().ok()?.cached_token();
+    (!token.is_empty()).then_some(token)
 }
 
 /// GET a JSON endpoint, retrying on 429 (respecting Retry-After).
@@ -1407,10 +1448,30 @@ fn get_json(client: &reqwest::blocking::Client, url: &str, token: &str) -> Optio
 
 /// Fetch the library incrementally: fast sections first, Liked streamed in
 /// chunks so the UI is usable within ~1s instead of waiting for everything.
-fn spawn_library_fetch(webapi: Arc<Mutex<WebApi>>, tx: flume::Sender<(Section, Vec<LibItem>)>) {
-    tokio::task::spawn_blocking(move || {
-        let Some(token) = token_of(&webapi) else { return };
-        let client = reqwest::blocking::Client::new();
+fn spawn_library_fetch(
+    webapi: Arc<Mutex<WebApi>>,
+    tx: flume::Sender<(Section, Vec<LibItem>)>,
+    done_tx: flume::Sender<bool>,
+) {
+    // Clone the already-refreshed access token BEFORE spawning. This removes the
+    // shared WebApi mutex from the worker entirely (the stuck-library root cause).
+    let token_opt = token_of(&webapi);
+    liblog(format!("spawn_library_fetch: token={}", token_opt.as_ref().map_or("missing", |_| "ok")));
+    std::thread::Builder::new()
+        .name("myx-library".to_string())
+        .spawn(move || {
+        liblog("worker: entered");
+        let Some(token) = token_opt else {
+            liblog("worker: no token; aborting");
+            let _ = done_tx.send(false);
+            return;
+        };
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(12))
+            .build()
+            .expect("build library HTTP client");
+        let mut got_any = false;
         let track_from = |t: &serde_json::Value| -> Option<LibItem> {
             Some(LibItem::track(
                 t["name"].as_str()?.to_string(),
@@ -1434,6 +1495,7 @@ fn spawn_library_fetch(webapi: Arc<Mutex<WebApi>>, tx: flume::Sender<(Section, V
         };
 
         // Home: a curated mix — recently played, top tracks, top artists, new releases.
+        liblog("worker: fetching home/recent");
         let mut home: Vec<LibItem> = Vec::new();
         let recent5 = fetch_all_pages(&client, "https://api.spotify.com/v1/me/player/recently-played?limit=10", &token, None, 1, |it| track_from(&it["track"]));
         if !recent5.is_empty() {
@@ -1455,18 +1517,31 @@ fn spawn_library_fetch(webapi: Arc<Mutex<WebApi>>, tx: flume::Sender<(Section, V
             home.push(LibItem::header("New Releases"));
             home.extend(new_releases.into_iter().take(6));
         }
+        got_any |= !home.is_empty();
+        liblog(format!("worker: home done, {} rows", home.len()));
         let _ = tx.send((Section::Home, home));
 
-        let _ = tx.send((Section::Recent, fetch_all_pages(&client, "https://api.spotify.com/v1/me/player/recently-played?limit=50", &token, None, 1, |it| track_from(&it["track"]))));
-        let _ = tx.send((Section::Playlists, fetch_all_pages(&client, "https://api.spotify.com/v1/me/playlists?limit=50", &token, None, 10, |it| {
+        let recent = fetch_all_pages(&client, "https://api.spotify.com/v1/me/player/recently-played?limit=50", &token, None, 1, |it| track_from(&it["track"]));
+        got_any |= !recent.is_empty();
+        let _ = tx.send((Section::Recent, recent));
+
+        let playlists = fetch_all_pages(&client, "https://api.spotify.com/v1/me/playlists?limit=50", &token, None, 10, |it| {
             Some(LibItem::ctx(
                 it["name"].as_str()?.to_string(),
                 it["owner"]["display_name"].as_str().unwrap_or("").to_string(),
                 it["uri"].as_str()?.to_string(),
             ))
-        })));
-        let _ = tx.send((Section::Albums, fetch_all_pages(&client, "https://api.spotify.com/v1/me/albums?limit=50", &token, None, 10, |it| album_from(&it["album"]))));
-        let _ = tx.send((Section::Artists, fetch_all_pages(&client, "https://api.spotify.com/v1/me/following?type=artist&limit=50", &token, Some("artists"), 5, |it| artist_from(it))));
+        });
+        got_any |= !playlists.is_empty();
+        let _ = tx.send((Section::Playlists, playlists));
+
+        let albums = fetch_all_pages(&client, "https://api.spotify.com/v1/me/albums?limit=50", &token, None, 10, |it| album_from(&it["album"]));
+        got_any |= !albums.is_empty();
+        let _ = tx.send((Section::Albums, albums));
+
+        let artists = fetch_all_pages(&client, "https://api.spotify.com/v1/me/following?type=artist&limit=50", &token, Some("artists"), 5, |it| artist_from(it));
+        got_any |= !artists.is_empty();
+        let _ = tx.send((Section::Artists, artists));
 
         // Liked can be huge — stream it in as pages arrive so the count climbs live.
         // Prepend Shuffle/Play action rows (shuffle first).
@@ -1488,13 +1563,17 @@ fn spawn_library_fetch(webapi: Arc<Mutex<WebApi>>, tx: flume::Sender<(Section, V
             }
             url = v["next"].as_str().map(String::from);
             pages += 1;
-            // Push a partial update every few pages.
             if pages % 3 == 0 {
                 let _ = tx.send((Section::Liked, liked.clone()));
             }
         }
+        got_any |= liked.len() > 2; // beyond the two action rows
         let _ = tx.send((Section::Liked, liked));
-    });
+
+        liblog(format!("worker: all done got_any={got_any}"));
+        let _ = done_tx.send(got_any);
+    })
+    .expect("spawn library worker");
 }
 
 fn fetch_all_pages(
@@ -2502,6 +2581,30 @@ fn fmt_ms(ms: u32) -> String {
 }
 
 // ------------------------------------------------------------------ terminal
+
+/// Hold an exclusive lock so only one myx runs at a time. Returns the lock file
+/// (kept alive for the process lifetime; the OS releases it on exit, even a crash).
+fn acquire_single_instance_lock() -> std::fs::File {
+    use fs2::FileExt;
+    let path = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".cache/myx/lock"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/myx.lock"));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .expect("open lock file");
+    if file.try_lock_exclusive().is_err() {
+        eprintln!("myx is already running (another instance holds the lock).");
+        eprintln!("Close it first, or remove {} if it's stale.", path.display());
+        std::process::exit(1);
+    }
+    file
+}
 
 fn init_terminal() -> Result<Term> {
     enable_raw_mode()?;
