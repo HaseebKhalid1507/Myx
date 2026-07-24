@@ -1,6 +1,6 @@
 [package]
 name = "myx"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "A lean, beautiful terminal Spotify player"
 authors = ["Haseeb Khalid"]

@@ -1577,21 +1577,30 @@ fn apply_meta(
 /// world-writable fixed /tmp path (audit H5).
 fn liblog(msg: impl AsRef<str>) {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     if std::env::var_os("MYX_LOG").is_none() {
         return;
     }
-    let Some(home) = std::env::var_os("HOME") else { return };
+    #[cfg(unix)]
+    let home_var = "HOME";
+    #[cfg(windows)]
+    let home_var = "USERPROFILE";
+    let Some(home) = std::env::var_os(home_var) else { return };
     let dir = std::path::PathBuf::from(home).join(".cache/myx");
     if std::fs::create_dir_all(&dir).is_ok() {
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(dir.join("myx.log"))
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    if let Ok(mut f) = opts.open(dir.join("myx.log")) {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
