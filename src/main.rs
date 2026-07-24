@@ -3617,10 +3617,12 @@ fn init_terminal() -> Result<Term> {
         EnterAlternateScreen,
         crossterm::event::EnableMouseCapture
     )?;
-    execute!(
+    // Media key support requires keyboard enhancement (Windows Terminal, kitty, etc.).
+    // Silently skip on terminals that don't support it (legacy Windows console).
+    let _ = execute!(
         stdout,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    )?;
+    );
     Ok(Terminal::new(CrosstermBackend::new(stdout))?)
 }
 
@@ -3631,7 +3633,7 @@ fn restore_terminal(terminal: &mut Term) -> Result<()> {
         crossterm::event::DisableMouseCapture,
         LeaveAlternateScreen
     )?;
-    execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     terminal.show_cursor()?;
     Ok(())
 }
