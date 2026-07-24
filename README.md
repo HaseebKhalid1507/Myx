@@ -12,8 +12,8 @@ synced lyrics.
   <img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/theme-3.png" width="32%">
 </p>
 
-> Requires **Spotify Premium**. Linux and macOS. Album art is crispest on kitty,
-> WezTerm, or foot.
+> Requires **Spotify Premium**. Works on Linux, macOS, and Windows. Album art is
+> crispest on kitty, WezTerm, or foot.
 
 ## Install
 
@@ -24,12 +24,16 @@ yay -S myx
 # macOS / Linux (Homebrew)
 brew install HaseebKhalid1507/homebrew-tap/myx
 
-# Cargo (crates.io)
+# Cargo (all platforms — Linux, macOS, Windows)
 cargo install myx
 
 # Prebuilt binary (Linux x86_64, macOS)
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/HaseebKhalid1507/Myx/releases/latest/download/myx-installer.sh | sh
 ```
+
+On **Windows**, install [Rust](https://rustup.rs) first, then `cargo install myx` in
+PowerShell. Set `MYX_CLIENT_ID` as an environment variable or place your client ID in
+`%USERPROFILE%\.config\myx\client_id`.
 
 Or grab a `.deb` / archive from [Releases](https://github.com/HaseebKhalid1507/Myx/releases),
 or build from source: `cargo install --path .`.
@@ -68,7 +72,8 @@ o          sort                  r        reload
 q          quit
 ```
 
-Mouse works too: click tabs, click a track, double-click to play.
+Media keys (Play/Pause, Stop, Next, Prev, Volume) work when the terminal is
+focused. Mouse works too: click tabs, click a track, double-click to play.
 
 ## Credits
 
