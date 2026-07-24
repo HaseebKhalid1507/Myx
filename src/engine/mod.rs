@@ -36,20 +36,10 @@ use crate::audio::{VisBands, VisualizationSink};
 pub enum EngineEvent {
     /// A new track became current — carries its Spotify URI. This is the reactive
     /// theme trigger.
-    TrackChanged {
-        uri: String,
-    },
-    Playing {
-        uri: String,
-        position_ms: u32,
-    },
-    Paused {
-        uri: String,
-        position_ms: u32,
-    },
-    EndOfTrack {
-        uri: String,
-    },
+    TrackChanged { uri: String },
+    Playing { uri: String, position_ms: u32 },
+    Paused { uri: String, position_ms: u32 },
+    EndOfTrack { uri: String },
 }
 
 /// A running engine: keep `spirc` alive (dropping it tears down the device), and
@@ -78,12 +68,8 @@ impl Engine {
         self.spirc.activate().ok();
         let options = LoadRequestOptions {
             start_playing: true,
-            context_options: shuffle.then(|| {
-                LoadContextOptions::Options(CtxOptions {
-                    shuffle: true,
-                    ..Default::default()
-                })
-            }),
+            context_options: shuffle
+                .then(|| LoadContextOptions::Options(CtxOptions { shuffle: true, ..Default::default() })),
             ..Default::default()
         };
         self.spirc
@@ -104,12 +90,8 @@ impl Engine {
         let options = LoadRequestOptions {
             start_playing: true,
             seek_to: position_ms,
-            context_options: shuffle.then(|| {
-                LoadContextOptions::Options(CtxOptions {
-                    shuffle: true,
-                    ..Default::default()
-                })
-            }),
+            context_options: shuffle
+                .then(|| LoadContextOptions::Options(CtxOptions { shuffle: true, ..Default::default() })),
             playing_track: track_uri.map(PlayingTrack::Uri),
         };
         self.spirc
@@ -130,12 +112,8 @@ impl Engine {
         self.spirc.activate().ok();
         let options = LoadRequestOptions {
             start_playing: true,
-            context_options: shuffle.then(|| {
-                LoadContextOptions::Options(CtxOptions {
-                    shuffle: true,
-                    ..Default::default()
-                })
-            }),
+            context_options: shuffle
+                .then(|| LoadContextOptions::Options(CtxOptions { shuffle: true, ..Default::default() })),
             playing_track: start_uri.map(PlayingTrack::Uri),
             ..Default::default()
         };

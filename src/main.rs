@@ -118,48 +118,16 @@ struct LibItem {
 
 impl LibItem {
     fn track(name: String, subtitle: String, uri: String) -> Self {
-        Self {
-            name,
-            subtitle,
-            uri,
-            is_track: true,
-            is_header: false,
-            is_play: false,
-            order: 0,
-        }
+        Self { name, subtitle, uri, is_track: true, is_header: false, is_play: false, order: 0 }
     }
     fn ctx(name: String, subtitle: String, uri: String) -> Self {
-        Self {
-            name,
-            subtitle,
-            uri,
-            is_track: false,
-            is_header: false,
-            is_play: false,
-            order: 0,
-        }
+        Self { name, subtitle, uri, is_track: false, is_header: false, is_play: false, order: 0 }
     }
     fn play(name: String, uri: String) -> Self {
-        Self {
-            name,
-            subtitle: String::new(),
-            uri,
-            is_track: false,
-            is_header: false,
-            is_play: true,
-            order: 0,
-        }
+        Self { name, subtitle: String::new(), uri, is_track: false, is_header: false, is_play: true, order: 0 }
     }
     fn header(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            subtitle: String::new(),
-            uri: String::new(),
-            is_track: false,
-            is_header: true,
-            is_play: false,
-            order: 0,
-        }
+        Self { name: name.to_string(), subtitle: String::new(), uri: String::new(), is_track: false, is_header: true, is_play: false, order: 0 }
     }
 }
 
@@ -190,10 +158,7 @@ impl SortMode {
 
 /// Sort a list in place, keeping leading header/play rows pinned at the top.
 fn sort_list(items: &mut [LibItem], mode: SortMode) {
-    let pin = items
-        .iter()
-        .take_while(|i| i.is_header || i.is_play)
-        .count();
+    let pin = items.iter().take_while(|i| i.is_header || i.is_play).count();
     let tail = &mut items[pin..];
     match mode {
         SortMode::Added => tail.sort_by_key(|i| i.order),
@@ -213,41 +178,16 @@ struct Detail {
 /// What an action-menu entry does when activated.
 #[derive(Clone)]
 enum ActionKind {
-    ToggleLike {
-        id: String,
-        saved: bool,
-    },
-    Queue {
-        uri: String,
-    },
-    AddToPlaylistMenu {
-        track_uri: String,
-    },
-    AddToPlaylist {
-        playlist_id: String,
-        track_uri: String,
-    },
-    ToggleFollowArtist {
-        id: String,
-        following: bool,
-    },
-    ToggleSaveAlbum {
-        id: String,
-        saved: bool,
-    },
-    FollowPlaylist {
-        id: String,
-    },
-    Play {
-        uri: String,
-    },
-    Open {
-        uri: String,
-        name: String,
-    },
-    CopyLink {
-        uri: String,
-    },
+    ToggleLike { id: String, saved: bool },
+    Queue { uri: String },
+    AddToPlaylistMenu { track_uri: String },
+    AddToPlaylist { playlist_id: String, track_uri: String },
+    ToggleFollowArtist { id: String, following: bool },
+    ToggleSaveAlbum { id: String, saved: bool },
+    FollowPlaylist { id: String },
+    Play { uri: String },
+    Open { uri: String, name: String },
+    CopyLink { uri: String },
 }
 
 struct ActionItem {
@@ -447,11 +387,7 @@ struct App {
 
 impl App {
     fn start_fade(&mut self, to: Theme) {
-        self.fade = Some(ThemeFade::new(
-            self.displayed,
-            to,
-            Duration::from_millis(FADE_MS),
-        ));
+        self.fade = Some(ThemeFade::new(self.displayed, to, Duration::from_millis(FADE_MS)));
         self.target = to;
     }
     fn cur_items(&self) -> &[LibItem] {
@@ -483,9 +419,7 @@ impl App {
     }
     /// Seek to an absolute position (clamped), updating the local display too.
     fn seek_to(&mut self, position_ms: u32) {
-        let Some(dur) = self.now.as_ref().map(|n| n.duration_ms) else {
-            return;
-        };
+        let Some(dur) = self.now.as_ref().map(|n| n.duration_ms) else { return };
         let new = position_ms.min(dur);
         let _ = self.engine.seek(new);
         if let Some(n) = self.now.as_mut() {
@@ -500,10 +434,7 @@ impl App {
     }
     /// First non-header index (where a fresh selection should land).
     fn first_selectable(&self) -> usize {
-        self.cur_items()
-            .iter()
-            .position(|i| !i.is_header)
-            .unwrap_or(0)
+        self.cur_items().iter().position(|i| !i.is_header).unwrap_or(0)
     }
     /// Move the selection by `dir`, skipping header rows, clamped at the ends.
     fn move_sel(&mut self, dir: isize) {
@@ -526,11 +457,7 @@ impl App {
     }
     /// If the selection landed on a header (e.g. after data loads), bump it off.
     fn normalize_selection(&mut self) {
-        if self
-            .cur_items()
-            .get(self.selected)
-            .is_some_and(|i| i.is_header)
-        {
+        if self.cur_items().get(self.selected).is_some_and(|i| i.is_header) {
             self.selected = self.first_selectable();
         }
     }
@@ -546,34 +473,20 @@ impl App {
         if item.is_play {
             // Special synthetic rows: play the Liked list (optionally shuffled).
             if item.uri == "myx:action:liked-play" {
-                let uris: Vec<String> = self
-                    .library
-                    .liked
-                    .iter()
-                    .filter(|i| i.is_track)
-                    .map(|i| i.uri.clone())
-                    .collect();
+                let uris: Vec<String> = self.library.liked.iter().filter(|i| i.is_track).map(|i| i.uri.clone()).collect();
                 if !uris.is_empty() {
                     self.source = PlaySource::Liked;
                     self.source_name = "Liked Songs".to_string();
                     self.status = "starting Liked Songs…".to_string();
                     // Honour the current shuffle toggle instead of a dedicated row.
-                    if let Err(e) = self.engine.play_tracks(uris, None, self.shuffle) {
-                        self.status = format!("couldn't play: {e:#}");
-                    }
+                    if let Err(e) = self.engine.play_tracks(uris, None, self.shuffle) { self.status = format!("couldn't play: {e:#}"); }
                 }
                 return Activated::None;
             }
             self.status = format!("starting {}…", item.name);
             self.source = PlaySource::Context(item.uri.clone());
-            self.source_name = self
-                .details
-                .last()
-                .map(|d| d.title.clone())
-                .unwrap_or_default();
-            if let Err(e) = self.engine.play_context(item.uri, self.shuffle) {
-                self.status = format!("couldn't play: {e:#}");
-            }
+            self.source_name = self.details.last().map(|d| d.title.clone()).unwrap_or_default();
+            if let Err(e) = self.engine.play_context(item.uri, self.shuffle) { self.status = format!("couldn't play: {e:#}"); }
             return Activated::None;
         }
         if item.is_track {
@@ -589,21 +502,11 @@ impl App {
                 self.source = PlaySource::Context(ctx.clone());
                 self.source_name = d.title.clone();
                 self.status = format!("starting {}…", item.name);
-                if let Err(e) =
-                    self.engine
-                        .play_context_at(ctx, Some(item.uri.clone()), 0, self.shuffle)
-                {
-                    self.status = format!("couldn't play: {e:#}");
-                }
+                if let Err(e) = self.engine.play_context_at(ctx, Some(item.uri.clone()), 0, self.shuffle) { self.status = format!("couldn't play: {e:#}"); }
                 return Activated::None;
             }
             // Section track list.
-            let uris = self
-                .cur_items()
-                .iter()
-                .filter(|i| i.is_track)
-                .map(|i| i.uri.clone())
-                .collect();
+            let uris = self.cur_items().iter().filter(|i| i.is_track).map(|i| i.uri.clone()).collect();
             self.status = format!("starting {}…", item.name);
             if self.section == Section::Liked {
                 self.source = PlaySource::Liked;
@@ -612,12 +515,7 @@ impl App {
                 self.source = PlaySource::None;
                 self.source_name = self.section.label().to_string();
             }
-            if let Err(e) = self
-                .engine
-                .play_tracks(uris, Some(item.uri.clone()), self.shuffle)
-            {
-                self.status = format!("couldn't play: {e:#}");
-            }
+            if let Err(e) = self.engine.play_tracks(uris, Some(item.uri.clone()), self.shuffle) { self.status = format!("couldn't play: {e:#}"); }
             return Activated::None;
         }
         // Otherwise it's a context (artist / album / playlist) — open it.
@@ -638,11 +536,7 @@ async fn main() -> Result<()> {
 
     // Restore last session first, so the engine starts at the saved volume.
     let saved = SavedState::load();
-    let init_vol = if saved.volume == 0 {
-        80
-    } else {
-        saved.volume.min(100)
-    };
+    let init_vol = if saved.volume == 0 { 80 } else { saved.volume.min(100) };
 
     println!("myx: connecting to Spotify…");
     let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
@@ -694,11 +588,7 @@ async fn main() -> Result<()> {
         selected: 0,
         shuffle: saved.shuffle,
         repeat: saved.repeat,
-        volume: if saved.volume == 0 {
-            80
-        } else {
-            saved.volume.min(100)
-        },
+        volume: if saved.volume == 0 { 80 } else { saved.volume.min(100) },
         queue: saved.queue,
         queue_uris: saved.queue_uris,
         input_mode: false,
@@ -732,11 +622,7 @@ async fn main() -> Result<()> {
     res
 }
 
-async fn run_ui(
-    terminal: &mut Term,
-    mut app: App,
-    ev_rx: flume::Receiver<EngineEvent>,
-) -> Result<()> {
+async fn run_ui(terminal: &mut Term, mut app: App, ev_rx: flume::Receiver<EngineEvent>) -> Result<()> {
     let (in_tx, in_rx) = flume::unbounded::<Event>();
     std::thread::spawn(move || loop {
         if matches!(event::poll(Duration::from_millis(200)), Ok(true)) {
@@ -1074,17 +960,11 @@ async fn run_ui(
 /// Resume the persisted playback source at the last track/position — the
 /// faithful reboot resume (real context ⇒ real queue continuation).
 fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Vec<String>, String>>) {
-    let track = app
-        .now
-        .as_ref()
-        .map(|n| n.uri.clone())
-        .filter(|u| !u.is_empty());
+    let track = app.now.as_ref().map(|n| n.uri.clone()).filter(|u| !u.is_empty());
     let pos = app.now.as_ref().map(|n| n.position_ms).unwrap_or(0);
     match app.source.clone() {
         PlaySource::Context(ctx) => {
-            if let Err(e) = app.engine.play_context_at(ctx, track, pos, app.shuffle) {
-                app.status = format!("couldn't play: {e:#}");
-            }
+            if let Err(e) = app.engine.play_context_at(ctx, track, pos, app.shuffle) { app.status = format!("couldn't play: {e:#}"); }
         }
         PlaySource::Radio(seed) => {
             let session = app.engine.session();
@@ -1105,9 +985,7 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Vec<String>, Str
         }
         PlaySource::Liked if !app.library.liked.is_empty() => {
             let uris: Vec<String> = app.library.liked.iter().map(|i| i.uri.clone()).collect();
-            if let Err(e) = app.engine.play_tracks(uris, track, app.shuffle) {
-                app.status = format!("couldn't play: {e:#}");
-            }
+            if let Err(e) = app.engine.play_tracks(uris, track, app.shuffle) { app.status = format!("couldn't play: {e:#}"); }
         }
         _ => {
             // No known context — resume the last track followed by the saved
@@ -1118,21 +996,11 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Vec<String>, Str
                     uris.push(u.clone());
                 }
                 uris.extend(app.queue_uris.iter().cloned());
-                if let Err(e) = app.engine.play_tracks(uris, track, app.shuffle) {
-                    app.status = format!("couldn't play: {e:#}");
-                }
+                if let Err(e) = app.engine.play_tracks(uris, track, app.shuffle) { app.status = format!("couldn't play: {e:#}"); }
             } else {
                 match track {
-                    Some(uri) => {
-                        if let Err(e) = app.engine.play_track_at(uri, pos) {
-                            app.status = format!("couldn't play: {e:#}");
-                        }
-                    }
-                    None => {
-                        if let Err(e) = app.engine.play() {
-                            app.status = format!("couldn't play: {e:#}");
-                        }
-                    }
+                    Some(uri) => { if let Err(e) = app.engine.play_track_at(uri, pos) { app.status = format!("couldn't play: {e:#}"); } }
+                    None => { if let Err(e) = app.engine.play() { app.status = format!("couldn't play: {e:#}"); } }
                 }
             }
         }
@@ -1158,11 +1026,7 @@ fn handle_key(
     // Double-press Ctrl-C to quit (works from anywhere). Single press arms it.
     if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
         let now = Instant::now();
-        if app
-            .last_ctrl_c
-            .map(|t| now.duration_since(t) < Duration::from_millis(1500))
-            .unwrap_or(false)
-        {
+        if app.last_ctrl_c.map(|t| now.duration_since(t) < Duration::from_millis(1500)).unwrap_or(false) {
             return true;
         }
         app.last_ctrl_c = Some(now);
@@ -1189,9 +1053,7 @@ fn handle_key(
                     spawn_search(app.webapi.clone(), q, search_tx.clone());
                 }
             }
-            KeyCode::Backspace => {
-                app.query.pop();
-            }
+            KeyCode::Backspace => { app.query.pop(); }
             KeyCode::Char(c) => app.query.push(c),
             _ => {}
         }
@@ -1226,12 +1088,8 @@ fn handle_key(
                 app.playback_started = true;
             }
         }
-        KeyCode::Char('n') => {
-            let _ = app.engine.next();
-        }
-        KeyCode::Char('b') => {
-            let _ = app.engine.prev();
-        }
+        KeyCode::Char('n') => { let _ = app.engine.next(); }
+        KeyCode::Char('b') => { let _ = app.engine.prev(); }
         KeyCode::Char('+') | KeyCode::Char('=') => {
             app.volume = (app.volume + 5).min(100);
             let _ = app.engine.set_volume(vol_u16(app.volume));
@@ -1297,31 +1155,31 @@ fn handle_key(
         }
         KeyCode::Down | KeyCode::Char('j') => app.move_sel(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_sel(-1),
-        KeyCode::Enter => match app.activate() {
-            Activated::Open(uri, name) => {
-                spawn_detail_fetch(app.webapi.clone(), uri, name, detail_tx.clone());
+        KeyCode::Enter => {
+            match app.activate() {
+                Activated::Open(uri, name) => {
+                    spawn_detail_fetch(app.webapi.clone(), uri, name, detail_tx.clone());
+                }
+                Activated::Radio(uri) => {
+                    app.status = "starting radio…".to_string();
+                    let session = app.engine.session();
+                    let tx = radio_tx.clone();
+                    tokio::spawn(async move {
+                        let res = match tokio::time::timeout(
+                            Duration::from_secs(12),
+                            engine::radio_tracks(&session, &uri),
+                        )
+                        .await
+                        {
+                            Ok(r) => r.map_err(|e| e.to_string()),
+                            Err(_) => Err("timed out (mercury radio endpoint unresponsive)".to_string()),
+                        };
+                        let _ = tx.send(res);
+                    });
+                }
+                Activated::None => {}
             }
-            Activated::Radio(uri) => {
-                app.status = "starting radio…".to_string();
-                let session = app.engine.session();
-                let tx = radio_tx.clone();
-                tokio::spawn(async move {
-                    let res = match tokio::time::timeout(
-                        Duration::from_secs(12),
-                        engine::radio_tracks(&session, &uri),
-                    )
-                    .await
-                    {
-                        Ok(r) => r.map_err(|e| e.to_string()),
-                        Err(_) => {
-                            Err("timed out (mercury radio endpoint unresponsive)".to_string())
-                        }
-                    };
-                    let _ = tx.send(res);
-                });
-            }
-            Activated::None => {}
-        },
+        }
         _ => {}
     }
     false
@@ -1357,11 +1215,7 @@ fn handle_action_key(
     }
 
     // Enter: act on the selected entry.
-    let kind = app
-        .actions
-        .as_ref()
-        .and_then(|m| m.items.get(m.selected))
-        .map(|i| i.kind.clone());
+    let kind = app.actions.as_ref().and_then(|m| m.items.get(m.selected)).map(|i| i.kind.clone());
     let Some(kind) = kind else { return };
     match kind {
         ActionKind::AddToPlaylistMenu { track_uri } => {
@@ -1373,10 +1227,7 @@ fn handle_action_key(
                     let id = p.uri.rsplit(':').next()?.to_string();
                     Some(ActionItem {
                         label: p.name.clone(),
-                        kind: ActionKind::AddToPlaylist {
-                            playlist_id: id,
-                            track_uri: track_uri.clone(),
-                        },
+                        kind: ActionKind::AddToPlaylist { playlist_id: id, track_uri: track_uri.clone() },
                     })
                 })
                 .collect();
@@ -1384,17 +1235,11 @@ fn handle_action_key(
                 app.status = "no playlists to add to".to_string();
                 app.actions = None;
             } else {
-                app.actions = Some(ActionMenu {
-                    title: "Add to playlist".to_string(),
-                    items,
-                    selected: 0,
-                });
+                app.actions = Some(ActionMenu { title: "Add to playlist".to_string(), items, selected: 0 });
             }
         }
         ActionKind::Play { uri } => {
-            if let Err(e) = app.engine.play_context(uri, app.shuffle) {
-                app.status = format!("couldn't play: {e:#}");
-            }
+            if let Err(e) = app.engine.play_context(uri, app.shuffle) { app.status = format!("couldn't play: {e:#}"); }
             app.actions = None;
         }
         ActionKind::Open { uri, name } => {
@@ -1436,13 +1281,7 @@ fn copy_to_clipboard(text: &str) -> bool {
         ("pbcopy", &[]),
     ];
     for (cmd, args) in candidates {
-        if let Ok(mut child) = Command::new(cmd)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
+        if let Ok(mut child) = Command::new(cmd).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
             if let Some(mut sin) = child.stdin.take() {
                 let _ = sin.write_all(text.as_bytes());
             }
@@ -1477,183 +1316,58 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
 
     match kind {
         "track" => {
-            let saved = token
-                .map(|t| {
-                    api_contains(
-                        t,
-                        &format!("https://api.spotify.com/v1/me/tracks/contains?ids={id}"),
-                    )
-                })
-                .unwrap_or(false);
+            let saved = token.map(|t| api_contains(t, &format!("https://api.spotify.com/v1/me/tracks/contains?ids={id}"))).unwrap_or(false);
             items.push(ActionItem {
-                label: if saved {
-                    "♥  Remove from Liked".into()
-                } else {
-                    "♡  Add to Liked".into()
-                },
-                kind: ActionKind::ToggleLike {
-                    id: id.clone(),
-                    saved,
-                },
+                label: if saved { "♥  Remove from Liked".into() } else { "♡  Add to Liked".into() },
+                kind: ActionKind::ToggleLike { id: id.clone(), saved },
             });
-            items.push(ActionItem {
-                label: "＋  Add to Queue".into(),
-                kind: ActionKind::Queue { uri: uri.clone() },
-            });
-            items.push(ActionItem {
-                label: "≡  Add to Playlist…".into(),
-                kind: ActionKind::AddToPlaylistMenu {
-                    track_uri: uri.clone(),
-                },
-            });
+            items.push(ActionItem { label: "＋  Add to Queue".into(), kind: ActionKind::Queue { uri: uri.clone() } });
+            items.push(ActionItem { label: "≡  Add to Playlist…".into(), kind: ActionKind::AddToPlaylistMenu { track_uri: uri.clone() } });
             // Resolve the track's artist + album for "Go to" navigation.
-            if let Some(v) = client.as_ref().zip(token).and_then(|(c, t)| {
-                get_json(c, &format!("https://api.spotify.com/v1/tracks/{id}"), t)
-            }) {
-                if let (Some(au), Some(an)) = (
-                    v["artists"][0]["uri"].as_str(),
-                    v["artists"][0]["name"].as_str(),
-                ) {
-                    items.push(ActionItem {
-                        label: format!("→  Go to Artist ({an})"),
-                        kind: ActionKind::Open {
-                            uri: au.to_string(),
-                            name: an.to_string(),
-                        },
-                    });
+            if let Some(v) = client.as_ref().zip(token).and_then(|(c, t)| get_json(c, &format!("https://api.spotify.com/v1/tracks/{id}"), t)) {
+                if let (Some(au), Some(an)) = (v["artists"][0]["uri"].as_str(), v["artists"][0]["name"].as_str()) {
+                    items.push(ActionItem { label: format!("→  Go to Artist ({an})"), kind: ActionKind::Open { uri: au.to_string(), name: an.to_string() } });
                 }
-                if let (Some(lu), Some(ln)) =
-                    (v["album"]["uri"].as_str(), v["album"]["name"].as_str())
-                {
-                    items.push(ActionItem {
-                        label: "→  Go to Album".into(),
-                        kind: ActionKind::Open {
-                            uri: lu.to_string(),
-                            name: ln.to_string(),
-                        },
-                    });
+                if let (Some(lu), Some(ln)) = (v["album"]["uri"].as_str(), v["album"]["name"].as_str()) {
+                    items.push(ActionItem { label: "→  Go to Album".into(), kind: ActionKind::Open { uri: lu.to_string(), name: ln.to_string() } });
                 }
             }
-            items.push(ActionItem {
-                label: "⧉  Copy Link".into(),
-                kind: ActionKind::CopyLink { uri },
-            });
+            items.push(ActionItem { label: "⧉  Copy Link".into(), kind: ActionKind::CopyLink { uri } });
         }
         "artist" => {
-            let following = token
-                .map(|t| {
-                    api_contains(
-                        t,
-                        &format!(
-                            "https://api.spotify.com/v1/me/following/contains?type=artist&ids={id}"
-                        ),
-                    )
-                })
-                .unwrap_or(false);
+            let following = token.map(|t| api_contains(t, &format!("https://api.spotify.com/v1/me/following/contains?type=artist&ids={id}"))).unwrap_or(false);
             items.push(ActionItem {
-                label: if following {
-                    "Unfollow".into()
-                } else {
-                    "Follow".into()
-                },
+                label: if following { "Unfollow".into() } else { "Follow".into() },
                 kind: ActionKind::ToggleFollowArtist { id, following },
             });
-            items.push(ActionItem {
-                label: "▶︎  Play".into(),
-                kind: ActionKind::Play { uri: uri.clone() },
-            });
-            items.push(ActionItem {
-                label: "→  Open".into(),
-                kind: ActionKind::Open {
-                    uri: uri.clone(),
-                    name: item.name.clone(),
-                },
-            });
-            items.push(ActionItem {
-                label: "⧉  Copy Link".into(),
-                kind: ActionKind::CopyLink { uri },
-            });
+            items.push(ActionItem { label: "▶︎  Play".into(), kind: ActionKind::Play { uri: uri.clone() } });
+            items.push(ActionItem { label: "→  Open".into(), kind: ActionKind::Open { uri: uri.clone(), name: item.name.clone() } });
+            items.push(ActionItem { label: "⧉  Copy Link".into(), kind: ActionKind::CopyLink { uri } });
         }
         "album" => {
-            let saved = token
-                .map(|t| {
-                    api_contains(
-                        t,
-                        &format!("https://api.spotify.com/v1/me/albums/contains?ids={id}"),
-                    )
-                })
-                .unwrap_or(false);
+            let saved = token.map(|t| api_contains(t, &format!("https://api.spotify.com/v1/me/albums/contains?ids={id}"))).unwrap_or(false);
             items.push(ActionItem {
-                label: if saved {
-                    "Remove from Library".into()
-                } else {
-                    "Save Album".into()
-                },
-                kind: ActionKind::ToggleSaveAlbum {
-                    id: id.clone(),
-                    saved,
-                },
+                label: if saved { "Remove from Library".into() } else { "Save Album".into() },
+                kind: ActionKind::ToggleSaveAlbum { id: id.clone(), saved },
             });
-            items.push(ActionItem {
-                label: "▶︎  Play".into(),
-                kind: ActionKind::Play { uri: uri.clone() },
-            });
-            items.push(ActionItem {
-                label: "→  Open Album".into(),
-                kind: ActionKind::Open {
-                    uri: uri.clone(),
-                    name: item.name.clone(),
-                },
-            });
-            if let Some(v) = client.as_ref().zip(token).and_then(|(c, t)| {
-                get_json(c, &format!("https://api.spotify.com/v1/albums/{id}"), t)
-            }) {
-                if let (Some(au), Some(an)) = (
-                    v["artists"][0]["uri"].as_str(),
-                    v["artists"][0]["name"].as_str(),
-                ) {
-                    items.push(ActionItem {
-                        label: format!("→  Go to Artist ({an})"),
-                        kind: ActionKind::Open {
-                            uri: au.to_string(),
-                            name: an.to_string(),
-                        },
-                    });
+            items.push(ActionItem { label: "▶︎  Play".into(), kind: ActionKind::Play { uri: uri.clone() } });
+            items.push(ActionItem { label: "→  Open Album".into(), kind: ActionKind::Open { uri: uri.clone(), name: item.name.clone() } });
+            if let Some(v) = client.as_ref().zip(token).and_then(|(c, t)| get_json(c, &format!("https://api.spotify.com/v1/albums/{id}"), t)) {
+                if let (Some(au), Some(an)) = (v["artists"][0]["uri"].as_str(), v["artists"][0]["name"].as_str()) {
+                    items.push(ActionItem { label: format!("→  Go to Artist ({an})"), kind: ActionKind::Open { uri: au.to_string(), name: an.to_string() } });
                 }
             }
-            items.push(ActionItem {
-                label: "⧉  Copy Link".into(),
-                kind: ActionKind::CopyLink { uri },
-            });
+            items.push(ActionItem { label: "⧉  Copy Link".into(), kind: ActionKind::CopyLink { uri } });
         }
         "playlist" => {
-            items.push(ActionItem {
-                label: "＋  Add to Your Library".into(),
-                kind: ActionKind::FollowPlaylist { id },
-            });
-            items.push(ActionItem {
-                label: "▶︎  Play".into(),
-                kind: ActionKind::Play { uri: uri.clone() },
-            });
-            items.push(ActionItem {
-                label: "→  Open".into(),
-                kind: ActionKind::Open {
-                    uri: uri.clone(),
-                    name: item.name.clone(),
-                },
-            });
-            items.push(ActionItem {
-                label: "⧉  Copy Link".into(),
-                kind: ActionKind::CopyLink { uri },
-            });
+            items.push(ActionItem { label: "＋  Add to Your Library".into(), kind: ActionKind::FollowPlaylist { id } });
+            items.push(ActionItem { label: "▶︎  Play".into(), kind: ActionKind::Play { uri: uri.clone() } });
+            items.push(ActionItem { label: "→  Open".into(), kind: ActionKind::Open { uri: uri.clone(), name: item.name.clone() } });
+            items.push(ActionItem { label: "⧉  Copy Link".into(), kind: ActionKind::CopyLink { uri } });
         }
         _ => {}
     }
-    ActionMenu {
-        title: item.name.clone(),
-        items,
-        selected: 0,
-    }
+    ActionMenu { title: item.name.clone(), items, selected: 0 }
 }
 
 fn spawn_action(webapi: Arc<Mutex<WebApi>>, kind: ActionKind, tx: flume::Sender<String>) {
@@ -1671,96 +1385,39 @@ fn run_action(token: &str, kind: ActionKind) -> String {
     match kind {
         ActionKind::ToggleLike { id, saved } => {
             let m = if saved { "DELETE" } else { "PUT" };
-            match api_modify(
-                &client,
-                token,
-                m,
-                &format!("https://api.spotify.com/v1/me/tracks?ids={id}"),
-            ) {
-                Ok(()) => {
-                    if saved {
-                        "removed from Liked".into()
-                    } else {
-                        "added to Liked ♥ (press r to refresh)".into()
-                    }
-                }
+            match api_modify(&client, token, m, &format!("https://api.spotify.com/v1/me/tracks?ids={id}")) {
+                Ok(()) => if saved { "removed from Liked".into() } else { "added to Liked ♥ (press r to refresh)".into() },
                 Err(e) => format!("like failed: {e}"),
             }
         }
         ActionKind::Queue { uri } => {
-            match api_modify(
-                &client,
-                token,
-                "POST",
-                &format!(
-                    "https://api.spotify.com/v1/me/player/queue?uri={}",
-                    urlencode(&uri)
-                ),
-            ) {
+            match api_modify(&client, token, "POST", &format!("https://api.spotify.com/v1/me/player/queue?uri={}", urlencode(&uri))) {
                 Ok(()) => "added to queue".into(),
                 Err(e) => format!("queue failed: {e} (start playback first)"),
             }
         }
-        ActionKind::AddToPlaylist {
-            playlist_id,
-            track_uri,
-        } => {
-            match api_modify(
-                &client,
-                token,
-                "POST",
-                &format!(
-                    "https://api.spotify.com/v1/playlists/{playlist_id}/tracks?uris={}",
-                    urlencode(&track_uri)
-                ),
-            ) {
+        ActionKind::AddToPlaylist { playlist_id, track_uri } => {
+            match api_modify(&client, token, "POST", &format!("https://api.spotify.com/v1/playlists/{playlist_id}/tracks?uris={}", urlencode(&track_uri))) {
                 Ok(()) => "added to playlist".into(),
                 Err(e) => format!("add failed: {e}"),
             }
         }
         ActionKind::ToggleFollowArtist { id, following } => {
             let m = if following { "DELETE" } else { "PUT" };
-            match api_modify(
-                &client,
-                token,
-                m,
-                &format!("https://api.spotify.com/v1/me/following?type=artist&ids={id}"),
-            ) {
-                Ok(()) => {
-                    if following {
-                        "unfollowed".into()
-                    } else {
-                        "following".into()
-                    }
-                }
+            match api_modify(&client, token, m, &format!("https://api.spotify.com/v1/me/following?type=artist&ids={id}")) {
+                Ok(()) => if following { "unfollowed".into() } else { "following".into() },
                 Err(e) => format!("follow failed: {e}"),
             }
         }
         ActionKind::ToggleSaveAlbum { id, saved } => {
             let m = if saved { "DELETE" } else { "PUT" };
-            match api_modify(
-                &client,
-                token,
-                m,
-                &format!("https://api.spotify.com/v1/me/albums?ids={id}"),
-            ) {
-                Ok(()) => {
-                    if saved {
-                        "removed album".into()
-                    } else {
-                        "saved album".into()
-                    }
-                }
+            match api_modify(&client, token, m, &format!("https://api.spotify.com/v1/me/albums?ids={id}")) {
+                Ok(()) => if saved { "removed album".into() } else { "saved album".into() },
                 Err(e) => format!("album action failed: {e}"),
             }
         }
         ActionKind::FollowPlaylist { id } => {
-            match api_modify(
-                &client,
-                token,
-                "PUT",
-                &format!("https://api.spotify.com/v1/playlists/{id}/followers"),
-            ) {
+            match api_modify(&client, token, "PUT", &format!("https://api.spotify.com/v1/playlists/{id}/followers")) {
                 Ok(()) => "added to library".into(),
                 Err(e) => format!("add failed: {e}"),
             }
@@ -1771,12 +1428,7 @@ fn run_action(token: &str, kind: ActionKind) -> String {
 
 /// Returns Ok on 2xx, else a short reason (HTTP status / network) so the UI can
 /// say WHY instead of a generic "action failed". Retries once on 429.
-fn api_modify(
-    client: &reqwest::blocking::Client,
-    token: &str,
-    method: &str,
-    url: &str,
-) -> Result<(), String> {
+fn api_modify(client: &reqwest::blocking::Client, token: &str, method: &str, url: &str) -> Result<(), String> {
     for attempt in 0..2 {
         let req = match method {
             "PUT" => client.put(url),
@@ -1796,13 +1448,7 @@ fn api_modify(
                 std::thread::sleep(Duration::from_secs(wait));
             }
             Ok(r) => return Err(format!("HTTP {}", r.status().as_u16())),
-            Err(e) => {
-                return Err(if e.is_timeout() {
-                    "timeout".into()
-                } else {
-                    "network error".into()
-                })
-            }
+            Err(e) => return Err(if e.is_timeout() { "timeout".into() } else { "network error".into() }),
         }
     }
     Err("rate limited".into())
@@ -1822,21 +1468,9 @@ fn save_state(app: &App) {
         shuffle: app.shuffle,
         repeat: app.repeat,
         last_uri: app.now.as_ref().map(|n| n.uri.clone()).unwrap_or_default(),
-        last_title: app
-            .now
-            .as_ref()
-            .map(|n| n.title.clone())
-            .unwrap_or_default(),
-        last_artist: app
-            .now
-            .as_ref()
-            .map(|n| n.artist.clone())
-            .unwrap_or_default(),
-        last_album: app
-            .now
-            .as_ref()
-            .map(|n| n.album.clone())
-            .unwrap_or_default(),
+        last_title: app.now.as_ref().map(|n| n.title.clone()).unwrap_or_default(),
+        last_artist: app.now.as_ref().map(|n| n.artist.clone()).unwrap_or_default(),
+        last_album: app.now.as_ref().map(|n| n.album.clone()).unwrap_or_default(),
         last_duration_ms: app.now.as_ref().map(|n| n.duration_ms).unwrap_or(0),
         last_position_ms: app.position_ms(),
         queue: app.queue.clone(),
@@ -1909,12 +1543,8 @@ fn apply_meta(
 
     // Fetch synced lyrics from lrclib for the new track.
     if !meta.title.is_empty() {
-        let (artist, title, album, dur) = (
-            meta.artist.clone(),
-            meta.title.clone(),
-            meta.album.clone(),
-            meta.duration_ms,
-        );
+        let (artist, title, album, dur) =
+            (meta.artist.clone(), meta.title.clone(), meta.album.clone(), meta.duration_ms);
         let tx = lyrics_tx.clone();
         tokio::task::spawn_blocking(move || {
             let _ = tx.send(fetch_lyrics_blocking(&artist, &title, &album, dur));
@@ -1989,11 +1619,7 @@ fn token_of(webapi: &Arc<Mutex<WebApi>>) -> Option<String> {
 }
 
 /// GET a JSON endpoint, retrying on 429 (respecting Retry-After).
-fn get_json(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    token: &str,
-) -> Option<serde_json::Value> {
+fn get_json(client: &reqwest::blocking::Client, url: &str, token: &str) -> Option<serde_json::Value> {
     for _ in 0..5 {
         let resp = client.get(url).bearer_auth(token).send().ok()?;
         if resp.status().as_u16() == 429 {
@@ -2025,188 +1651,124 @@ fn spawn_library_fetch(
     // Clone the already-refreshed access token BEFORE spawning. This removes the
     // shared WebApi mutex from the worker entirely (the stuck-library root cause).
     let token_opt = token_of(&webapi);
-    liblog(format!(
-        "spawn_library_fetch: token={}",
-        token_opt.as_ref().map_or("missing", |_| "ok")
-    ));
+    liblog(format!("spawn_library_fetch: token={}", token_opt.as_ref().map_or("missing", |_| "ok")));
     std::thread::Builder::new()
         .name("myx-library".to_string())
         .spawn(move || {
-            liblog("worker: entered");
-            let Some(token) = token_opt else {
-                liblog("worker: no token; aborting");
-                let _ = done_tx.send(false);
-                return;
-            };
+        liblog("worker: entered");
+        let Some(token) = token_opt else {
+            liblog("worker: no token; aborting");
+            let _ = done_tx.send(false);
+            return;
+        };
 
-            let client = reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(12))
-                .build()
-                .expect("build library HTTP client");
-            let mut got_any = false;
-            let track_from = |t: &serde_json::Value| -> Option<LibItem> {
-                Some(LibItem::track(
-                    t["name"].as_str()?.to_string(),
-                    t["artists"][0]["name"].as_str().unwrap_or("").to_string(),
-                    t["uri"].as_str()?.to_string(),
-                ))
-            };
-            let artist_from = |a: &serde_json::Value| -> Option<LibItem> {
-                Some(LibItem::ctx(
-                    a["name"].as_str()?.to_string(),
-                    String::new(),
-                    a["uri"].as_str()?.to_string(),
-                ))
-            };
-            let album_from = |a: &serde_json::Value| -> Option<LibItem> {
-                Some(LibItem::ctx(
-                    a["name"].as_str()?.to_string(),
-                    format!("album · {}", a["artists"][0]["name"].as_str().unwrap_or("")),
-                    a["uri"].as_str()?.to_string(),
-                ))
-            };
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(12))
+            .build()
+            .expect("build library HTTP client");
+        let mut got_any = false;
+        let track_from = |t: &serde_json::Value| -> Option<LibItem> {
+            Some(LibItem::track(
+                t["name"].as_str()?.to_string(),
+                t["artists"][0]["name"].as_str().unwrap_or("").to_string(),
+                t["uri"].as_str()?.to_string(),
+            ))
+        };
+        let artist_from = |a: &serde_json::Value| -> Option<LibItem> {
+            Some(LibItem::ctx(
+                a["name"].as_str()?.to_string(),
+                String::new(),
+                a["uri"].as_str()?.to_string(),
+            ))
+        };
+        let album_from = |a: &serde_json::Value| -> Option<LibItem> {
+            Some(LibItem::ctx(
+                a["name"].as_str()?.to_string(),
+                format!("album · {}", a["artists"][0]["name"].as_str().unwrap_or("")),
+                a["uri"].as_str()?.to_string(),
+            ))
+        };
 
-            // Home: a curated mix — recently played, top tracks, top artists, new releases.
-            liblog("worker: fetching home/recent");
-            let mut home: Vec<LibItem> = Vec::new();
-            let recent5 = fetch_all_pages(
-                &client,
-                "https://api.spotify.com/v1/me/player/recently-played?limit=10",
-                &token,
-                None,
-                1,
-                |it| track_from(&it["track"]),
-            );
-            if !recent5.is_empty() {
-                home.push(LibItem::header("Recently Played"));
-                home.extend(recent5.into_iter().take(6));
+        // Home: a curated mix — recently played, top tracks, top artists, new releases.
+        liblog("worker: fetching home/recent");
+        let mut home: Vec<LibItem> = Vec::new();
+        let recent5 = fetch_all_pages(&client, "https://api.spotify.com/v1/me/player/recently-played?limit=10", &token, None, 1, |it| track_from(&it["track"]));
+        if !recent5.is_empty() {
+            home.push(LibItem::header("Recently Played"));
+            home.extend(recent5.into_iter().take(6));
+        }
+        let top_tracks = fetch_all_pages(&client, "https://api.spotify.com/v1/me/top/tracks?limit=10", &token, None, 1, |t| track_from(t));
+        if !top_tracks.is_empty() {
+            home.push(LibItem::header("Your Top Tracks"));
+            home.extend(top_tracks.into_iter().take(8));
+        }
+        let top_artists = fetch_all_pages(&client, "https://api.spotify.com/v1/me/top/artists?limit=10", &token, None, 1, |a| artist_from(a));
+        if !top_artists.is_empty() {
+            home.push(LibItem::header("Your Top Artists"));
+            home.extend(top_artists.into_iter().take(6));
+        }
+        let new_releases = fetch_all_pages(&client, "https://api.spotify.com/v1/browse/new-releases?limit=10", &token, Some("albums"), 1, |a| album_from(a));
+        if !new_releases.is_empty() {
+            home.push(LibItem::header("New Releases"));
+            home.extend(new_releases.into_iter().take(6));
+        }
+        got_any |= !home.is_empty();
+        liblog(format!("worker: home done, {} rows", home.len()));
+        let _ = tx.send((Section::Home, home));
+
+        let recent = fetch_all_pages(&client, "https://api.spotify.com/v1/me/player/recently-played?limit=50", &token, None, 1, |it| track_from(&it["track"]));
+        got_any |= !recent.is_empty();
+        let _ = tx.send((Section::Recent, recent));
+
+        let playlists = fetch_all_pages(&client, "https://api.spotify.com/v1/me/playlists?limit=50", &token, None, 10, |it| {
+            Some(LibItem::ctx(
+                it["name"].as_str()?.to_string(),
+                it["owner"]["display_name"].as_str().unwrap_or("").to_string(),
+                it["uri"].as_str()?.to_string(),
+            ))
+        });
+        got_any |= !playlists.is_empty();
+        let _ = tx.send((Section::Playlists, playlists));
+
+        let albums = fetch_all_pages(&client, "https://api.spotify.com/v1/me/albums?limit=50", &token, None, 10, |it| album_from(&it["album"]));
+        got_any |= !albums.is_empty();
+        let _ = tx.send((Section::Albums, albums));
+
+        let artists = fetch_all_pages(&client, "https://api.spotify.com/v1/me/following?type=artist&limit=50", &token, Some("artists"), 5, |it| artist_from(it));
+        got_any |= !artists.is_empty();
+        let _ = tx.send((Section::Artists, artists));
+
+        // Liked can be huge — stream it in as pages arrive so the count climbs live.
+        // Prepend Shuffle/Play action rows (shuffle first).
+        let mut liked: Vec<LibItem> = vec![
+            LibItem::play("▶︎  Play Liked Songs".into(), "myx:action:liked-play".into()),
+            LibItem::header("Songs"),
+        ];
+        let mut url = Some("https://api.spotify.com/v1/me/tracks?limit=50".to_string());
+        let mut pages = 0;
+        while let Some(u) = url.take() {
+            if pages >= 100 {
+                break;
             }
-            let top_tracks = fetch_all_pages(
-                &client,
-                "https://api.spotify.com/v1/me/top/tracks?limit=10",
-                &token,
-                None,
-                1,
-                |t| track_from(t),
-            );
-            if !top_tracks.is_empty() {
-                home.push(LibItem::header("Your Top Tracks"));
-                home.extend(top_tracks.into_iter().take(8));
-            }
-            let top_artists = fetch_all_pages(
-                &client,
-                "https://api.spotify.com/v1/me/top/artists?limit=10",
-                &token,
-                None,
-                1,
-                |a| artist_from(a),
-            );
-            if !top_artists.is_empty() {
-                home.push(LibItem::header("Your Top Artists"));
-                home.extend(top_artists.into_iter().take(6));
-            }
-            let new_releases = fetch_all_pages(
-                &client,
-                "https://api.spotify.com/v1/browse/new-releases?limit=10",
-                &token,
-                Some("albums"),
-                1,
-                |a| album_from(a),
-            );
-            if !new_releases.is_empty() {
-                home.push(LibItem::header("New Releases"));
-                home.extend(new_releases.into_iter().take(6));
-            }
-            got_any |= !home.is_empty();
-            liblog(format!("worker: home done, {} rows", home.len()));
-            let _ = tx.send((Section::Home, home));
-
-            let recent = fetch_all_pages(
-                &client,
-                "https://api.spotify.com/v1/me/player/recently-played?limit=50",
-                &token,
-                None,
-                1,
-                |it| track_from(&it["track"]),
-            );
-            got_any |= !recent.is_empty();
-            let _ = tx.send((Section::Recent, recent));
-
-            let playlists = fetch_all_pages(
-                &client,
-                "https://api.spotify.com/v1/me/playlists?limit=50",
-                &token,
-                None,
-                10,
-                |it| {
-                    Some(LibItem::ctx(
-                        it["name"].as_str()?.to_string(),
-                        it["owner"]["display_name"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
-                        it["uri"].as_str()?.to_string(),
-                    ))
-                },
-            );
-            got_any |= !playlists.is_empty();
-            let _ = tx.send((Section::Playlists, playlists));
-
-            let albums = fetch_all_pages(
-                &client,
-                "https://api.spotify.com/v1/me/albums?limit=50",
-                &token,
-                None,
-                10,
-                |it| album_from(&it["album"]),
-            );
-            got_any |= !albums.is_empty();
-            let _ = tx.send((Section::Albums, albums));
-
-            let artists = fetch_all_pages(
-                &client,
-                "https://api.spotify.com/v1/me/following?type=artist&limit=50",
-                &token,
-                Some("artists"),
-                5,
-                |it| artist_from(it),
-            );
-            got_any |= !artists.is_empty();
-            let _ = tx.send((Section::Artists, artists));
-
-            // Liked can be huge — stream it in as pages arrive so the count climbs live.
-            // Prepend Shuffle/Play action rows (shuffle first).
-            let mut liked: Vec<LibItem> = vec![
-                LibItem::play("▶︎  Play Liked Songs".into(), "myx:action:liked-play".into()),
-                LibItem::header("Songs"),
-            ];
-            let mut url = Some("https://api.spotify.com/v1/me/tracks?limit=50".to_string());
-            let mut pages = 0;
-            while let Some(u) = url.take() {
-                if pages >= 100 {
-                    break;
-                }
-                let Some(v) = get_json(&client, &u, &token) else {
-                    break;
-                };
-                for it in v["items"].as_array().into_iter().flatten() {
-                    if let Some(li) = track_from(&it["track"]) {
-                        liked.push(li);
-                    }
-                }
-                url = v["next"].as_str().map(String::from);
-                pages += 1;
-                if pages % 3 == 0 {
-                    let _ = tx.send((Section::Liked, liked.clone()));
+            let Some(v) = get_json(&client, &u, &token) else { break };
+            for it in v["items"].as_array().into_iter().flatten() {
+                if let Some(li) = track_from(&it["track"]) {
+                    liked.push(li);
                 }
             }
-            got_any |= liked.len() > 2; // beyond the two action rows
-            let _ = tx.send((Section::Liked, liked));
+            url = v["next"].as_str().map(String::from);
+            pages += 1;
+            if pages % 3 == 0 {
+                let _ = tx.send((Section::Liked, liked.clone()));
+            }
+        }
+        got_any |= liked.len() > 2; // beyond the two action rows
+        let _ = tx.send((Section::Liked, liked));
 
-            liblog(format!("worker: all done got_any={got_any}"));
-            let _ = done_tx.send(got_any);
-        })
-        .expect("spawn library worker");
+        liblog(format!("worker: all done got_any={got_any}"));
+        let _ = done_tx.send(got_any);
+    })
+    .expect("spawn library worker");
 }
 
 fn fetch_all_pages(
@@ -2224,9 +1786,7 @@ fn fetch_all_pages(
         if pages >= max_pages {
             break;
         }
-        let Some(v) = get_json(client, &u, token) else {
-            break;
-        };
+        let Some(v) = get_json(client, &u, token) else { break };
         let node = match nested {
             Some(k) => &v[k],
             None => &v,
@@ -2284,15 +1844,10 @@ fn fetch_track_meta(webapi: &Arc<Mutex<WebApi>>, track_id: &str) -> TrackMeta {
         image: None,
         theme: None,
     };
-    let Some(token) = token_of(webapi) else {
-        return empty();
-    };
+    let Some(token) = token_of(webapi) else { return empty() };
     let client = http_client();
-    let Some(v) = get_json(
-        &client,
-        &format!("https://api.spotify.com/v1/tracks/{track_id}"),
-        &token,
-    ) else {
+    let Some(v) = get_json(&client, &format!("https://api.spotify.com/v1/tracks/{track_id}"), &token)
+    else {
         return empty();
     };
 
@@ -2308,15 +1863,7 @@ fn fetch_track_meta(webapi: &Arc<Mutex<WebApi>>, track_id: &str) -> TrackMeta {
     });
     let theme = image.as_ref().map(|img| derive_theme(img, "album ✦"));
 
-    TrackMeta {
-        uri,
-        title,
-        artist,
-        album,
-        duration_ms,
-        image,
-        theme,
-    }
+    TrackMeta { uri, title, artist, album, duration_ms, image, theme }
 }
 
 // --- Search ---
@@ -2359,13 +1906,7 @@ fn search_blocking(token: &str, query: &str) -> Vec<LibItem> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|a| {
-            Some(LibItem::ctx(
-                a["name"].as_str()?.to_string(),
-                String::new(),
-                a["uri"].as_str()?.to_string(),
-            ))
-        })
+        .filter_map(|a| Some(LibItem::ctx(a["name"].as_str()?.to_string(), String::new(), a["uri"].as_str()?.to_string())))
         .collect();
     let albums: Vec<LibItem> = v["albums"]["items"]
         .as_array()
@@ -2386,10 +1927,7 @@ fn search_blocking(token: &str, query: &str) -> Vec<LibItem> {
         .filter_map(|p| {
             Some(LibItem::ctx(
                 p["name"].as_str()?.to_string(),
-                p["owner"]["display_name"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string(),
+                p["owner"]["display_name"].as_str().unwrap_or("").to_string(),
                 p["uri"].as_str()?.to_string(),
             ))
         })
@@ -2411,12 +1949,7 @@ fn search_blocking(token: &str, query: &str) -> Vec<LibItem> {
 
 // --- Lyrics (lrclib) ---
 
-fn fetch_lyrics_blocking(
-    artist: &str,
-    title: &str,
-    album: &str,
-    duration_ms: u32,
-) -> (Vec<(u32, String)>, bool) {
+fn fetch_lyrics_blocking(artist: &str, title: &str, album: &str, duration_ms: u32) -> (Vec<(u32, String)>, bool) {
     let client = http_client();
     let url = format!(
         "https://lrclib.net/api/get?artist_name={}&track_name={}&album_name={}&duration={}",
@@ -2425,11 +1958,7 @@ fn fetch_lyrics_blocking(
         urlencode(album),
         duration_ms / 1000
     );
-    let Ok(resp) = client
-        .get(&url)
-        .header("User-Agent", "myx (terminal spotify player)")
-        .send()
-    else {
+    let Ok(resp) = client.get(&url).header("User-Agent", "myx (terminal spotify player)").send() else {
         return (Vec::new(), false);
     };
     if !resp.status().is_success() {
@@ -2492,9 +2021,7 @@ fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -2646,10 +2173,7 @@ fn fetch_playback_state(token: &str) -> Option<PlaybackState> {
         track_id,
         progress_ms: v["progress_ms"].as_u64().unwrap_or(0) as u32,
         shuffle: v["shuffle_state"].as_bool().unwrap_or(false),
-        repeat: v["repeat_state"]
-            .as_str()
-            .map(|r| r != "off")
-            .unwrap_or(false),
+        repeat: v["repeat_state"].as_str().map(|r| r != "off").unwrap_or(false),
         volume: v["device"]["volume_percent"].as_u64().unwrap_or(50) as u8,
     })
 }
@@ -2669,14 +2193,14 @@ fn transfer_playback(token: &str, device_id: &str, play: bool) -> bool {
 
 /// Boot restore: read the live playback state, transfer it onto myx (retrying
 /// while the device registers), and hand the state back to the UI.
-fn spawn_restore(webapi: Arc<Mutex<WebApi>>, device_id: String, tx: flume::Sender<PlaybackState>) {
+fn spawn_restore(
+    webapi: Arc<Mutex<WebApi>>,
+    device_id: String,
+    tx: flume::Sender<PlaybackState>,
+) {
     tokio::task::spawn_blocking(move || {
-        let Some(token) = token_of(&webapi) else {
-            return;
-        };
-        let Some(state) = fetch_playback_state(&token) else {
-            return;
-        };
+        let Some(token) = token_of(&webapi) else { return };
+        let Some(state) = fetch_playback_state(&token) else { return };
         // Retry the transfer — the Connect device can take a moment to appear.
         for _ in 0..6 {
             if transfer_playback(&token, &device_id, false) {
@@ -2719,14 +2243,13 @@ fn render(f: &mut Frame, app: &mut App) {
     // Header: wordmark + view tabs (right-aligned) + status.
     // Fullwidth wordmark (each letter = 2 cells) reads as a bigger "myx"
     // than the terminal font allows on a single row; bolded for weight.
-    let mut header: Vec<Span> =
-        gradient_line("\u{FF2D}\u{FF39}\u{FF38}", &[theme.primary, theme.accent])
-            .into_iter()
-            .map(|mut sp| {
-                sp.style = sp.style.add_modifier(Modifier::BOLD);
-                sp
-            })
-            .collect();
+    let mut header: Vec<Span> = gradient_line("\u{FF2D}\u{FF39}\u{FF38}", &[theme.primary, theme.accent])
+        .into_iter()
+        .map(|mut sp| {
+            sp.style = sp.style.add_modifier(Modifier::BOLD);
+            sp
+        })
+        .collect();
     if !app.status.is_empty() {
         header.push(Span::styled(format!("   {}", app.status), theme.muted()));
     }
@@ -2738,30 +2261,15 @@ fn render(f: &mut Frame, app: &mut App) {
     // Per-tab hit rects for the mouse (mirrors view_tabs: "\u2190\u2192 " prefix + labels joined by " \u00b7 ").
     let mut total: usize = 3; // "\u2190\u2192 "
     for (i, v) in RightView::ALL.iter().enumerate() {
-        if i > 0 {
-            total += 3;
-        } // " \u00b7 "
+        if i > 0 { total += 3; } // " \u00b7 "
         total += v.label().chars().count();
     }
-    let mut tx_x = rows[0]
-        .right()
-        .saturating_sub(total as u16)
-        .saturating_add(3);
+    let mut tx_x = rows[0].right().saturating_sub(total as u16).saturating_add(3);
     let mut tabs = Vec::with_capacity(RightView::ALL.len());
     for (i, v) in RightView::ALL.iter().enumerate() {
-        if i > 0 {
-            tx_x = tx_x.saturating_add(3);
-        }
+        if i > 0 { tx_x = tx_x.saturating_add(3); }
         let w = v.label().chars().count() as u16;
-        tabs.push((
-            *v,
-            Rect {
-                x: tx_x,
-                y: rows[0].y,
-                width: w,
-                height: 1,
-            },
-        ));
+        tabs.push((*v, Rect { x: tx_x, y: rows[0].y, width: w, height: 1 }));
         tx_x = tx_x.saturating_add(w);
     }
     app.tab_rects = tabs;
@@ -2793,9 +2301,7 @@ fn view_tabs<'a>(app: &App, theme: Theme) -> Vec<Span<'a>> {
             spans.push(Span::styled(" · ", theme.muted()));
         }
         let style = if *v == app.view {
-            Style::default()
-                .fg(theme.primary.into())
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.primary.into()).add_modifier(Modifier::BOLD)
         } else {
             theme.muted()
         };
@@ -2815,19 +2321,13 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     let head: Line = if let Some(d) = app.details.last() {
         Line::from(vec![
             Span::styled("‹ ", Style::default().fg(theme.primary.into())),
-            Span::styled(
-                truncate(&d.title, inner.width.saturating_sub(8) as usize),
-                theme.heading(),
-            ),
+            Span::styled(truncate(&d.title, inner.width.saturating_sub(8) as usize), theme.heading()),
             Span::styled("  Esc", theme.muted()),
         ])
     } else if app.input_mode {
         Line::from(vec![
             Span::styled("search: ", theme.heading()),
-            Span::styled(
-                format!("{}▏", app.query),
-                Style::default().fg(theme.text.into()),
-            ),
+            Span::styled(format!("{}▏", app.query), Style::default().fg(theme.text.into())),
         ])
     } else if app.searching {
         Line::from(vec![
@@ -2841,31 +2341,18 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
             Span::styled(app.section.label(), theme.heading()),
             Span::styled(" ›", theme.muted()),
             Span::styled(
-                format!(
-                    "  {}/{} · {}",
-                    app.section.index() + 1,
-                    Section::ALL.len(),
-                    app.cur_items().len()
-                ),
+                format!("  {}/{} · {}", app.section.index() + 1, Section::ALL.len(), app.cur_items().len()),
                 theme.muted(),
             ),
         ];
         if app.sort != SortMode::Added {
-            spans.push(Span::styled(
-                format!("  ⇅{}", app.sort.label()),
-                Style::default().fg(theme.accent.into()),
-            ));
+            spans.push(Span::styled(format!("  ⇅{}", app.sort.label()), Style::default().fg(theme.accent.into())));
         }
         Line::from(spans)
     };
     f.render_widget(
         Paragraph::new(head).block(Block::default().style(theme.panel())),
-        Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: 1,
-        },
+        Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
 
     let list_top = inner.y + 2;
@@ -2881,27 +2368,13 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled("(empty)", theme.muted())))
                 .block(Block::default().style(theme.panel())),
-            Rect {
-                x: inner.x,
-                y: list_top,
-                width: inner.width,
-                height: 1,
-            },
+            Rect { x: inner.x, y: list_top, width: inner.width, height: 1 },
         );
         return;
     }
 
-    let offset = if app.selected >= cap {
-        app.selected + 1 - cap
-    } else {
-        0
-    };
-    app.lib_rect = Some(Rect {
-        x: inner.x,
-        y: list_top,
-        width: inner.width,
-        height: cap as u16,
-    });
+    let offset = if app.selected >= cap { app.selected + 1 - cap } else { 0 };
+    app.lib_rect = Some(Rect { x: inner.x, y: list_top, width: inner.width, height: cap as u16 });
     app.lib_offset = offset;
     let overflow = total_items > cap && inner.width > 2;
     // Reserve an extra gutter column for the scrollbar (+1 char of padding).
@@ -2911,21 +2384,14 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     for (row, item) in items.iter().skip(offset).take(cap).enumerate() {
         let idx = offset + row;
         let y = list_top + row as u16;
-        let rect = Rect {
-            x: inner.x,
-            y,
-            width: inner.width,
-            height: 1,
-        };
+        let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
 
         // Header rows: a bold section label (Home feed groups), not selectable.
         if item.is_header {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     item.name.clone(),
-                    Style::default()
-                        .fg(theme.accent.into())
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.accent.into()).add_modifier(Modifier::BOLD),
                 )))
                 .block(Block::default().style(theme.panel())),
                 rect,
@@ -2934,16 +2400,10 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
         }
 
         let selected = idx == app.selected;
-        let bg = if selected {
-            theme.background_element.into()
-        } else {
-            theme.background_panel.into()
-        };
+        let bg = if selected { theme.background_element.into() } else { theme.background_panel.into() };
         let block = left_bar_block(&theme, selected, bg);
         let style = if selected {
-            Style::default()
-                .fg(theme.text.into())
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.text.into()).add_modifier(Modifier::BOLD)
         } else {
             theme.muted()
         };
@@ -2953,10 +2413,7 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
             let used = label.chars().count() + 1;
             let room = max.saturating_sub(used + 3);
             if room > 3 {
-                spans.push(Span::styled(
-                    " · ",
-                    Style::default().fg(theme.border_dimmest.into()),
-                ));
+                spans.push(Span::styled(" · ", Style::default().fg(theme.border_dimmest.into())));
                 spans.push(Span::styled(
                     truncate(&item.subtitle, room),
                     theme.muted().add_modifier(Modifier::DIM),
@@ -2976,11 +2433,7 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
         let thumb_h = ((cap * cap + total - 1) / total).max(1).min(track_h);
         let travel = track_h - thumb_h;
         let max_off = total - cap;
-        let thumb_y0 = if max_off == 0 {
-            0
-        } else {
-            (offset * travel + max_off / 2) / max_off
-        };
+        let thumb_y0 = if max_off == 0 { 0 } else { (offset * travel + max_off / 2) / max_off };
         for i in 0..track_h {
             let y = list_top + i as u16;
             if y >= inner.bottom() {
@@ -2988,26 +2441,16 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
             }
             let in_thumb = i >= thumb_y0 && i < thumb_y0 + thumb_h;
             let (glyph, color) = if in_thumb {
-                ("\u{258E}", theme.text_muted) // 1/4 block - thumb
+                ("\u{258E}", theme.text_muted)   // 1/4 block - thumb
             } else {
                 ("\u{258F}", theme.border_dimmest) // 1/8 block - track
             };
             f.render_widget(
                 Paragraph::new(Span::styled(glyph, Style::default().fg(color.into()))),
-                Rect {
-                    x: sb_x,
-                    y,
-                    width: 1,
-                    height: 1,
-                },
+                Rect { x: sb_x, y, width: 1, height: 1 },
             );
         }
-        app.scroll_rect = Some(Rect {
-            x: sb_x,
-            y: list_top,
-            width: 1,
-            height: track_h as u16,
-        });
+        app.scroll_rect = Some(Rect { x: sb_x, y: list_top, width: 1, height: track_h as u16 });
         app.scroll_len = total;
     } else {
         app.scroll_rect = None;
@@ -3063,20 +2506,13 @@ fn render_nowplaying_view(f: &mut Frame, app: &mut App, theme: Theme, area: Rect
     let group_h = art_h + 4; // art + gap + title + artist + album
     let art_y = top.y + top.height.saturating_sub(group_h) / 2;
     let art_x = top.x + top.width.saturating_sub(art_w) / 2;
-    let art_rect = Rect {
-        x: art_x,
-        y: art_y,
-        width: art_w,
-        height: art_h,
-    };
+    let art_rect = Rect { x: art_x, y: art_y, width: art_w, height: art_h };
 
     if let Some(cover) = app.now.as_mut().and_then(|n| n.cover.as_mut()) {
         cover.render(f, art_rect);
     } else {
         f.render_widget(
-            Paragraph::new("♫")
-                .alignment(Alignment::Center)
-                .style(theme.muted()),
+            Paragraph::new("♫").alignment(Alignment::Center).style(theme.muted()),
             art_rect,
         );
     }
@@ -3091,23 +2527,15 @@ fn render_nowplaying_view(f: &mut Frame, app: &mut App, theme: Theme, area: Rect
         let lines = vec![
             Line::from(Span::styled(
                 truncate(&n.title, top.width as usize),
-                Style::default()
-                    .fg(theme.text.into())
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.text.into()).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
                 truncate(&n.artist, top.width as usize),
                 Style::default().fg(theme.primary.into()),
             )),
-            Line::from(Span::styled(
-                truncate(&n.album, top.width as usize),
-                theme.muted(),
-            )),
+            Line::from(Span::styled(truncate(&n.album, top.width as usize), theme.muted())),
         ];
-        f.render_widget(
-            Paragraph::new(lines).alignment(Alignment::Center),
-            text_rect,
-        );
+        f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), text_rect);
     }
 
     render_visualizer(f, app, theme, viz_area);
@@ -3116,12 +2544,7 @@ fn render_nowplaying_view(f: &mut Frame, app: &mut App, theme: Theme, area: Rect
 /// Vertically center a `height`-row rect inside `area`.
 fn center_v(area: Rect, height: u16) -> Rect {
     let y = area.y + area.height.saturating_sub(height) / 2;
-    Rect {
-        x: area.x,
-        y,
-        width: area.width,
-        height: height.min(area.height),
-    }
+    Rect { x: area.x, y, width: area.width, height: height.min(area.height) }
 }
 
 /// Slim persistent bottom strip: play state + track, then the progress bar.
@@ -3134,19 +2557,9 @@ fn render_now_strip(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     // Seek/progress bar (bottom row). Record bar geometry for click-to-seek.
     let pos = app.position_ms();
     let left_len = format!("{} ", fmt_ms(pos)).chars().count() as u16;
-    let right_len = format!(
-        " {}",
-        fmt_ms(app.now.as_ref().map(|n| n.duration_ms).unwrap_or(0))
-    )
-    .chars()
-    .count() as u16;
+    let right_len = format!(" {}", fmt_ms(app.now.as_ref().map(|n| n.duration_ms).unwrap_or(0))).chars().count() as u16;
     let bar_w = rows[1].width.saturating_sub(left_len + right_len);
-    app.bar_rect = Some(Rect {
-        x: rows[1].x + left_len,
-        y: rows[1].y,
-        width: bar_w,
-        height: 1,
-    });
+    app.bar_rect = Some(Rect { x: rows[1].x + left_len, y: rows[1].y, width: bar_w, height: 1 });
     render_progress(f, app, theme, rows[1]);
 }
 
@@ -3157,21 +2570,11 @@ fn render_volume(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     let filled = (app.volume as usize * VLEV.len() + 50) / 100;
     let mut vspans: Vec<Span> = Vec::with_capacity(VLEV.len() + 1);
     for (i, ch) in VLEV.iter().enumerate() {
-        let color = if i < filled {
-            theme.primary
-        } else {
-            theme.border_dimmest
-        };
-        vspans.push(Span::styled(
-            ch.to_string(),
-            Style::default().fg(color.into()),
-        ));
+        let color = if i < filled { theme.primary } else { theme.border_dimmest };
+        vspans.push(Span::styled(ch.to_string(), Style::default().fg(color.into())));
     }
     vspans.push(Span::styled(format!(" {:>3}%", app.volume), theme.muted()));
-    f.render_widget(
-        Paragraph::new(Line::from(vspans)).alignment(Alignment::Right),
-        area,
-    );
+    f.render_widget(Paragraph::new(Line::from(vspans)).alignment(Alignment::Right), area);
     // 8-bar region for click/drag. Content is 13 cells (8 bars + " NNN%"),
     // right-aligned, so the bars start 13 cells in from the right edge.
     app.vol_rect = Some(Rect {
@@ -3207,9 +2610,7 @@ fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 truncate(&n.title, max),
-                Style::default()
-                    .fg(theme.text.into())
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.text.into()).add_modifier(Modifier::BOLD),
             )))
             .alignment(Alignment::Center),
             head[0],
@@ -3228,15 +2629,9 @@ fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     }
 
     if app.lyrics.is_empty() {
-        let msg = if app.now.is_some() {
-            "♪︎  no lyrics for this track"
-        } else {
-            "♪︎  nothing playing"
-        };
+        let msg = if app.now.is_some() { "♪︎  no lyrics for this track" } else { "♪︎  nothing playing" };
         f.render_widget(
-            Paragraph::new(msg)
-                .style(theme.muted())
-                .alignment(Alignment::Center),
+            Paragraph::new(msg).style(theme.muted()).alignment(Alignment::Center),
             center_v(lyrics_area, 1),
         );
         return;
@@ -3254,51 +2649,31 @@ fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let mut lines: Vec<Line> = Vec::with_capacity(h);
     for (i, (_, text)) in app.lyrics.iter().enumerate().skip(start).take(h) {
         let style = if app.lyrics_synced && i == cur {
-            Style::default()
-                .fg(theme.primary.into())
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.primary.into()).add_modifier(Modifier::BOLD)
         } else if app.lyrics_synced && i < cur {
             Style::default().fg(theme.border_subtle.into())
         } else {
             theme.muted()
         };
-        let txt = if text.is_empty() {
-            "♪︎".to_string()
-        } else {
-            truncate(text, max)
-        };
+        let txt = if text.is_empty() { "♪︎".to_string() } else { truncate(text, max) };
         lines.push(Line::from(Span::styled(txt, style)));
     }
-    f.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        lyrics_area,
-    );
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), lyrics_area);
 }
 
 fn render_visualizer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
-    let active = app
-        .engine
-        .bands
-        .try_lock()
-        .map(|g| g.is_active)
-        .unwrap_or(false);
+    let active = app.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false);
     if !active {
         return;
     }
-    let Ok(guard) = app.engine.bands.try_lock() else {
-        return;
-    };
+    let Ok(guard) = app.engine.bands.try_lock() else { return };
     let values: [f32; NUM_BANDS] = guard.values;
     let peak = guard.peak_envelope.max(1e-6);
     drop(guard);
 
     // Cap the spectrum to a centered band — full-pane bars are too tall/wide.
-    let vh = ((area.height as u32 * 3 / 5) as u16)
-        .clamp(6, 14)
-        .min(area.height);
-    let vw = ((area.width as u32 * 9 / 10) as u16)
-        .clamp(24, 80)
-        .min(area.width);
+    let vh = ((area.height as u32 * 3 / 5) as u16).clamp(6, 14).min(area.height);
+    let vw = ((area.width as u32 * 9 / 10) as u16).clamp(24, 80).min(area.width);
     let vrect = Rect {
         x: area.x + area.width.saturating_sub(vw) / 2,
         y: area.y + area.height.saturating_sub(vh) / 2,
@@ -3341,11 +2716,7 @@ fn render_visualizer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let mut lines: Vec<Line> = Vec::with_capacity(h);
     for row in 0..h {
         let from_bottom = (h - 1 - row) as f32;
-        let vfrac = if h > 1 {
-            from_bottom / (h - 1) as f32
-        } else {
-            0.0
-        };
+        let vfrac = if h > 1 { from_bottom / (h - 1) as f32 } else { 0.0 };
         let color: ratatui::style::Color = gradient::interpolate(&stops, vfrac).into();
         let mut spans: Vec<Span> = Vec::with_capacity(w);
         for &v in &cols {
@@ -3382,12 +2753,7 @@ fn render_progress(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let filled = ((pos as f32 / dur as f32) * bar_w as f32) as usize;
 
     let mut spans = vec![Span::styled(left, theme.muted())];
-    spans.extend(gradient_progress(
-        bar_w,
-        filled,
-        &[theme.primary, theme.accent],
-        theme.border_dimmest,
-    ));
+    spans.extend(gradient_progress(bar_w, filled, &[theme.primary, theme.accent], theme.border_dimmest));
     spans.push(Span::styled(right, theme.muted()));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -3397,30 +2763,19 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let key = |k: &'static str| Span::styled(k, Style::default().fg(theme.primary.into()));
     let lbl = |t: &'static str| Span::styled(t, theme.muted());
     let line = Line::from(vec![
-        key("⇥"),
-        lbl(" section   "),
-        key("←→"),
-        lbl(" view   "),
-        key("/"),
-        lbl(" search   "),
-        key("⏎"),
-        lbl(" play   "),
-        key("␣"),
-        lbl(" pause   "),
-        key("n/b"),
-        lbl(" skip   "),
-        key("⇧←→"),
-        lbl(" seek   "),
-        key("o"),
-        lbl(" sort   "),
-        key("+/-"),
-        lbl(" vol   "),
+        key("⇥"), lbl(" section   "),
+        key("←→"), lbl(" view   "),
+        key("/"), lbl(" search   "),
+        key("⏎"), lbl(" play   "),
+        key("␣"), lbl(" pause   "),
+        key("n/b"), lbl(" skip   "),
+        key("⇧←→"), lbl(" seek   "),
+        key("o"), lbl(" sort   "),
+        key("+/-"), lbl(" vol   "),
         Span::styled("s", Style::default().fg(on(app.shuffle).into())),
         lbl(" shuffle   "),
-        key("a"),
-        lbl(" actions   "),
-        key("q"),
-        lbl(" quit"),
+        key("a"), lbl(" actions   "),
+        key("q"), lbl(" quit"),
     ]);
     f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
@@ -3432,12 +2787,7 @@ fn render_actions_overlay(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let h = (menu.items.len() as u16 + 4).clamp(6, area.height.saturating_sub(2));
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
-    let rect = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
+    let rect = Rect { x, y, width: w, height: h };
 
     f.render_widget(Clear, rect);
     f.render_widget(Block::default().style(theme.element()), rect);
@@ -3447,27 +2797,17 @@ fn render_actions_overlay(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         Line::from(Span::styled(truncate(&menu.title, max), theme.heading())),
         Line::raw(""),
     ];
-    for (i, it) in menu
-        .items
-        .iter()
-        .take(inner.height.saturating_sub(2) as usize)
-        .enumerate()
-    {
+    for (i, it) in menu.items.iter().take(inner.height.saturating_sub(2) as usize).enumerate() {
         if i == menu.selected {
             lines.push(Line::from(vec![
                 Span::styled("› ", Style::default().fg(theme.primary.into())),
                 Span::styled(
                     truncate(&it.label, max.saturating_sub(2)),
-                    Style::default()
-                        .fg(theme.text.into())
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.text.into()).add_modifier(Modifier::BOLD),
                 ),
             ]));
         } else {
-            lines.push(Line::from(Span::styled(
-                format!("  {}", truncate(&it.label, max.saturating_sub(2))),
-                theme.muted(),
-            )));
+            lines.push(Line::from(Span::styled(format!("  {}", truncate(&it.label, max.saturating_sub(2))), theme.muted())));
         }
     }
     f.render_widget(Paragraph::new(lines), inner);
@@ -3487,9 +2827,7 @@ fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
             Span::styled("PLAYING FROM  ", theme.muted()),
             Span::styled(
                 truncate(&app.source_name, max.saturating_sub(14)),
-                Style::default()
-                    .fg(theme.primary.into())
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.primary.into()).add_modifier(Modifier::BOLD),
             ),
         ]));
         lines.push(Line::raw(""));
@@ -3502,9 +2840,7 @@ fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
             Span::styled("   ", theme.muted()),
             Span::styled(
                 truncate(&n.title, max.saturating_sub(3)),
-                Style::default()
-                    .fg(theme.text.into())
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.text.into()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("  {}", n.artist), theme.muted()),
         ]));
@@ -3518,18 +2854,10 @@ fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     if app.queue.is_empty() {
         lines.push(Line::from(Span::styled("queue is empty", theme.muted())));
     } else {
-        for (i, q) in app
-            .queue
-            .iter()
-            .take(inner.height.saturating_sub(used as u16) as usize)
-            .enumerate()
-        {
+        for (i, q) in app.queue.iter().take(inner.height.saturating_sub(used as u16) as usize).enumerate() {
             lines.push(Line::from(vec![
                 Span::styled(format!("{:>2}  ", i + 1), theme.muted()),
-                Span::styled(
-                    truncate(q, max.saturating_sub(4)),
-                    Style::default().fg(theme.text.into()),
-                ),
+                Span::styled(truncate(q, max.saturating_sub(4)), Style::default().fg(theme.text.into())),
             ]));
         }
     }
@@ -3578,10 +2906,7 @@ fn acquire_single_instance_lock() -> std::fs::File {
         .expect("open lock file");
     if file.try_lock_exclusive().is_err() {
         eprintln!("myx is already running (another instance holds the lock).");
-        eprintln!(
-            "Close it first, or remove {} if it's stale.",
-            path.display()
-        );
+        eprintln!("Close it first, or remove {} if it's stale.", path.display());
         std::process::exit(1);
     }
     file
@@ -3594,33 +2919,20 @@ fn init_terminal() -> Result<Term> {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut out = io::stdout();
-        let _ = execute!(
-            out,
-            crossterm::event::DisableMouseCapture,
-            LeaveAlternateScreen,
-            crossterm::cursor::Show
-        );
+        let _ = execute!(out, crossterm::event::DisableMouseCapture, LeaveAlternateScreen, crossterm::cursor::Show);
         let _ = disable_raw_mode();
         default_hook(info);
     }));
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
-    )?;
+    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
     Ok(Terminal::new(CrosstermBackend::new(stdout))?)
 }
 
 fn restore_terminal(terminal: &mut Term) -> Result<()> {
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        crossterm::event::DisableMouseCapture,
-        LeaveAlternateScreen
-    )?;
+    execute!(terminal.backend_mut(), crossterm::event::DisableMouseCapture, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
 }

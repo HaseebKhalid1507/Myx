@@ -36,11 +36,7 @@ pub fn gradient_pill<'a>(label: &str, stops: &[Rgb], fg: Rgb) -> Vec<Span<'a>> {
 
     spans.push(Span::styled(" ", Style::default().bg(first.into())));
     for (i, ch) in chars.iter().enumerate() {
-        let t = if n > 1 {
-            i as f32 / (n - 1) as f32
-        } else {
-            0.0
-        };
+        let t = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.0 };
         let bg = gradient::interpolate(stops, t);
         spans.push(Span::styled(
             ch.to_string(),
@@ -63,11 +59,7 @@ pub fn gradient_line<'a>(text: &str, stops: &[Rgb]) -> Vec<Span<'a>> {
         .iter()
         .enumerate()
         .map(|(i, ch)| {
-            let t = if n > 1 {
-                i as f32 / (n - 1) as f32
-            } else {
-                0.0
-            };
+            let t = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.0 };
             let fg = gradient::interpolate(stops, t);
             Span::styled(ch.to_string(), Style::default().fg(fg.into()))
         })

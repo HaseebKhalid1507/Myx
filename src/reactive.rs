@@ -23,11 +23,10 @@ use crate::theme::Theme;
 /// if palette extraction yields nothing.
 pub fn derive_theme(img: &DynamicImage, name: &'static str) -> Theme {
     let rgb = img.to_rgb8();
-    let swatches: Vec<Rgb> =
-        match color_thief::get_palette(rgb.as_raw(), color_thief::ColorFormat::Rgb, 10, 8) {
-            Ok(p) if !p.is_empty() => p.into_iter().map(|c| Rgb::new(c.r, c.g, c.b)).collect(),
-            _ => return crate::theme::TOKYONIGHT,
-        };
+    let swatches: Vec<Rgb> = match color_thief::get_palette(rgb.as_raw(), color_thief::ColorFormat::Rgb, 10, 8) {
+        Ok(p) if !p.is_empty() => p.into_iter().map(|c| Rgb::new(c.r, c.g, c.b)).collect(),
+        _ => return crate::theme::TOKYONIGHT,
+    };
     theme_from_swatches(&swatches, name)
 }
 
@@ -77,10 +76,8 @@ fn theme_from_swatches(swatches: &[Rgb], name: &'static str) -> Theme {
 
     // Status colors: snap to a palette swatch of the right hue, else synthesize.
     let error = nearest_hue(swatches, 2.0, 35.0).unwrap_or_else(|| tint(2.0, avg_s.max(0.6), 0.63));
-    let warning =
-        nearest_hue(swatches, 38.0, 30.0).unwrap_or_else(|| tint(38.0, avg_s.max(0.6), 0.62));
-    let success =
-        nearest_hue(swatches, 140.0, 40.0).unwrap_or_else(|| tint(140.0, avg_s.max(0.45), 0.6));
+    let warning = nearest_hue(swatches, 38.0, 30.0).unwrap_or_else(|| tint(38.0, avg_s.max(0.6), 0.62));
+    let success = nearest_hue(swatches, 140.0, 40.0).unwrap_or_else(|| tint(140.0, avg_s.max(0.45), 0.6));
     let info = primary;
 
     Theme {
