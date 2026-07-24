@@ -179,11 +179,14 @@ impl WebApi {
     }
 
     fn save(&self) {
-        use std::os::unix::fs::PermissionsExt;
         let Some(path) = Self::cache_path() else { return };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            }
         }
         let c = Cached {
             client_id: self.client_id.clone(),
@@ -197,7 +200,11 @@ impl WebApi {
             // world-readable (audit H4).
             let tmp = path.with_extension("tmp");
             if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+                }
                 let _ = std::fs::rename(&tmp, &path);
             }
         }
