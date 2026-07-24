@@ -2996,14 +2996,12 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
         let total = total_items;
         let sb_x = inner.right();
         let track_h = cap;
-        let thumb_h = ((cap * cap + total - 1) / total).max(1).min(track_h);
+        let thumb_h = (cap * cap).div_ceil(total).max(1).min(track_h);
         let travel = track_h - thumb_h;
         let max_off = total - cap;
-        let thumb_y0 = if max_off == 0 {
-            0
-        } else {
-            (offset * travel + max_off / 2) / max_off
-        };
+        let thumb_y0 = (offset * travel + max_off / 2)
+            .checked_div(max_off)
+            .unwrap_or(0);
         for i in 0..track_h {
             let y = list_top + i as u16;
             if y >= inner.bottom() {
