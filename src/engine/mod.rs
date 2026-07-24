@@ -130,6 +130,7 @@ impl Engine {
         &self,
         tracks: Vec<String>,
         start_uri: Option<String>,
+        start_position_ms: u32,
         shuffle: bool,
     ) -> Result<()> {
         self.spirc.activate().ok();
@@ -142,7 +143,7 @@ impl Engine {
                 })
             }),
             playing_track: start_uri.map(PlayingTrack::Uri),
-            ..Default::default()
+            seek_to: start_position_ms,
         };
         self.spirc
             .load(LoadRequest::from_tracks(tracks, options))
