@@ -98,7 +98,11 @@ impl WebApi {
             // Only trust a cached token that's either fresh or successfully
             // refreshed; a stale token whose refresh fails falls through to a
             // clean interactive re-auth instead of poisoning the whole session.
-            let usable = if w.is_expiring() { w.refresh().is_ok() } else { true };
+            let usable = if w.is_expiring() {
+                w.refresh().is_ok()
+            } else {
+                true
+            };
             if usable && !w.access_token.is_empty() {
                 return Ok(w);
             }
@@ -152,7 +156,10 @@ impl WebApi {
         if let Some(rt) = resp.get("refresh_token").and_then(|v| v.as_str()) {
             self.refresh_token = Some(rt.to_string());
         }
-        let expires_in = resp.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(3600);
+        let expires_in = resp
+            .get("expires_in")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3600);
         self.expires_at = now() + expires_in;
         self.save();
         Ok(())
@@ -178,7 +185,9 @@ impl WebApi {
     }
 
     fn save(&self) {
-        let Some(path) = Self::cache_path() else { return };
+        let Some(path) = Self::cache_path() else {
+            return;
+        };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
             #[cfg(unix)]
@@ -220,8 +229,8 @@ fn now() -> u64 {
 /// Full interactive authorization → (access_token, refresh_token, expires_in).
 fn authorize(client_id: &str) -> Result<(String, Option<String>, u64)> {
     let verifier = random_url_safe(32);
-    let challenge =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
     let state = random_url_safe(16);
 
     let scope = SCOPES.join(" ");
@@ -263,7 +272,10 @@ fn authorize(client_id: &str) -> Result<(String, Option<String>, u64)> {
         .get("refresh_token")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let expires_in = resp.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(3600);
+    let expires_in = resp
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3600);
     Ok((access, refresh, expires_in))
 }
 
@@ -310,9 +322,9 @@ fn post_token_form(params: &[(&str, &str)]) -> Result<serde_json::Value> {
         .collect::<Vec<_>>()
         .join("&");
     let json = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_default()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default()
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
