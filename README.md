@@ -4,9 +4,7 @@ A lean, beautiful terminal Spotify player in Rust. Streams natively as a Spotify
 Connect device, with album-art-reactive theming, a live audio visualizer, and
 synced lyrics.
 
-<p align="center">
-  <video src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/myx-demo.mp4" width="100%" autoplay loop muted playsinline></video>
-</p>
+<p align="center"><img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/myx.png" alt="myx recolors the whole interface to the album art" width="100%"></p>
 
 <p align="center">
   <img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/theme-1.png" width="32%">
