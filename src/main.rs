@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MediaKeyCode, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MediaKeyCode,
+    MouseButton, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -1227,10 +1228,12 @@ fn handle_key(
             }
         }
         KeyCode::Media(MediaKeyCode::Stop) => {
-            if app.playback_started {
-                app.seek_to(0);
-                let _ = app.engine.pause();
-            }
+            // if app.playback_started {
+            //     app.seek_to(0);
+            //     let _ = app.engine.pause();
+            // }
+
+            app.engine.stop();
         }
         KeyCode::Char('n') | KeyCode::Media(MediaKeyCode::TrackNext) => {
             let _ = app.engine.next();
@@ -1896,6 +1899,16 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
                 n.position_at = Instant::now();
             }
         }
+        EngineEvent::Stopped => {
+            app.now = None;
+            app.playback_started = false;
+        }
+        EngineEvent::PositionCorrection { position_ms, .. } => {
+            if let Some(n) = app.now.as_mut() {
+                n.position_ms = position_ms;
+                n.position_at = Instant::now();
+            }
+        }
         EngineEvent::EndOfTrack { .. } => {}
     }
 }
@@ -1935,7 +1948,11 @@ fn apply_meta(
         duration_ms: meta.duration_ms,
         position_ms: app.now.as_ref().map(|n| n.position_ms).unwrap_or(0),
         position_at: Instant::now(),
-        is_playing: app.now.as_ref().map(|n| n.is_playing).unwrap_or(true),
+        is_playing: app
+            .now
+            .as_ref()
+            .map(|n| n.is_playing)
+            .unwrap_or(app.playback_started),
         cover,
     });
     if let Some(theme) = meta.theme {
@@ -1956,7 +1973,7 @@ fn liblog(msg: impl AsRef<str>) {
         return;
     }
     let Some(home) = myx::home_dir() else { return };
-    let dir = std::path::PathBuf::from(home).join(".cache/myx");
+    let dir = home.join(".cache/myx");
     if std::fs::create_dir_all(&dir).is_ok() {
         #[cfg(unix)]
         {
