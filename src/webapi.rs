@@ -51,8 +51,8 @@ fn resolve_client_id() -> Result<String> {
             return Ok(id);
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        let path = std::path::PathBuf::from(home).join(".config/myx/client_id");
+    if let Some(home) = crate::home_dir() {
+        let path = home.join(".config/myx/client_id");
         if let Ok(s) = std::fs::read_to_string(&path) {
             let id = s.trim().to_string();
             if !id.is_empty() {
@@ -159,8 +159,7 @@ impl WebApi {
     }
 
     fn cache_path() -> Option<PathBuf> {
-        let home = std::env::var("HOME").ok()?;
-        Some(PathBuf::from(home).join(".cache/myx/webapi.json"))
+        Some(crate::home_dir()?.join(".cache/myx/webapi.json"))
     }
 
     fn from_cache(client_id: &str) -> Option<Self> {

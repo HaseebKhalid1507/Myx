@@ -309,8 +309,7 @@ struct SavedState {
 
 impl SavedState {
     fn path() -> Option<std::path::PathBuf> {
-        let home = std::env::var("HOME").ok()?;
-        Some(std::path::PathBuf::from(home).join(".cache/myx/state.json"))
+        Some(myx::home_dir()?.join(".cache/myx/state.json"))
     }
     fn load() -> SavedState {
         Self::path()
@@ -1580,11 +1579,7 @@ fn liblog(msg: impl AsRef<str>) {
     if std::env::var_os("MYX_LOG").is_none() {
         return;
     }
-    #[cfg(unix)]
-    let home_var = "HOME";
-    #[cfg(windows)]
-    let home_var = "USERPROFILE";
-    let Some(home) = std::env::var_os(home_var) else { return };
+    let Some(home) = myx::home_dir() else { return };
     let dir = std::path::PathBuf::from(home).join(".cache/myx");
     if std::fs::create_dir_all(&dir).is_ok() {
         #[cfg(unix)]
@@ -2897,9 +2892,9 @@ fn http_client() -> reqwest::blocking::Client {
 /// (kept alive for the process lifetime; the OS releases it on exit, even a crash).
 fn acquire_single_instance_lock() -> std::fs::File {
     use fs2::FileExt;
-    let path = std::env::var("HOME")
-        .map(|h| std::path::PathBuf::from(h).join(".cache/myx/lock"))
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/myx.lock"));
+    let path = myx::home_dir()
+        .map(|h| h.join(".cache/myx/lock"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/myx.lock"));
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
