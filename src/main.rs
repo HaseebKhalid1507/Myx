@@ -1228,11 +1228,6 @@ fn handle_key(
             }
         }
         KeyCode::Media(MediaKeyCode::Stop) => {
-            // if app.playback_started {
-            //     app.seek_to(0);
-            //     let _ = app.engine.pause();
-            // }
-
             app.engine.stop();
         }
         KeyCode::Char('n') | KeyCode::Media(MediaKeyCode::TrackNext) => {
