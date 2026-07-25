@@ -62,6 +62,7 @@ pub struct Engine {
     pub spirc: Spirc,
     pub bands: Arc<Mutex<VisBands>>,
     pub player: Arc<Player>,
+    pub mixer: Arc<SoftMixer>,
     session: Session,
 }
 
@@ -192,6 +193,9 @@ impl Engine {
     }
     /// Set volume in librespot's 0..=65535 range.
     pub fn set_volume(&self, vol: u16) -> Result<()> {
+        // Apply to the local software mixer immediately (no network round-trip).
+        self.mixer.set_volume(vol);
+        // Sync the volume to Spotify Connect in the background.
         self.spirc.set_volume(vol).context("set volume")
     }
     /// Seek to an absolute position in the current track.
@@ -379,7 +383,7 @@ pub async fn run(tx: flume::Sender<EngineEvent>, initial_volume_pct: u8) -> Resu
         session.clone(),
         creds,
         player.clone(),
-        mixer,
+        mixer.clone(),
     )
     .await
     .context("initialize spirc")?;
@@ -389,6 +393,7 @@ pub async fn run(tx: flume::Sender<EngineEvent>, initial_volume_pct: u8) -> Resu
         spirc,
         bands,
         player,
+        mixer,
         session,
     })
 }

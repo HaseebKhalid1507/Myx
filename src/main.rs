@@ -995,6 +995,26 @@ async fn run_ui(
                             }
                         }
                     }
+                    // Scroll wheel → volume (anywhere in the window).
+                    Ok(Event::Mouse(m)) if matches!(
+                        m.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) => {
+                        match m.kind {
+                            MouseEventKind::ScrollUp => {
+                                app.volume = (app.volume + 5).min(100);
+                                let _ = app.engine.set_volume(vol_u16(app.volume));
+                            }
+                            MouseEventKind::ScrollDown => {
+                                app.volume = app.volume.saturating_sub(5);
+                                let _ = app.engine.set_volume(vol_u16(app.volume));
+                            }
+                            _ => {}
+                        }
+                        // Force immediate redraw so the volume meter updates without
+                        // waiting for the next 100ms idle tick.
+                        last_draw = Instant::now() - Duration::from_millis(200);
+                    }
                     _ => {}
                 }
             }
