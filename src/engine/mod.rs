@@ -11,7 +11,6 @@
 
 pub mod auth;
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -36,10 +35,25 @@ use crate::audio::{VisBands, VisualizationSink};
 pub enum EngineEvent {
     /// A new track became current — carries its Spotify URI. This is the reactive
     /// theme trigger.
-    TrackChanged { uri: String },
-    Playing { uri: String, position_ms: u32 },
-    Paused { uri: String, position_ms: u32 },
-    EndOfTrack { uri: String },
+    TrackChanged {
+        uri: String,
+    },
+    Playing {
+        uri: String,
+        position_ms: u32,
+    },
+    Paused {
+        uri: String,
+        position_ms: u32,
+    },
+    Stopped,
+    EndOfTrack {
+        uri: String,
+    },
+    PositionCorrection {
+        uri: String,
+        position_ms: u32,
+    },
 }
 
 /// A running engine: keep `spirc` alive (dropping it tears down the device), and
@@ -47,6 +61,7 @@ pub enum EngineEvent {
 pub struct Engine {
     pub spirc: Spirc,
     pub bands: Arc<Mutex<VisBands>>,
+    pub player: Arc<Player>,
     session: Session,
 }
 
@@ -68,8 +83,12 @@ impl Engine {
         self.spirc.activate().ok();
         let options = LoadRequestOptions {
             start_playing: true,
-            context_options: shuffle
-                .then(|| LoadContextOptions::Options(CtxOptions { shuffle: true, ..Default::default() })),
+            context_options: shuffle.then(|| {
+                LoadContextOptions::Options(CtxOptions {
+                    shuffle: true,
+                    ..Default::default()
+                })
+            }),
             ..Default::default()
         };
         self.spirc
@@ -90,8 +109,12 @@ impl Engine {
         let options = LoadRequestOptions {
             start_playing: true,
             seek_to: position_ms,
-            context_options: shuffle
-                .then(|| LoadContextOptions::Options(CtxOptions { shuffle: true, ..Default::default() })),
+            context_options: shuffle.then(|| {
+                LoadContextOptions::Options(CtxOptions {
+                    shuffle: true,
+                    ..Default::default()
+                })
+            }),
             playing_track: track_uri.map(PlayingTrack::Uri),
         };
         self.spirc
@@ -107,15 +130,20 @@ impl Engine {
         &self,
         tracks: Vec<String>,
         start_uri: Option<String>,
+        start_position_ms: u32,
         shuffle: bool,
     ) -> Result<()> {
         self.spirc.activate().ok();
         let options = LoadRequestOptions {
             start_playing: true,
-            context_options: shuffle
-                .then(|| LoadContextOptions::Options(CtxOptions { shuffle: true, ..Default::default() })),
+            context_options: shuffle.then(|| {
+                LoadContextOptions::Options(CtxOptions {
+                    shuffle: true,
+                    ..Default::default()
+                })
+            }),
             playing_track: start_uri.map(PlayingTrack::Uri),
-            ..Default::default()
+            seek_to: start_position_ms,
         };
         self.spirc
             .load(LoadRequest::from_tracks(tracks, options))
@@ -143,6 +171,9 @@ impl Engine {
     }
     pub fn pause(&self) -> Result<()> {
         self.spirc.pause().context("pause")
+    }
+    pub fn stop(&self) {
+        self.player.stop()
     }
     pub fn toggle(&self) -> Result<()> {
         self.spirc.play_pause().context("toggle")
@@ -250,6 +281,20 @@ fn map_event(ev: player::PlayerEvent) -> Option<EngineEvent> {
             uri: track_id.to_uri().ok()?,
             position_ms,
         }),
+        P::Stopped { .. } => Some(EngineEvent::Stopped),
+        P::PositionChanged {
+            play_request_id: _,
+            track_id,
+            position_ms,
+        }
+        | P::PositionCorrection {
+            play_request_id: _,
+            track_id,
+            position_ms,
+        } => Some(EngineEvent::PositionCorrection {
+            uri: track_id.to_uri().ok()?,
+            position_ms,
+        }),
         P::EndOfTrack { track_id, .. } => Some(EngineEvent::EndOfTrack {
             uri: track_id.to_uri().ok()?,
         }),
@@ -274,7 +319,10 @@ pub async fn run(tx: flume::Sender<EngineEvent>, initial_volume_pct: u8) -> Resu
     mixer.set_volume(volume);
 
     let backend = audio_backend::find(None).expect("an audio backend should be available");
-    let player_config = PlayerConfig::default();
+    let player_config = PlayerConfig {
+        position_update_interval: Some(Duration::from_millis(100)),
+        ..Default::default()
+    };
 
     let player = {
         let bands = Arc::clone(&bands);
@@ -326,14 +374,21 @@ pub async fn run(tx: flume::Sender<EngineEvent>, initial_volume_pct: u8) -> Resu
         volume_steps: 64,
     };
 
-    let (spirc, spirc_task) = Spirc::new(connect_config, session.clone(), creds, player, mixer)
-        .await
-        .context("initialize spirc")?;
+    let (spirc, spirc_task) = Spirc::new(
+        connect_config,
+        session.clone(),
+        creds,
+        player.clone(),
+        mixer,
+    )
+    .await
+    .context("initialize spirc")?;
     tokio::spawn(spirc_task);
 
     Ok(Engine {
         spirc,
         bands,
+        player,
         session,
     })
 }

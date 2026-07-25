@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MediaKeyCode, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MediaKeyCode,
+    MouseButton, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -335,7 +336,7 @@ struct TrackMeta {
 
 /// What kind of thing is currently playing — persisted so we can resume the real
 /// context (and its live queue) on reboot, not just a bare track.
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 enum PlaySource {
     #[default]
     None,
@@ -352,12 +353,8 @@ struct SavedState {
     shuffle: bool,
     #[serde(default)]
     repeat: bool,
-    last_uri: String,
-    last_title: String,
-    last_artist: String,
-    last_album: String,
-    last_duration_ms: u32,
-    last_position_ms: u32,
+    #[serde(default)]
+    last_played: Option<LastPlayed>,
     queue: Vec<String>,
     #[serde(default)]
     queue_uris: Vec<String>,
@@ -365,6 +362,16 @@ struct SavedState {
     source: PlaySource,
     #[serde(default)]
     source_name: String,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct LastPlayed {
+    uri: String,
+    title: String,
+    artist: String,
+    album: String,
+    duration_ms: u32,
+    position_ms: u32,
 }
 
 impl SavedState {
@@ -558,7 +565,7 @@ impl App {
                     self.source_name = "Liked Songs".to_string();
                     self.status = "starting Liked Songs…".to_string();
                     // Honour the current shuffle toggle instead of a dedicated row.
-                    if let Err(e) = self.engine.play_tracks(uris, None, self.shuffle) {
+                    if let Err(e) = self.engine.play_tracks(uris, None, 0, self.shuffle) {
                         self.status = format!("couldn't play: {e:#}");
                     }
                 }
@@ -614,7 +621,7 @@ impl App {
             }
             if let Err(e) = self
                 .engine
-                .play_tracks(uris, Some(item.uri.clone()), self.shuffle)
+                .play_tracks(uris, Some(item.uri.clone()), 0, self.shuffle)
             {
                 self.status = format!("couldn't play: {e:#}");
             }
@@ -663,22 +670,19 @@ async fn main() -> Result<()> {
     let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
 
     // Rebuild the last now-playing (paused) for a seamless resume look.
-    let now = if !saved.last_uri.is_empty() {
-        Some(NowPlaying {
-            uri: saved.last_uri.clone(),
-            title: saved.last_title.clone(),
-            artist: saved.last_artist.clone(),
-            album: saved.last_album.clone(),
-            duration_ms: saved.last_duration_ms,
-            position_ms: saved.last_position_ms,
-            position_at: Instant::now(),
-            is_playing: false,
-            cover: None,
-        })
-    } else {
-        None
-    };
-    let restore_uri = (!saved.last_uri.is_empty()).then(|| saved.last_uri.clone());
+    let now = saved.last_played.as_ref().map(|last_played| NowPlaying {
+        uri: last_played.uri.clone(),
+        title: last_played.title.clone(),
+        artist: last_played.artist.clone(),
+        album: last_played.album.clone(),
+        duration_ms: last_played.duration_ms,
+        position_ms: last_played.position_ms,
+        position_at: Instant::now(),
+        is_playing: false,
+        cover: None,
+    });
+
+    let restore_uri = saved.last_played.as_ref().map(|lp| lp.uri.clone());
 
     let app = App {
         engine,
@@ -732,6 +736,11 @@ async fn main() -> Result<()> {
     res
 }
 
+struct Radio {
+    start_position_ms: u32,
+    uris: Vec<String>,
+}
+
 async fn run_ui(
     terminal: &mut Term,
     mut app: App,
@@ -757,7 +766,7 @@ async fn run_ui(
     let (menu_tx, menu_rx) = flume::unbounded::<ActionMenu>();
     let (astatus_tx, astatus_rx) = flume::unbounded::<String>();
     let (pstate_tx, pstate_rx) = flume::unbounded::<PlaybackState>();
-    let (radio_tx, radio_rx) = flume::unbounded::<Result<Vec<String>, String>>();
+    let (radio_tx, radio_rx) = flume::unbounded::<Result<Radio, String>>();
     let (libdone_tx, libdone_rx) = flume::unbounded::<bool>();
     spawn_library_fetch(app.webapi.clone(), lib_tx.clone(), libdone_tx.clone());
 
@@ -823,8 +832,8 @@ async fn run_ui(
                 // pure recv arm starves and the station never plays.
                 while let Ok(rad) = radio_rx.try_recv() {
                     match rad {
-                        Ok(uris) if !uris.is_empty() => {
-                            if let Err(e) = app.engine.play_tracks(uris, None, false) {
+                        Ok(radio) if !radio.uris.is_empty() => {
+                            if let Err(e) = app.engine.play_tracks(radio.uris, None, radio.start_position_ms, false) {
                                 app.status = format!("couldn't play radio: {e:#}");
                             }
                             app.playback_started = true;
@@ -1073,13 +1082,14 @@ async fn run_ui(
 
 /// Resume the persisted playback source at the last track/position — the
 /// faithful reboot resume (real context ⇒ real queue continuation).
-fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Vec<String>, String>>) {
+fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>) {
     let track = app
         .now
         .as_ref()
         .map(|n| n.uri.clone())
         .filter(|u| !u.is_empty());
     let pos = app.now.as_ref().map(|n| n.position_ms).unwrap_or(0);
+
     match app.source.clone() {
         PlaySource::Context(ctx) => {
             if let Err(e) = app.engine.play_context_at(ctx, track, pos, app.shuffle) {
@@ -1100,12 +1110,16 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Vec<String>, Str
                     Ok(r) => r.map_err(|e| e.to_string()),
                     Err(_) => Err("timed out (mercury radio endpoint unresponsive)".to_string()),
                 };
-                let _ = tx.send(res);
+
+                let _ = tx.send(res.map(|uris| Radio {
+                    uris,
+                    start_position_ms: pos,
+                }));
             });
         }
         PlaySource::Liked if !app.library.liked.is_empty() => {
             let uris: Vec<String> = app.library.liked.iter().map(|i| i.uri.clone()).collect();
-            if let Err(e) = app.engine.play_tracks(uris, track, app.shuffle) {
+            if let Err(e) = app.engine.play_tracks(uris, track, pos, app.shuffle) {
                 app.status = format!("couldn't play: {e:#}");
             }
         }
@@ -1118,7 +1132,7 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Vec<String>, Str
                     uris.push(u.clone());
                 }
                 uris.extend(app.queue_uris.iter().cloned());
-                if let Err(e) = app.engine.play_tracks(uris, track, app.shuffle) {
+                if let Err(e) = app.engine.play_tracks(uris, track, pos, app.shuffle) {
                     app.status = format!("couldn't play: {e:#}");
                 }
             } else {
@@ -1151,7 +1165,7 @@ fn handle_key(
     detail_tx: &flume::Sender<(String, String, Vec<LibItem>)>,
     menu_tx: &flume::Sender<ActionMenu>,
     astatus_tx: &flume::Sender<String>,
-    radio_tx: &flume::Sender<Result<Vec<String>, String>>,
+    radio_tx: &flume::Sender<Result<Radio, String>>,
     libdone_tx: &flume::Sender<bool>,
 ) -> bool {
     // --- Actions menu captures input while open ---
@@ -1227,10 +1241,7 @@ fn handle_key(
             }
         }
         KeyCode::Media(MediaKeyCode::Stop) => {
-            if app.playback_started {
-                app.seek_to(0);
-                let _ = app.engine.pause();
-            }
+            app.engine.stop();
         }
         KeyCode::Char('n') | KeyCode::Media(MediaKeyCode::TrackNext) => {
             let _ = app.engine.next();
@@ -1323,7 +1334,10 @@ fn handle_key(
                             Err("timed out (mercury radio endpoint unresponsive)".to_string())
                         }
                     };
-                    let _ = tx.send(res);
+                    let _ = tx.send(res.map(|uris| Radio {
+                        uris,
+                        start_position_ms: 0,
+                    }));
                 });
             }
             Activated::None => {}
@@ -1823,28 +1837,20 @@ fn api_contains(token: &str, url: &str) -> bool {
 
 /// Snapshot the current session to disk (volume, last track, position, queue).
 fn save_state(app: &App) {
+    let last_played = app.now.as_ref().map(|now| LastPlayed {
+        uri: now.uri.clone(),
+        title: now.title.clone(),
+        artist: now.artist.clone(),
+        album: now.album.clone(),
+        duration_ms: now.duration_ms,
+        position_ms: app.position_ms(),
+    });
+
     let s = SavedState {
         volume: app.volume,
         shuffle: app.shuffle,
         repeat: app.repeat,
-        last_uri: app.now.as_ref().map(|n| n.uri.clone()).unwrap_or_default(),
-        last_title: app
-            .now
-            .as_ref()
-            .map(|n| n.title.clone())
-            .unwrap_or_default(),
-        last_artist: app
-            .now
-            .as_ref()
-            .map(|n| n.artist.clone())
-            .unwrap_or_default(),
-        last_album: app
-            .now
-            .as_ref()
-            .map(|n| n.album.clone())
-            .unwrap_or_default(),
-        last_duration_ms: app.now.as_ref().map(|n| n.duration_ms).unwrap_or(0),
-        last_position_ms: app.position_ms(),
+        last_played,
         queue: app.queue.clone(),
         queue_uris: app.queue_uris.clone(),
         source: app.source.clone(),
@@ -1896,6 +1902,16 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
                 n.position_at = Instant::now();
             }
         }
+        EngineEvent::Stopped => {
+            app.now = None;
+            app.playback_started = false;
+        }
+        EngineEvent::PositionCorrection { position_ms, .. } => {
+            if let Some(n) = app.now.as_mut() {
+                n.position_ms = position_ms;
+                n.position_at = Instant::now();
+            }
+        }
         EngineEvent::EndOfTrack { .. } => {}
     }
 }
@@ -1935,7 +1951,11 @@ fn apply_meta(
         duration_ms: meta.duration_ms,
         position_ms: app.now.as_ref().map(|n| n.position_ms).unwrap_or(0),
         position_at: Instant::now(),
-        is_playing: app.now.as_ref().map(|n| n.is_playing).unwrap_or(true),
+        is_playing: app
+            .now
+            .as_ref()
+            .map(|n| n.is_playing)
+            .unwrap_or(app.playback_started),
         cover,
     });
     if let Some(theme) = meta.theme {
@@ -1956,7 +1976,7 @@ fn liblog(msg: impl AsRef<str>) {
         return;
     }
     let Some(home) = myx::home_dir() else { return };
-    let dir = std::path::PathBuf::from(home).join(".cache/myx");
+    let dir = home.join(".cache/myx");
     if std::fs::create_dir_all(&dir).is_ok() {
         #[cfg(unix)]
         {
@@ -2979,14 +2999,12 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
         let total = total_items;
         let sb_x = inner.right();
         let track_h = cap;
-        let thumb_h = ((cap * cap + total - 1) / total).max(1).min(track_h);
+        let thumb_h = (cap * cap).div_ceil(total).max(1).min(track_h);
         let travel = track_h - thumb_h;
         let max_off = total - cap;
-        let thumb_y0 = if max_off == 0 {
-            0
-        } else {
-            (offset * travel + max_off / 2) / max_off
-        };
+        let thumb_y0 = (offset * travel + max_off / 2)
+            .checked_div(max_off)
+            .unwrap_or(0);
         for i in 0..track_h {
             let y = list_top + i as u16;
             if y >= inner.bottom() {
