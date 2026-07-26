@@ -772,7 +772,11 @@ async fn run_ui(
 
     // Reclaim server-side playback: read live state + transfer it onto myx so the
     // full context + queue + position come back.
-    spawn_restore(app.webapi.clone(), app.engine.device_id(), pstate_tx);
+    //
+    // Clone: `spawn_restore` sends once and exits. Moving the sender in would
+    // drop the last one, and a disconnected receiver resolves `recv_async()`
+    // instantly and forever — spinning the select loop below.
+    spawn_restore(app.webapi.clone(), app.engine.device_id(), pstate_tx.clone());
 
     // Re-enrich the restored last-played track (cover / theme / lyrics).
     if let Some(uri) = app.restore_uri.take() {
