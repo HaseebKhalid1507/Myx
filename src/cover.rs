@@ -79,6 +79,12 @@ impl Cover {
     }
 
     /// Render the cover into `area`, re-encoding only when the area changes.
+    /// Drop the cached encode so the next render re-encodes and ratatui
+    /// sees a fresh cell, forcing retransmission.
+    pub fn invalidate_cache(&mut self) {
+        self.cached = None;
+    }
+
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;

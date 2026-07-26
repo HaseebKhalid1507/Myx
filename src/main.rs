@@ -908,13 +908,16 @@ async fn run_ui(
                 let target = Duration::from_millis(if animating { 16 } else { 100 });
                 if last_draw.elapsed() >= target {
                     advance_fade(&mut app);
-                    // The encoded cover lives in one cell's symbol, so ratatui
-                    // writes it only on the frame it changes. Nothing retries a
-                    // dropped image, so invalidate the previous buffer to have
-                    // it written again. See ART_REPAINTS.
+                    // Retry cover transmission: inline images are written once
+                    // by ratatui. If the terminal drops that write, invalidate
+                    // the cover cache so re-encode produces a fresh cell.
                     if app.art_dirty > 0 {
                         app.art_dirty -= 1;
-                        let _ = terminal.clear();
+                        if let Some(n) = app.now.as_mut() {
+                            if let Some(c) = n.cover.as_mut() {
+                                c.invalidate_cache();
+                            }
+                        }
                     }
                     terminal.draw(|f| render(f, &mut app))?;
                     last_draw = Instant::now();
@@ -2004,14 +2007,6 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
     match ev {
         EngineEvent::TrackChanged { uri } => {
             app.status = "loading track…".to_string();
-            // Drop the outgoing track's art immediately. Metadata takes ~0.5-2s
-            // (track JSON, then a ~100-200KB cover download), and showing the
-            // previous album's art next to the new title for that long reads as
-            // a bug. The blank plate is drawn until the real cover arrives.
-            if let Some(n) = app.now.as_mut() {
-                n.cover = None;
-            }
-            app.art_dirty = ART_REPAINTS;
             if let Some(track_id) = track_id_from_uri(&uri) {
                 // Record what we're waiting for so an earlier track's reply,
                 // landing late, is discarded instead of overwriting this one.
@@ -3319,26 +3314,6 @@ fn render_nowplaying_view(f: &mut Frame, app: &mut App, theme: Theme, area: Rect
 
     if let Some(cover) = app.now.as_mut().and_then(|n| n.cover.as_mut()) {
         cover.render(f, art_rect);
-    } else {
-        // No cover yet (loading, or the download failed). Draw a blank plate
-        // rather than nothing: an inline image persists until another image
-        // replaces it, so without this the previous track's art stays on
-        // screen underneath the new title.
-        let picker = app.picker.clone();
-        let bg = theme.background_panel;
-        let plate = (bg.r, bg.g, bg.b);
-        if app.placeholder.as_ref().is_none_or(|(c, _)| *c != plate) {
-            app.placeholder = Some((plate, Cover::placeholder(plate, picker)));
-        }
-        if let Some((_, ph)) = app.placeholder.as_mut() {
-            ph.render(f, art_rect);
-        }
-        f.render_widget(
-            Paragraph::new("♫")
-                .alignment(Alignment::Center)
-                .style(theme.muted()),
-            art_rect,
-        );
     }
 
     if let Some(n) = app.now.as_ref() {
