@@ -39,6 +39,17 @@ use myx::webapi::WebApi;
 type Term = Terminal<CrosstermBackend<Stdout>>;
 const FADE_MS: u64 = 300;
 
+/// Frames to force a full repaint for after the album art changes.
+///
+/// `ratatui-image` packs the entire encoded image into a single cell's symbol,
+/// and ratatui writes a cell only when it differs from the previous frame — so a
+/// new cover is transmitted exactly once. Terminals never acknowledge an inline
+/// image, and if that single write is dropped the symbol never changes again,
+/// leaving the previous track's art on screen indefinitely. Clearing invalidates
+/// the previous buffer so the same image gets written again; two frames allows
+/// one retry, costing two extra repaints per track change.
+const ART_REPAINTS: u8 = 2;
+
 // ------------------------------------------------------------------ model
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -439,6 +450,9 @@ struct App {
     // Blank plate drawn while a cover loads, cached alongside the colour it was
     // built for so a theme change rebuilds it but an ordinary redraw does not.
     placeholder: Option<((u8, u8, u8), Cover)>,
+    // Frames still owed a forced repaint because the album art changed. See
+    // ART_REPAINTS — an inline image is written once and never retried.
+    art_dirty: u8,
     // Whether real playback has started this session (gates resume-on-play).
     playback_started: bool,
     // Whether we reclaimed a live server-side session (vs. local fallback).
@@ -743,6 +757,7 @@ async fn main() -> Result<()> {
         restore_uri,
         pending_meta: None,
         placeholder: None,
+        art_dirty: 0,
         playback_started: false,
         reclaimed: false,
         source: saved.source.clone(),
@@ -889,6 +904,14 @@ async fn run_ui(
                 let target = Duration::from_millis(if animating { 16 } else { 100 });
                 if last_draw.elapsed() >= target {
                     advance_fade(&mut app);
+                    // The encoded cover lives in one cell's symbol, so ratatui
+                    // writes it only on the frame it changes. Nothing retries a
+                    // dropped image, so invalidate the previous buffer to have
+                    // it written again. See ART_REPAINTS.
+                    if app.art_dirty > 0 {
+                        app.art_dirty -= 1;
+                        let _ = terminal.clear();
+                    }
                     terminal.draw(|f| render(f, &mut app))?;
                     last_draw = Instant::now();
                     frame_count += 1;
@@ -1984,6 +2007,7 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
             if let Some(n) = app.now.as_mut() {
                 n.cover = None;
             }
+            app.art_dirty = ART_REPAINTS;
             if let Some(track_id) = track_id_from_uri(&uri) {
                 // Record what we're waiting for so an earlier track's reply,
                 // landing late, is discarded instead of overwriting this one.
@@ -2056,6 +2080,8 @@ fn apply_meta(
         .image
         .as_ref()
         .map(|img| Cover::from_image(img.clone(), app.picker.clone()));
+    // New art to transmit — see ART_REPAINTS.
+    app.art_dirty = ART_REPAINTS;
     app.status.clear();
     app.lyrics.clear();
     app.lyrics_synced = false;
