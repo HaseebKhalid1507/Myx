@@ -8,7 +8,7 @@
 use image::DynamicImage;
 use ratatui::layout::{Rect, Size};
 use ratatui::Frame;
-use ratatui_image::picker::Picker;
+use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
 
@@ -23,7 +23,30 @@ impl Cover {
     /// Build a `Picker` by querying the terminal, falling back to half-blocks.
     /// Must be called after raw mode is enabled so the query can round-trip.
     pub fn make_picker() -> Picker {
-        Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
+        let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+
+        // Warp advertises kitty support but lacks its unicode-placeholder
+        // placement, so kitty renders as tofu. Override *after* the query to
+        // keep the detected font size — blacklisting kitty loses it and falls
+        // back to halfblocks.
+        if picker.protocol_type() == ProtocolType::Kitty
+            && std::env::var("TERM_PROGRAM").is_ok_and(|t| t.contains("WarpTerminal"))
+        {
+            picker.set_protocol_type(ProtocolType::Iterm2);
+        }
+
+        // Escape hatch for mis-detected terminals.
+        if let Ok(want) = std::env::var("MYX_PROTOCOL") {
+            match want.to_ascii_lowercase().as_str() {
+                "kitty" => picker.set_protocol_type(ProtocolType::Kitty),
+                "iterm2" => picker.set_protocol_type(ProtocolType::Iterm2),
+                "sixel" => picker.set_protocol_type(ProtocolType::Sixel),
+                "halfblocks" => picker.set_protocol_type(ProtocolType::Halfblocks),
+                _ => {}
+            }
+        }
+
+        picker
     }
 
     /// Load a cover image from disk. Returns `None` if the file can't be decoded.
