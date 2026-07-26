@@ -449,7 +449,6 @@ struct App {
     pending_meta: Option<String>,
     // Blank plate drawn while a cover loads, cached alongside the colour it was
     // built for so a theme change rebuilds it but an ordinary redraw does not.
-    placeholder: Option<((u8, u8, u8), Cover)>,
     // Frames still owed a forced repaint because the album art changed. See
     // ART_REPAINTS — an inline image is written once and never retried.
     art_dirty: u8,
@@ -756,7 +755,6 @@ async fn main() -> Result<()> {
         actions: None,
         restore_uri,
         pending_meta: None,
-        placeholder: None,
         art_dirty: 0,
         playback_started: false,
         reclaimed: false,
