@@ -667,7 +667,7 @@ async fn main() -> Result<()> {
     }
 
     let mut terminal = init_terminal()?;
-    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    let picker = Cover::make_picker();
 
     // Rebuild the last now-playing (paused) for a seamless resume look.
     let now = saved.last_played.as_ref().map(|last_played| NowPlaying {
