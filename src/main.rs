@@ -1248,7 +1248,7 @@ fn context_target(item: &LibItem) -> Option<(String, String)> {
 fn enter_label(item: Option<&LibItem>) -> &'static str {
     match item {
         Some(i) if !i.is_track && !i.is_header => "open",
-        _ => "play",
+        _ => "select",
     }
 }
 
@@ -3648,7 +3648,7 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         key("S"),
         lbl(" shuffle   "),
         key("␣"),
-        lbl(" pause   "),
+        Span::styled(if app.now.as_ref().is_some_and(|n| n.is_playing) { " pause   " } else { " play    " }, theme.muted()),
         key("n/b"),
         lbl(" skip   "),
         key("⇧←→"),
