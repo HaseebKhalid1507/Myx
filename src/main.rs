@@ -241,6 +241,10 @@ enum ActionKind {
     },
     Play {
         uri: String,
+        /// Carried so the play path can set `source_name` — without it the
+        /// Queue view's PLAYING FROM header and the persisted resume source
+        /// go stale.
+        name: String,
     },
     Open {
         uri: String,
@@ -428,6 +432,13 @@ struct App {
     actions: Option<ActionMenu>,
     // A last-played track URI to re-enrich (cover/theme/lyrics) on boot.
     restore_uri: Option<String>,
+    // Track URI whose metadata was last requested. Fetches run on separate
+    // blocking tasks and can land out of order when skipping quickly, so a
+    // reply for any other track is stale and must be dropped.
+    pending_meta: Option<String>,
+    // Blank plate drawn while a cover loads, cached alongside the colour it was
+    // built for so a theme change rebuilds it but an ordinary redraw does not.
+    placeholder: Option<((u8, u8, u8), Cover)>,
     // Whether real playback has started this session (gates resume-on-play).
     playback_started: bool,
     // Whether we reclaimed a live server-side session (vs. local fallback).
@@ -541,6 +552,22 @@ impl App {
             self.selected = self.first_selectable();
         }
     }
+    /// The single entry point for "play this context URI".
+    ///
+    /// Every caller must route through here so `source` / `source_name` stay in
+    /// sync with what is actually playing — they back the Queue view's
+    /// PLAYING FROM header and the resume-on-launch path in `resume_source`.
+    /// `name` is a parameter rather than being derived from `details.last()`
+    /// because the drill-in stack is empty when playing straight from a list.
+    fn play_context_row(&mut self, uri: String, name: String, shuffle: bool) {
+        self.status = format!("starting {name}…");
+        self.source = PlaySource::Context(uri.clone());
+        self.source_name = name;
+        if let Err(e) = self.engine.play_context(uri, shuffle) {
+            self.status = format!("couldn't play: {e:#}");
+        }
+    }
+
     /// Play whatever's selected (in the current section, or in search results).
     /// Act on the selected item. Returns what the caller should do next.
     fn activate(&mut self) -> Activated {
@@ -571,16 +598,15 @@ impl App {
                 }
                 return Activated::None;
             }
-            self.status = format!("starting {}…", item.name);
-            self.source = PlaySource::Context(item.uri.clone());
-            self.source_name = self
+            // Inside a drill-in the enclosing title is the better label
+            // ("Chill Vibes"); standalone play rows fall back to their own.
+            let name = self
                 .details
                 .last()
                 .map(|d| d.title.clone())
-                .unwrap_or_default();
-            if let Err(e) = self.engine.play_context(item.uri, self.shuffle) {
-                self.status = format!("couldn't play: {e:#}");
-            }
+                .unwrap_or_else(|| item.name.clone());
+            let shuffle = self.shuffle;
+            self.play_context_row(item.uri, name, shuffle);
             return Activated::None;
         }
         if item.is_track {
@@ -715,6 +741,8 @@ async fn main() -> Result<()> {
         details: Vec::new(),
         actions: None,
         restore_uri,
+        pending_meta: None,
+        placeholder: None,
         playback_started: false,
         reclaimed: false,
         source: saved.source.clone(),
@@ -777,6 +805,7 @@ async fn run_ui(
     // Re-enrich the restored last-played track (cover / theme / lyrics).
     if let Some(uri) = app.restore_uri.take() {
         if let Some(id) = track_id_from_uri(&uri) {
+            app.pending_meta = Some(format!("spotify:track:{id}"));
             let webapi = app.webapi.clone();
             let tx = meta_tx.clone();
             tokio::task::spawn_blocking(move || {
@@ -1091,6 +1120,7 @@ async fn run_ui(
                     let webapi = app.webapi.clone();
                     let tx = meta_tx.clone();
                     let id = state.track_id.clone();
+                    app.pending_meta = Some(format!("spotify:track:{id}"));
                     tokio::task::spawn_blocking(move || { let _ = tx.send(fetch_track_meta(&webapi, &id)); });
                     spawn_queue_fetch(app.webapi.clone(), queue_tx.clone());
                 }
@@ -1170,6 +1200,37 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
                 }
             }
         }
+    }
+}
+
+/// Does this row carry a playable context URI, and under what name?
+///
+/// Context rows (playlist / album / artist) and the synthesized "▶︎ Play X"
+/// rows both do; headers and tracks do not. Kept pure and free-standing so it
+/// is unit-testable — `App` owns a librespot `Spirc` and cannot be built in a
+/// test. `enter_label` shares this predicate so Enter opens exactly the rows
+/// `P` plays.
+fn context_target(item: &LibItem) -> Option<(String, String)> {
+    (!item.is_header && !item.is_track).then(|| (item.uri.clone(), item.name.clone()))
+}
+
+/// Enter opens context rows and plays everything else.
+fn enter_label(item: Option<&LibItem>) -> &'static str {
+    match item {
+        Some(i) if !i.is_track && !i.is_header => "open",
+        _ => "play",
+    }
+}
+
+/// `P` / `S`: play the highlighted context from anywhere — library section,
+/// search results, or inside a drill-in (`cur_items` resolves all three).
+fn play_selected_context(app: &mut App, shuffle: bool) {
+    let Some(item) = app.cur_items().get(app.selected).cloned() else {
+        return;
+    };
+    match context_target(&item) {
+        Some((uri, name)) => app.play_context_row(uri, name, shuffle),
+        None => app.status = "not a playlist, album, or artist".to_string(),
     }
 }
 
@@ -1280,6 +1341,18 @@ fn handle_key(
         KeyCode::Char('s') => {
             app.shuffle = !app.shuffle;
             let _ = app.engine.shuffle(app.shuffle);
+        }
+        // Play the highlighted playlist / album / artist outright. Enter still
+        // opens; this is the direct route that used to require two Enters or
+        // the actions menu.
+        KeyCode::Char('P') => play_selected_context(app, false),
+        KeyCode::Char('S') => {
+            // Flip the global toggle too, or the footer would show shuffle off
+            // while playback is shuffled, and `resume_source` would later
+            // replay this context unshuffled.
+            app.shuffle = true;
+            let _ = app.engine.shuffle(true);
+            play_selected_context(app, true);
         }
         KeyCode::Char('R') => {
             app.repeat = !app.repeat;
@@ -1431,10 +1504,12 @@ fn handle_action_key(
                 });
             }
         }
-        ActionKind::Play { uri } => {
-            if let Err(e) = app.engine.play_context(uri, app.shuffle) {
-                app.status = format!("couldn't play: {e:#}");
-            }
+        ActionKind::Play { uri, name } => {
+            // Previously called engine.play_context directly, leaving
+            // source/source_name stale: PLAYING FROM showed the wrong context
+            // and resume-on-launch replayed the previous one.
+            let shuffle = app.shuffle;
+            app.play_context_row(uri, name, shuffle);
             app.actions = None;
         }
         ActionKind::Open { uri, name } => {
@@ -1600,7 +1675,10 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
             });
             items.push(ActionItem {
                 label: "▶︎  Play".into(),
-                kind: ActionKind::Play { uri: uri.clone() },
+                kind: ActionKind::Play {
+                    uri: uri.clone(),
+                    name: item.name.clone(),
+                },
             });
             items.push(ActionItem {
                 label: "→  Open".into(),
@@ -1636,7 +1714,10 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
             });
             items.push(ActionItem {
                 label: "▶︎  Play".into(),
-                kind: ActionKind::Play { uri: uri.clone() },
+                kind: ActionKind::Play {
+                    uri: uri.clone(),
+                    name: item.name.clone(),
+                },
             });
             items.push(ActionItem {
                 label: "→  Open Album".into(),
@@ -1673,7 +1754,10 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
             });
             items.push(ActionItem {
                 label: "▶︎  Play".into(),
-                kind: ActionKind::Play { uri: uri.clone() },
+                kind: ActionKind::Play {
+                    uri: uri.clone(),
+                    name: item.name.clone(),
+                },
             });
             items.push(ActionItem {
                 label: "→  Open".into(),
@@ -1893,7 +1977,17 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
     match ev {
         EngineEvent::TrackChanged { uri } => {
             app.status = "loading track…".to_string();
+            // Drop the outgoing track's art immediately. Metadata takes ~0.5-2s
+            // (track JSON, then a ~100-200KB cover download), and showing the
+            // previous album's art next to the new title for that long reads as
+            // a bug. The blank plate is drawn until the real cover arrives.
+            if let Some(n) = app.now.as_mut() {
+                n.cover = None;
+            }
             if let Some(track_id) = track_id_from_uri(&uri) {
+                // Record what we're waiting for so an earlier track's reply,
+                // landing late, is discarded instead of overwriting this one.
+                app.pending_meta = Some(format!("spotify:track:{track_id}"));
                 let webapi = app.webapi.clone();
                 let tx = meta_tx.clone();
                 tokio::task::spawn_blocking(move || {
@@ -1936,11 +2030,28 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
     }
 }
 
+/// Is this metadata reply the one we are still waiting for?
+///
+/// `None` means nothing specific was requested (e.g. a path that predates the
+/// guard), so accept — the guard only ever discards a reply we can prove is for
+/// a different track.
+fn meta_is_current(pending: Option<&str>, meta_uri: &str) -> bool {
+    pending.is_none_or(|p| p == meta_uri)
+}
+
 fn apply_meta(
     app: &mut App,
     meta: TrackMeta,
     lyrics_tx: &flume::Sender<(Vec<(u32, String)>, bool)>,
 ) {
+    // Metadata fetches run on independent blocking tasks, so skipping quickly
+    // (n/b) can land an earlier track's reply after a later one. Applying it
+    // would replace the whole NowPlaying — title, artist and cover — with the
+    // wrong track's data.
+    if !meta_is_current(app.pending_meta.as_deref(), &meta.uri) {
+        return;
+    }
+
     let cover = meta
         .image
         .as_ref()
@@ -2187,10 +2298,10 @@ fn spawn_library_fetch(
                 |it| {
                     Some(LibItem::ctx(
                         it["name"].as_str()?.to_string(),
-                        it["owner"]["display_name"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
+                        playlist_subtitle(
+                            it["owner"]["display_name"].as_str().unwrap_or(""),
+                            playlist_total(it),
+                        ),
                         it["uri"].as_str()?.to_string(),
                     ))
                 },
@@ -2253,6 +2364,50 @@ fn spawn_library_fetch(
             let _ = done_tx.send(got_any);
         })
         .expect("spawn library worker");
+}
+
+/// One `/playlists/{id}/items` entry -> `LibItem`.
+///
+/// The payload nests the track under `item`; the older `/tracks` endpoint used
+/// `track`. Both are accepted so this keeps working whichever shape is served.
+///
+/// `None` skips the row (`fetch_all_pages` filters rather than aborting), which
+/// is what we want for entries with no playable track: `null` for items removed
+/// from the catalogue, and region-locked or malformed rows.
+fn parse_playlist_track(it: &serde_json::Value) -> Option<LibItem> {
+    let t = if it["item"].is_object() {
+        &it["item"]
+    } else {
+        &it["track"]
+    };
+    Some(LibItem::track(
+        t["name"].as_str()?.to_string(),
+        t["artists"][0]["name"].as_str().unwrap_or("").to_string(),
+        t["uri"].as_str()?.to_string(),
+    ))
+}
+
+/// Track count from a playlist object. Spotify renamed the field `tracks` ->
+/// `items` alongside the `/tracks` -> `/items` endpoint move; read the new name
+/// first and fall back so both shapes work.
+fn playlist_total(p: &serde_json::Value) -> Option<u64> {
+    p["items"]["total"]
+        .as_u64()
+        .or_else(|| p["tracks"]["total"].as_u64())
+}
+
+/// Playlist row subtitle: `"142 · owner"`, or just the owner when the API omits
+/// the count.
+///
+/// Count first, deliberately: the row renderer truncates the subtitle tail-first
+/// in a narrow pane, and the count is both short and the more informative half —
+/// the owner is frequently the same name on every row.
+fn playlist_subtitle(owner: &str, total: Option<u64>) -> String {
+    match total {
+        Some(n) if owner.is_empty() => n.to_string(),
+        Some(n) => format!("{n} · {owner}"),
+        None => owner.to_string(),
+    }
 }
 
 fn fetch_all_pages(
@@ -2432,10 +2587,10 @@ fn search_blocking(token: &str, query: &str) -> Vec<LibItem> {
         .filter_map(|p| {
             Some(LibItem::ctx(
                 p["name"].as_str()?.to_string(),
-                p["owner"]["display_name"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string(),
+                playlist_subtitle(
+                    p["owner"]["display_name"].as_str().unwrap_or(""),
+                    playlist_total(p),
+                ),
                 p["uri"].as_str()?.to_string(),
             ))
         })
@@ -2642,21 +2797,24 @@ fn fetch_detail_blocking(token: &str, uri: &str, name: &str) -> (String, Vec<Lib
             }
         }
         "playlist" => {
-            if let Some(v) = get_json(
+            // Follow `next` instead of taking only the first page: playlists
+            // routinely exceed the 100-item page size, and the drill-in list
+            // (plus "play from this track") was silently truncated.
+            let before = items.len();
+            items.extend(fetch_all_pages(
                 &client,
-                &format!("https://api.spotify.com/v1/playlists/{id}/tracks?limit=100"),
+                &format!("https://api.spotify.com/v1/playlists/{id}/items?limit=100"),
                 token,
-            ) {
-                for it in v["items"].as_array().into_iter().flatten() {
-                    let t = &it["track"];
-                    if let (Some(n), Some(u)) = (t["name"].as_str(), t["uri"].as_str()) {
-                        items.push(LibItem::track(
-                            n.to_string(),
-                            t["artists"][0]["name"].as_str().unwrap_or("").to_string(),
-                            u.to_string(),
-                        ));
-                    }
-                }
+                None, // items[] is top-level on this endpoint
+                10,   // 1,000 tracks, matching the other sections' ceiling
+                parse_playlist_track,
+            ));
+            if items.len() == before {
+                // Some third-party playlists 403 even on /items. `fetch_all_pages`
+                // has no error channel, so an empty result is indistinguishable
+                // from an empty playlist — say both rather than showing a blank
+                // pane with no explanation.
+                items.push(LibItem::header("no tracks — empty or restricted"));
             }
         }
         _ => {}
@@ -2993,8 +3151,23 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
         } else {
             theme.muted()
         };
+        // Mark rows that `P` can play outright (playlist / album / artist), so
+        // they're distinguishable from tracks at a glance.
+        let playable_ctx = context_target(item).is_some() && !item.is_play;
+        let max = if playable_ctx {
+            max.saturating_sub(2)
+        } else {
+            max
+        };
         let label = truncate(&item.name, max);
-        let mut spans = vec![Span::styled(format!(" {label}"), style)];
+        let mut spans = Vec::new();
+        if playable_ctx {
+            spans.push(Span::styled(
+                " ▶",
+                Style::default().fg(theme.border_dimmest.into()),
+            ));
+        }
+        spans.push(Span::styled(format!(" {label}"), style));
         if !item.subtitle.is_empty() {
             let used = label.chars().count() + 1;
             let room = max.saturating_sub(used + 3);
@@ -3117,6 +3290,19 @@ fn render_nowplaying_view(f: &mut Frame, app: &mut App, theme: Theme, area: Rect
     if let Some(cover) = app.now.as_mut().and_then(|n| n.cover.as_mut()) {
         cover.render(f, art_rect);
     } else {
+        // No cover yet (loading, or the download failed). Draw a blank plate
+        // rather than nothing: an inline image persists until another image
+        // replaces it, so without this the previous track's art stays on
+        // screen underneath the new title.
+        let picker = app.picker.clone();
+        let bg = theme.background_panel;
+        let plate = (bg.r, bg.g, bg.b);
+        if app.placeholder.as_ref().is_none_or(|(c, _)| *c != plate) {
+            app.placeholder = Some((plate, Cover::placeholder(plate, picker)));
+        }
+        if let Some((_, ph)) = app.placeholder.as_mut() {
+            ph.render(f, art_rect);
+        }
         f.render_widget(
             Paragraph::new("♫")
                 .alignment(Alignment::Center)
@@ -3440,6 +3626,9 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let on = |b: bool| if b { theme.success } else { theme.text_muted };
     let key = |k: &'static str| Span::styled(k, Style::default().fg(theme.primary.into()));
     let lbl = |t: &'static str| Span::styled(t, theme.muted());
+    // Enter opens contexts and plays tracks — label it for the selected row
+    // rather than always claiming "play".
+    let enter_lbl = enter_label(app.cur_items().get(app.selected));
     let line = Line::from(vec![
         key("⇥"),
         lbl(" section   "),
@@ -3448,7 +3637,11 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         key("/"),
         lbl(" search   "),
         key("⏎"),
+        Span::styled(format!(" {enter_lbl}   "), theme.muted()),
+        key("P"),
         lbl(" play   "),
+        key("S"),
+        lbl(" shuffle   "),
         key("␣"),
         lbl(" pause   "),
         key("n/b"),
@@ -3674,4 +3867,174 @@ fn restore_terminal(terminal: &mut Term) -> Result<()> {
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     terminal.show_cursor()?;
     Ok(())
+}
+
+// ------------------------------------------------------------------ tests
+
+#[cfg(test)]
+mod playlist_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ctx_row() -> LibItem {
+        LibItem::ctx(
+            "Chill Vibes".into(),
+            "you · 142".into(),
+            "spotify:playlist:1".into(),
+        )
+    }
+
+    // -------------------------------------------------------- context_target
+
+    #[test]
+    fn context_target_accepts_context_rows() {
+        let (uri, name) = context_target(&ctx_row()).expect("playlist is a context");
+        assert_eq!(uri, "spotify:playlist:1");
+        assert_eq!(name, "Chill Vibes");
+    }
+
+    #[test]
+    fn context_target_accepts_synthesized_play_row() {
+        // "▶︎ Play X" rows carry the context URI, so P works inside a drill-in.
+        let row = LibItem::play("▶︎ Play Chill Vibes".into(), "spotify:playlist:1".into());
+        assert_eq!(
+            context_target(&row).map(|(u, _)| u),
+            Some("spotify:playlist:1".to_string())
+        );
+    }
+
+    #[test]
+    fn context_target_rejects_tracks_and_headers() {
+        let track = LibItem::track("Song".into(), "Artist".into(), "spotify:track:9".into());
+        assert!(context_target(&track).is_none());
+        assert!(context_target(&LibItem::header("Songs")).is_none());
+    }
+
+    // --------------------------------------------------- parse_playlist_track
+
+    #[test]
+    fn parses_an_items_entry() {
+        // The shape /playlists/{id}/items actually serves today.
+        let it = json!({"added_at": "2024-01-01T00:00:00Z", "is_local": false, "item": {
+            "name": "Coffee",
+            "uri": "spotify:track:429NtPmr12aypzFH3FkN9l",
+            "type": "track",
+            "artists": [{"name": "beabadoobee"}]
+        }});
+        let li = parse_playlist_track(&it).expect("valid item");
+        assert_eq!(li.name, "Coffee");
+        assert_eq!(li.subtitle, "beabadoobee");
+        assert_eq!(li.uri, "spotify:track:429NtPmr12aypzFH3FkN9l");
+        assert!(li.is_track);
+    }
+
+    #[test]
+    fn still_parses_legacy_track_entry() {
+        // Older /tracks shape, kept working through the API migration.
+        let it = json!({"track": {
+            "name": "Sailor Song",
+            "uri": "spotify:track:abc",
+            "artists": [{"name": "Gigi Perez"}]
+        }});
+        let li = parse_playlist_track(&it).expect("valid track");
+        assert_eq!(li.name, "Sailor Song");
+        assert_eq!(li.subtitle, "Gigi Perez");
+    }
+
+    #[test]
+    fn skips_null_entries() {
+        // Real playlists contain these for items pulled from the catalogue.
+        // Must yield None (skipped) rather than panic or abort the page.
+        assert!(parse_playlist_track(&json!({ "item": null })).is_none());
+        assert!(parse_playlist_track(&json!({ "track": null })).is_none());
+        assert!(parse_playlist_track(&json!({})).is_none());
+    }
+
+    #[test]
+    fn skips_entry_without_uri() {
+        let it = json!({"item": {"name": "No URI", "artists": [{"name": "X"}]}});
+        assert!(parse_playlist_track(&it).is_none());
+    }
+
+    #[test]
+    fn missing_artists_yields_empty_artist_not_skip() {
+        let it = json!({"item": {"name": "Untitled", "uri": "spotify:track:z"}});
+        let li = parse_playlist_track(&it).expect("still playable without artists");
+        assert_eq!(li.subtitle, "");
+    }
+
+    #[test]
+    fn total_prefers_items_over_legacy_tracks() {
+        // Live /me/playlists shape: `items.total`, no `tracks` object at all.
+        assert_eq!(
+            playlist_total(&json!({"items": {"href": "…", "total": 155}})),
+            Some(155)
+        );
+        assert_eq!(playlist_total(&json!({"tracks": {"total": 42}})), Some(42));
+        assert_eq!(
+            playlist_total(&json!({"items": {"total": 7}, "tracks": {"total": 9}})),
+            Some(7)
+        );
+        assert_eq!(playlist_total(&json!({"name": "no counts"})), None);
+    }
+
+    #[test]
+    fn admits_local_files_and_episodes() {
+        // Documents current behaviour: both parse as ordinary tracks.
+        let local = json!({"is_local": true, "item": {
+            "name": "Demo.mp3", "uri": "spotify:local:::Demo:180", "artists": [{"name": "Me"}]
+        }});
+        assert!(parse_playlist_track(&local).is_some());
+
+        let episode = json!({"item": {
+            "name": "Ep 12", "uri": "spotify:episode:e1", "type": "episode", "artists": []
+        }});
+        let li = parse_playlist_track(&episode).expect("episodes are admitted today");
+        assert_eq!(li.subtitle, "");
+    }
+
+    // ------------------------------------------------------ playlist_subtitle
+
+    #[test]
+    fn subtitle_puts_count_before_owner() {
+        // Count leads so it survives tail-first truncation in a narrow pane.
+        assert_eq!(
+            playlist_subtitle("ImLordVisssh", Some(155)),
+            "155 · ImLordVisssh"
+        );
+        assert_eq!(playlist_subtitle("you", None), "you");
+        assert_eq!(playlist_subtitle("", Some(12)), "12");
+        assert_eq!(playlist_subtitle("", None), "");
+    }
+
+    // -------------------------------------------------------- meta_is_current
+
+    #[test]
+    fn stale_metadata_replies_are_dropped() {
+        let a = "spotify:track:AAA";
+        let b = "spotify:track:BBB";
+        // Waiting on B: B's reply applies, A's late reply does not.
+        assert!(meta_is_current(Some(b), b));
+        assert!(!meta_is_current(Some(b), a));
+        // Nothing outstanding -> accept (the guard only drops provable mismatches).
+        assert!(meta_is_current(None, a));
+    }
+
+    // ------------------------------------------------------------ enter_label
+
+    #[test]
+    fn enter_label_matches_context_target() {
+        let track = LibItem::track("Song".into(), "Artist".into(), "spotify:track:9".into());
+        assert_eq!(enter_label(Some(&ctx_row())), "open");
+        assert_eq!(enter_label(Some(&track)), "play");
+        assert_eq!(enter_label(Some(&LibItem::header("Songs"))), "play");
+        assert_eq!(enter_label(None), "play");
+
+        // The invariant the footer relies on: Enter says "open" for exactly
+        // the rows P can play.
+        for row in [ctx_row(), track, LibItem::header("Songs")] {
+            let opens = enter_label(Some(&row)) == "open";
+            assert_eq!(opens, context_target(&row).is_some() && !row.is_play);
+        }
+    }
 }

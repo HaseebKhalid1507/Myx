@@ -42,6 +42,19 @@ impl Cover {
         }
     }
 
+    /// A blank plate in the given colour, drawn while the real cover loads.
+    ///
+    /// This has to be an *image*, not blank cells: an inline image is a graphic
+    /// the terminal keeps until another image replaces it, so redrawing text
+    /// over the area leaves the previous track's art on screen. Transmitting a
+    /// flat image is what actually clears it.
+    pub fn placeholder(rgb: (u8, u8, u8), picker: Picker) -> Self {
+        let px = image::Rgb([rgb.0, rgb.1, rgb.2]);
+        // 2x2 is enough — it is scaled up to the render area on encode.
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 2, px));
+        Self::from_image(img, picker)
+    }
+
     /// Render the cover into `area`, re-encoding only when the area changes.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         if area.width == 0 || area.height == 0 {
