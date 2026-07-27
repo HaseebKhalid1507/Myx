@@ -733,10 +733,18 @@ async fn main() -> Result<()> {
 
     let restore_uri = saved.last_played.as_ref().map(|lp| lp.uri.clone());
 
+    // HWND is a Windows-specific API.
+    #[cfg(unix)]
+    let hwnd = None;
+
+    // Myx is a TUI with no window of its own, get the console's window instead.
+    #[cfg(windows)]
+    let hwnd = Some(unsafe { windows_win::sys::GetConsoleWindow() });
+
     let media_controls = MediaControls::new(PlatformConfig {
         dbus_name: "myx",
         display_name: "Myx",
-        hwnd: None,
+        hwnd,
     })
     .unwrap();
 
