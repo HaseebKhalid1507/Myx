@@ -741,6 +741,10 @@ async fn main() -> Result<()> {
     #[cfg(windows)]
     let hwnd = Some(unsafe { windows_win::sys::GetConsoleWindow() });
 
+    // MacOS does not need an HWND, but requires an event loop to be created.
+    #[cfg(target_os = "macos")]
+    let _event_loop = winit::event_loop::EventLoop::new().unwrap();
+
     let media_controls = MediaControls::new(PlatformConfig {
         dbus_name: "myx",
         display_name: "Myx",
