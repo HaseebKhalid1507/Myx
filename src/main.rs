@@ -35,6 +35,10 @@ use myx::gradient::{self};
 use myx::reactive::derive_theme;
 use myx::theme::{Theme, TOKYONIGHT};
 use myx::webapi::WebApi;
+use souvlaki::{
+    MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
+    SeekDirection,
+};
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 const FADE_MS: u64 = 300;
@@ -345,8 +349,13 @@ struct TrackMeta {
     artist: String,
     album: String,
     duration_ms: u32,
-    image: Option<image::DynamicImage>,
+    image: TrackImage,
     theme: Option<Theme>,
+}
+
+struct TrackImage {
+    url: Option<String>,
+    image: Option<image::DynamicImage>,
 }
 
 /// What kind of thing is currently playing — persisted so we can resume the real
@@ -418,6 +427,7 @@ struct App {
     fade: Option<ThemeFade>,
     now: Option<NowPlaying>,
     webapi: Arc<Mutex<WebApi>>,
+    media_controls: MediaControls,
     status: String,
     library: Library,
     section: Section,
@@ -723,9 +733,17 @@ async fn main() -> Result<()> {
 
     let restore_uri = saved.last_played.as_ref().map(|lp| lp.uri.clone());
 
+    let media_controls = MediaControls::new(PlatformConfig {
+        dbus_name: "myx",
+        display_name: "Myx",
+        hwnd: None,
+    })
+    .unwrap();
+
     let app = App {
         engine,
         picker,
+        media_controls,
         displayed: TOKYONIGHT,
         target: TOKYONIGHT,
         fade: None,
@@ -809,6 +827,7 @@ async fn run_ui(
     let (pstate_tx, pstate_rx) = flume::unbounded::<PlaybackState>();
     let (radio_tx, radio_rx) = flume::unbounded::<Result<Radio, String>>();
     let (libdone_tx, libdone_rx) = flume::unbounded::<bool>();
+    let (souvlaki_tx, souvlaki_rx) = flume::unbounded::<MediaControlEvent>();
     spawn_library_fetch(app.webapi.clone(), lib_tx.clone(), libdone_tx.clone());
 
     // Reclaim server-side playback: read live state + transfer it onto myx so the
@@ -817,7 +836,11 @@ async fn run_ui(
     // Clone: `spawn_restore` sends once and exits. Moving the sender in would
     // drop the last one, and a disconnected receiver resolves `recv_async()`
     // instantly and forever — spinning the select loop below.
-    spawn_restore(app.webapi.clone(), app.engine.device_id(), pstate_tx.clone());
+    spawn_restore(
+        app.webapi.clone(),
+        app.engine.device_id(),
+        pstate_tx.clone(),
+    );
 
     // Re-enrich the restored last-played track (cover / theme / lyrics).
     if let Some(uri) = app.restore_uri.take() {
@@ -830,6 +853,12 @@ async fn run_ui(
             });
         }
     }
+
+    app.media_controls
+        .attach(move |event| {
+            let _ = souvlaki_tx.send(event);
+        })
+        .ok();
 
     let mut frame_count: u64 = 0;
     let mut lib_attempts: u32 = 0;
@@ -1073,6 +1102,11 @@ async fn run_ui(
                         last_draw = Instant::now() - Duration::from_millis(200);
                     }
                     _ => {}
+                }
+            }
+            ev = souvlaki_rx.recv_async() => {
+                if let Ok(ev) = ev {
+                    handle_media_control_event(&mut app, ev, &radio_tx);
                 }
             }
             m = meta_rx.recv_async() => {
@@ -1466,6 +1500,65 @@ fn handle_key(
         _ => {}
     }
     false
+}
+
+fn handle_media_control_event(
+    app: &mut App,
+    ev: MediaControlEvent,
+    radio_tx: &flume::Sender<Result<Radio, String>>,
+) {
+    match ev {
+        MediaControlEvent::Next => {
+            let _ = app.engine.next();
+        }
+        MediaControlEvent::Previous => {
+            let _ = app.engine.prev();
+        }
+        MediaControlEvent::Toggle => {
+            if app.playback_started {
+                let _ = app.engine.toggle();
+            } else if app.reclaimed {
+                // Resume the reclaimed server-side context (full queue intact).
+                let _ = app.engine.play();
+                app.playback_started = true;
+            } else {
+                // No live session — resume the persisted source (context/radio/liked).
+                resume_source(app, radio_tx);
+                app.playback_started = true;
+            }
+        }
+        MediaControlEvent::Play => {
+            if app.playback_started {
+                let _ = app.engine.play();
+            } else if app.reclaimed {
+                // Resume the reclaimed server-side context (full queue intact).
+                let _ = app.engine.play();
+                app.playback_started = true;
+            } else {
+                // No live session — resume the persisted source (context/radio/liked).
+                resume_source(app, radio_tx);
+                app.playback_started = true;
+            }
+        }
+        MediaControlEvent::Pause => {
+            let _ = app.engine.pause();
+        }
+        MediaControlEvent::Stop => {
+            app.engine.stop();
+        }
+        MediaControlEvent::Seek(direction) => match direction {
+            SeekDirection::Backward => app.seek_by(-5_000),
+            SeekDirection::Forward => app.seek_by(5_000),
+        },
+        MediaControlEvent::SeekBy(direction, duration) => match direction {
+            SeekDirection::Backward => app.seek_by(-(duration.as_millis() as i64)),
+            SeekDirection::Forward => app.seek_by(duration.as_millis() as i64),
+        },
+        MediaControlEvent::SetPosition(MediaPosition(duration)) => {
+            app.seek_to(duration.as_millis() as u32);
+        }
+        _ => {}
+    }
 }
 
 /// Handle input while the actions menu is open.
@@ -2028,6 +2121,10 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
                 n.is_playing = true;
                 n.position_ms = position_ms;
                 n.position_at = Instant::now();
+
+                let _ = app.media_controls.set_playback(MediaPlayback::Playing {
+                    progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
+                });
             }
         }
         EngineEvent::Paused { position_ms, .. } => {
@@ -2035,16 +2132,32 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
                 n.is_playing = false;
                 n.position_ms = position_ms;
                 n.position_at = Instant::now();
+
+                let _ = app.media_controls.set_playback(MediaPlayback::Paused {
+                    progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
+                });
             }
         }
         EngineEvent::Stopped => {
             app.now = None;
             app.playback_started = false;
+
+            let _ = app.media_controls.set_playback(MediaPlayback::Stopped);
         }
         EngineEvent::PositionCorrection { position_ms, .. } => {
             if let Some(n) = app.now.as_mut() {
                 n.position_ms = position_ms;
                 n.position_at = Instant::now();
+
+                if n.is_playing {
+                    let _ = app.media_controls.set_playback(MediaPlayback::Playing {
+                        progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
+                    });
+                } else {
+                    let _ = app.media_controls.set_playback(MediaPlayback::Paused {
+                        progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
+                    });
+                }
             }
         }
         EngineEvent::EndOfTrack { .. } => {}
@@ -2074,6 +2187,7 @@ fn apply_meta(
     }
 
     let cover = meta
+        .image
         .image
         .as_ref()
         .map(|img| Cover::from_image(img.clone(), app.picker.clone()));
@@ -2112,9 +2226,21 @@ fn apply_meta(
             .unwrap_or(app.playback_started),
         cover,
     });
+
     if let Some(theme) = meta.theme {
         app.start_fade(theme);
     }
+
+    let _ = app.media_controls.set_metadata(MediaMetadata {
+        title: app.now.as_ref().map(|n| n.title.as_str()),
+        artist: app.now.as_ref().map(|n| n.artist.as_str()),
+        album: app.now.as_ref().map(|n| n.album.as_str()),
+        cover_url: meta.image.url.as_deref(),
+        duration: app
+            .now
+            .as_ref()
+            .map(|n| Duration::from_millis(n.duration_ms as u64)),
+    });
 }
 
 // ------------------------------------------------------------------ web api
@@ -2505,7 +2631,10 @@ fn fetch_track_meta(webapi: &Arc<Mutex<WebApi>>, track_id: &str) -> TrackMeta {
         artist: String::new(),
         album: String::new(),
         duration_ms: 0,
-        image: None,
+        image: TrackImage {
+            image: None,
+            url: None,
+        },
         theme: None,
     };
     let Some(token) = token_of(webapi) else {
@@ -2526,7 +2655,7 @@ fn fetch_track_meta(webapi: &Arc<Mutex<WebApi>>, track_id: &str) -> TrackMeta {
     let duration_ms = v["duration_ms"].as_u64().unwrap_or(0) as u32;
     let cover_url = v["album"]["images"][0]["url"].as_str().map(String::from);
 
-    let image = cover_url.and_then(|u| {
+    let image = cover_url.clone().and_then(|u| {
         let bytes = client.get(u).send().ok()?.bytes().ok()?;
         image::load_from_memory(&bytes).ok()
     });
@@ -2538,7 +2667,10 @@ fn fetch_track_meta(webapi: &Arc<Mutex<WebApi>>, track_id: &str) -> TrackMeta {
         artist,
         album,
         duration_ms,
-        image,
+        image: TrackImage {
+            image,
+            url: cover_url,
+        },
         theme,
     }
 }
@@ -3646,7 +3778,14 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         key("S"),
         lbl(" shuffle   "),
         key("␣"),
-        Span::styled(if app.now.as_ref().is_some_and(|n| n.is_playing) { " pause   " } else { " play    " }, theme.muted()),
+        Span::styled(
+            if app.now.as_ref().is_some_and(|n| n.is_playing) {
+                " pause   "
+            } else {
+                " play    "
+            },
+            theme.muted(),
+        ),
         key("n/b"),
         lbl(" skip   "),
         key("⇧←→"),

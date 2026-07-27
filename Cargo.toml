@@ -36,7 +36,7 @@ serde_json = { version = "1", optional = true }
 anyhow = { version = "1", optional = true }
 open = { version = "5", optional = true }
 fs2 = { version = "0.4", optional = true }
-souvlaki = "0.8.3"
+souvlaki = { version = "0.8.3", default-features = false, features = ["pollster", "zbus", "zvariant"] }
 
 # Pins librespot-core's transitive `vergen` build-dep to a working version so a
 # fresh `cargo install` (which ignores Cargo.lock) resolves correctly.
