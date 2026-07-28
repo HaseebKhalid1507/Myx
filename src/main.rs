@@ -443,7 +443,9 @@ struct App {
     fade: Option<ThemeFade>,
     now: Option<NowPlaying>,
     webapi: Arc<Mutex<WebApi>>,
-    media_controls: MediaControls,
+    // Best-effort OS integration. Headless/SSH sessions may not expose the
+    // platform media service, but that must never prevent Myx from playing.
+    media_controls: Option<MediaControls>,
     status: String,
     library: Library,
     section: Section,
@@ -508,6 +510,10 @@ struct App {
     seek_last_input: Instant,
 }
 
+fn should_apply_engine_position(from_engine: bool, seek_target: Option<u32>) -> bool {
+    !(from_engine && seek_target.is_some())
+}
+
 impl App {
     fn start_fade(&mut self, to: Theme) {
         self.fade = Some(ThemeFade::new(
@@ -548,7 +554,7 @@ impl App {
     /// engine are ignored mid-scrub — what we painted is newer than anything
     /// librespot has heard about.
     fn set_local_position(&mut self, position_ms: u32, from_engine: bool) {
-        if from_engine && self.seek_target.is_some() {
+        if !should_apply_engine_position(from_engine, self.seek_target) {
             return;
         }
         if let Some(n) = self.now.as_mut() {
@@ -790,6 +796,10 @@ where
     Ok((authenticated, terminal))
 }
 
+fn optional_integration<T, E>(ready: bool, init: impl FnOnce() -> Result<T, E>) -> Option<T> {
+    ready.then(init).and_then(Result::ok)
+}
+
 /// Everything from the loading screen to the event loop. Split out of `main` so
 /// a failure on the way up still leaves the terminal restored.
 async fn boot(
@@ -839,16 +849,25 @@ async fn boot(
     #[cfg(windows)]
     let hwnd = Some(unsafe { windows_win::sys::GetConsoleWindow() });
 
-    // MacOS does not need an HWND, but requires an event loop to be created.
+    // macOS media controls require an event loop. Failure only disables native
+    // integration; the terminal player remains fully usable.
     #[cfg(target_os = "macos")]
-    let _event_loop = winit::event_loop::EventLoop::new().unwrap();
+    let media_event_loop = winit::event_loop::EventLoop::new().ok();
+    #[cfg(not(target_os = "macos"))]
+    let media_platform_ready = true;
+    #[cfg(target_os = "macos")]
+    let media_platform_ready = media_event_loop.is_some();
 
-    let media_controls = MediaControls::new(PlatformConfig {
-        dbus_name: "myx",
-        display_name: "Myx",
-        hwnd,
-    })
-    .unwrap();
+    let media_controls = optional_integration(media_platform_ready, || {
+        MediaControls::new(PlatformConfig {
+            dbus_name: "myx",
+            display_name: "Myx",
+            hwnd,
+        })
+    });
+    if media_platform_ready && media_controls.is_none() {
+        liblog("media controls unavailable; continuing without native integration");
+    }
 
     let app = App {
         engine,
@@ -966,11 +985,18 @@ async fn run_ui(
         }
     }
 
-    app.media_controls
-        .attach(move |event| {
-            let _ = souvlaki_tx.send(event);
-        })
-        .ok();
+    if let Some(controls) = app.media_controls.as_mut() {
+        if controls
+            .attach(move |event| {
+                let _ = souvlaki_tx.send(event);
+            })
+            .is_err()
+        {
+            liblog("media controls failed to attach; continuing without native integration");
+            app.media_controls = None;
+        }
+    }
+    let mut media_events_open = true;
 
     let mut frame_count: u64 = 0;
     let mut lib_attempts: u32 = 0;
@@ -1226,9 +1252,13 @@ async fn run_ui(
                     _ => {}
                 }
             }
-            ev = souvlaki_rx.recv_async() => {
-                if let Ok(ev) = ev {
-                    handle_media_control_event(&mut app, ev, &radio_tx);
+            ev = souvlaki_rx.recv_async(), if media_events_open => {
+                match consume_media_event(ev, &mut media_events_open) {
+                    Some(ev) => handle_media_control_event(&mut app, ev, &radio_tx),
+                    None => {
+                        app.media_controls = None;
+                        liblog("media controls event channel closed; native integration disabled");
+                    }
                 }
             }
             m = meta_rx.recv_async() => {
@@ -1628,6 +1658,16 @@ fn handle_key(
         _ => {}
     }
     false
+}
+
+fn consume_media_event<T>(event: Result<T, flume::RecvError>, open: &mut bool) -> Option<T> {
+    match event {
+        Ok(event) => Some(event),
+        Err(_) => {
+            *open = false;
+            None
+        }
+    }
 }
 
 fn handle_media_control_event(
@@ -2230,49 +2270,47 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
             }
             if let Some(n) = app.now.as_mut() {
                 n.is_playing = true;
-                n.position_ms = position_ms;
-                n.position_at = Instant::now();
-
-                let _ = app.media_controls.set_playback(MediaPlayback::Playing {
+            }
+            app.set_local_position(position_ms, true);
+            if let Some(controls) = app.media_controls.as_mut() {
+                let _ = controls.set_playback(MediaPlayback::Playing {
                     progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
                 });
             }
-            app.set_local_position(position_ms, true);
         }
         EngineEvent::Paused { position_ms, .. } => {
             if let Some(n) = app.now.as_mut() {
                 n.is_playing = false;
-                n.position_ms = position_ms;
-                n.position_at = Instant::now();
-
-                let _ = app.media_controls.set_playback(MediaPlayback::Paused {
+            }
+            app.set_local_position(position_ms, true);
+            if let Some(controls) = app.media_controls.as_mut() {
+                let _ = controls.set_playback(MediaPlayback::Paused {
                     progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
                 });
             }
-            app.set_local_position(position_ms, true);
         }
         EngineEvent::Stopped => {
             app.now = None;
             app.playback_started = false;
 
-            let _ = app.media_controls.set_playback(MediaPlayback::Stopped);
+            if let Some(controls) = app.media_controls.as_mut() {
+                let _ = controls.set_playback(MediaPlayback::Stopped);
+            }
         }
         EngineEvent::PositionCorrection { position_ms, .. } => {
-            if let Some(n) = app.now.as_mut() {
-                n.position_ms = position_ms;
-                n.position_at = Instant::now();
-
-                if n.is_playing {
-                    let _ = app.media_controls.set_playback(MediaPlayback::Playing {
-                        progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
-                    });
-                } else {
-                    let _ = app.media_controls.set_playback(MediaPlayback::Paused {
-                        progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
-                    });
-                }
-            }
             app.set_local_position(position_ms, true);
+            if let (Some(n), Some(controls)) = (app.now.as_ref(), app.media_controls.as_mut()) {
+                let playback = if n.is_playing {
+                    MediaPlayback::Playing {
+                        progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
+                    }
+                } else {
+                    MediaPlayback::Paused {
+                        progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
+                    }
+                };
+                let _ = controls.set_playback(playback);
+            }
         }
         EngineEvent::EndOfTrack { .. } => {}
     }
@@ -2345,16 +2383,18 @@ fn apply_meta(
         app.start_fade(theme);
     }
 
-    let _ = app.media_controls.set_metadata(MediaMetadata {
-        title: app.now.as_ref().map(|n| n.title.as_str()),
-        artist: app.now.as_ref().map(|n| n.artist.as_str()),
-        album: app.now.as_ref().map(|n| n.album.as_str()),
-        cover_url: meta.image.url.as_deref(),
-        duration: app
-            .now
-            .as_ref()
-            .map(|n| Duration::from_millis(n.duration_ms as u64)),
-    });
+    if let Some(controls) = app.media_controls.as_mut() {
+        let _ = controls.set_metadata(MediaMetadata {
+            title: app.now.as_ref().map(|n| n.title.as_str()),
+            artist: app.now.as_ref().map(|n| n.artist.as_str()),
+            album: app.now.as_ref().map(|n| n.album.as_str()),
+            cover_url: meta.image.url.as_deref(),
+            duration: app
+                .now
+                .as_ref()
+                .map(|n| Duration::from_millis(n.duration_ms as u64)),
+        });
+    }
 }
 
 // ------------------------------------------------------------------ web api
@@ -4317,6 +4357,50 @@ mod playlist_tests {
 
         assert!(result.is_err());
         assert!(!terminal_initialized.get());
+    }
+
+    // ------------------------------------------------ optional integrations
+
+    #[test]
+    fn optional_integration_keeps_successful_service() {
+        assert_eq!(
+            optional_integration(true, || Ok::<_, ()>("media")),
+            Some("media")
+        );
+    }
+
+    #[test]
+    fn optional_integration_degrades_on_initialization_failure() {
+        assert_eq!(
+            optional_integration(true, || Err::<(), _>("no session bus")),
+            None
+        );
+    }
+
+    #[test]
+    fn optional_integration_skips_init_when_platform_is_unavailable() {
+        let called = std::cell::Cell::new(false);
+        let service = optional_integration(false, || {
+            called.set(true);
+            Ok::<_, ()>("media")
+        });
+        assert_eq!(service, None);
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn disconnected_media_channel_disables_future_receives() {
+        let mut open = true;
+        let event: Result<(), flume::RecvError> = Err(flume::RecvError::Disconnected);
+        assert_eq!(consume_media_event(event, &mut open), None);
+        assert!(!open);
+    }
+
+    #[test]
+    fn active_scrub_rejects_stale_engine_position() {
+        assert!(!should_apply_engine_position(true, Some(42_000)));
+        assert!(should_apply_engine_position(true, None));
+        assert!(should_apply_engine_position(false, Some(42_000)));
     }
 
     // -------------------------------------------------------- context_target
