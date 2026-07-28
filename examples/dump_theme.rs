@@ -3,7 +3,9 @@
 use myx::gradient::Rgb;
 use myx::reactive::derive_theme;
 
-fn hex(c: Rgb) -> String { format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b) }
+fn hex(c: Rgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
+}
 
 fn main() {
     let img = image::open("assets/cover.jpg").expect("cover");

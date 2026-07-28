@@ -77,7 +77,9 @@ impl Theme {
 
     /// Base canvas — the whole screen sits on this.
     pub fn base(&self) -> Style {
-        Style::default().bg(self.background.into()).fg(self.text.into())
+        Style::default()
+            .bg(self.background.into())
+            .fg(self.text.into())
     }
 
     /// A pane surface — slightly elevated above the base.

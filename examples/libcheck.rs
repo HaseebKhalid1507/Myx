@@ -6,11 +6,15 @@ use myx::engine;
 async fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (tx, _rx) = flume::unbounded();
-    let engine = engine::run(tx).await?;
+    let engine = engine::run(engine::credentials()?, tx, 50).await?;
 
     let token = match engine.web_token().await {
         Ok(t) => {
-            println!("web_token OK: len={}, head={}…", t.len(), &t[..t.len().min(10)]);
+            println!(
+                "web_token OK: len={}, head={}…",
+                t.len(),
+                &t[..t.len().min(10)]
+            );
             t
         }
         Err(e) => {
@@ -25,7 +29,10 @@ async fn main() -> anyhow::Result<()> {
         let mut report = String::new();
         for (label, url) in [
             ("/me", "https://api.spotify.com/v1/me"),
-            ("/me/playlists", "https://api.spotify.com/v1/me/playlists?limit=5"),
+            (
+                "/me/playlists",
+                "https://api.spotify.com/v1/me/playlists?limit=5",
+            ),
         ] {
             match client.get(url).bearer_auth(&token).send() {
                 Ok(r) => {

@@ -65,7 +65,6 @@ impl Cover {
         }
     }
 
-
     /// Render the cover into `area`, re-encoding only when the area changes.
     /// Drop the cached encode so the next render re-encodes and ratatui
     /// sees a fresh cell, forcing retransmission.
@@ -84,10 +83,11 @@ impl Cover {
             .unwrap_or(true);
 
         if needs_encode {
-            match self
-                .picker
-                .new_protocol(self.img.clone(), Size::new(area.width, area.height), Resize::Fit(None))
-            {
+            match self.picker.new_protocol(
+                self.img.clone(),
+                Size::new(area.width, area.height),
+                Resize::Fit(None),
+            ) {
                 Ok(protocol) => self.cached = Some((area, protocol)),
                 Err(_) => return,
             }
