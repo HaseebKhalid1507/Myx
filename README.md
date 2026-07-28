@@ -64,16 +64,37 @@ browse with `↑↓` and hit `⏎` to play. After that, just `myx`.
 ```
 ⇥ / [ ]    switch section        ← →      switch view
 ↑↓ / j k   move                  ⏎        play / open
+⇧ ⏎        play the highlighted album, playlist or artist
 /          search                a        actions
 space      play · pause          n / b    next · prev
 ⇧ ← →      seek                  s        shuffle
 + / -      volume                R        repeat
 o          sort                  r        reload
-q          quit
+z          hide sidebar          q        quit
 ```
 
 Media keys (Play/Pause, Stop, Next, Prev, Volume) work when the terminal is
 focused. Mouse works too: click tabs, click a track, double-click to play.
+
+Holding `⇧ ←` / `⇧ →` scrubs continuously and commits one seek when you let go.
+`⇧ ⏎` needs a terminal that reports modified Enter (kitty, WezTerm, foot); `P`
+does the same everywhere.
+
+Inside tmux, add `set -g focus-events on` to `~/.tmux.conf` so album art is
+re-sent the moment you switch back to myx's window.
+
+## Config
+
+Optional, at `~/.config/myx/config.toml`. Every key has a default, so you only
+write the ones you want to change:
+
+```toml
+# Rows kept visible above and below the cursor before the list scrolls.
+scrolloff = 3
+
+# Spotify app client id. MYX_CLIENT_ID overrides this if it is set.
+client_id = "your-client-id"
+```
 
 ## Credits
 

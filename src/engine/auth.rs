@@ -86,7 +86,10 @@ fn listen_for_auth_code(addr: SocketAddr) -> Result<String> {
             Err(_) => continue,
         };
         let mut request_line = String::new();
-        if BufReader::new(&stream).read_line(&mut request_line).is_err() {
+        if BufReader::new(&stream)
+            .read_line(&mut request_line)
+            .is_err()
+        {
             continue;
         }
         // "GET /login?code=...&state=... HTTP/1.1"
@@ -146,9 +149,9 @@ fn exchange_code_for_token(code: &str, verifier: &str) -> Result<String> {
     std::thread::scope(|s| {
         s.spawn(|| {
             let token = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_default()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default()
                 .post(SPOTIFY_TOKEN_URL)
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .body(body)
@@ -175,7 +178,10 @@ impl Pkce {
         let verifier = random_url_safe(32);
         let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(Sha256::digest(verifier.as_bytes()));
-        Self { verifier, challenge }
+        Self {
+            verifier,
+            challenge,
+        }
     }
 }
 
