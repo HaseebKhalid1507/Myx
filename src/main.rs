@@ -68,7 +68,34 @@ const ART_REPAINTS: u8 = 2;
 
 /// How often the cover is re-sent anyway. tmux only forwards focus changes with
 /// `focus-events on`, so without a timer the art stays gone after a window switch.
+/// Every resend re-encodes and retransmits the whole image, so it runs under tmux
+/// only — elsewhere `FocusGained` covers it.
 const ART_RESEND: Duration = Duration::from_secs(2);
+
+/// Ceiling on the redraw rate: one frame per ~60Hz terminal refresh.
+const MIN_FRAME: Duration = Duration::from_millis(16);
+/// Redraw rate while the visualizer or a theme fade is running.
+const ANIM_FRAME: Duration = Duration::from_millis(33);
+/// Redraw rate when nothing changed — enough to keep the clock and progress bar
+/// honest without repainting an identical frame 60 times a second.
+const IDLE_REDRAW: Duration = Duration::from_millis(500);
+/// How often the live queue is re-fetched and the session persisted.
+const SYNC_EVERY: Duration = Duration::from_secs(24);
+
+/// Whether this frame is worth drawing.
+///
+/// Input beats animation beats the idle clock: a keypress redraws within one
+/// terminal refresh, so a held arrow scrolls smoothly, while an untouched
+/// screen redraws twice a second instead of sixty times.
+fn should_draw(dirty: bool, animating: bool, since_last: Duration) -> bool {
+    if dirty {
+        since_last >= MIN_FRAME
+    } else if animating {
+        since_last >= ANIM_FRAME
+    } else {
+        since_last >= IDLE_REDRAW
+    }
+}
 
 // ------------------------------------------------------------------ model
 
@@ -824,7 +851,14 @@ async fn boot(
         let _ = engine.play_context(uri, false);
     }
 
-    let picker = Cover::make_picker();
+    let picker = Cover::make_picker(myx::config::get().protocol.as_deref());
+    // Halfblocks here means the graphics query got no answer — the art will look
+    // like a 25×26 mosaic. MYX_PROTOCOL overrides it.
+    liblog(format!(
+        "cover: {:?}, font {:?}",
+        picker.protocol_type(),
+        picker.font_size()
+    ));
 
     // Rebuild the last now-playing (paused) for a seamless resume look.
     let now = saved.last_played.as_ref().map(|last_played| NowPlaying {
@@ -998,7 +1032,6 @@ async fn run_ui(
     }
     let mut media_events_open = true;
 
-    let mut frame_count: u64 = 0;
     let mut lib_attempts: u32 = 0;
     // A persistent interval must live OUTSIDE the select loop. Recreating a
     // `sleep()` every loop starves forever when player events are continuously
@@ -1006,11 +1039,19 @@ async fn run_ui(
     // frozen-UI bug.
     let mut frame = tokio::time::interval(Duration::from_millis(16));
     frame.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut last_draw = Instant::now() - Duration::from_millis(100);
+    let mut last_draw = Instant::now() - IDLE_REDRAW;
     let mut last_art_resend = Instant::now();
+    let mut last_sync = Instant::now();
+    // Nothing is on screen yet, so the first tick must draw.
+    let mut dirty = true;
+    let mut last_layout = (app.view, app.zen);
+    // The resend timer only exists for terminals that never report focus. tmux
+    // is the one that does this by default (`focus-events off`), and the first
+    // focus event it does forward retires the timer for good.
+    let mut art_resend = std::env::var_os("TMUX").is_some();
 
     loop {
-        tokio::select! {
+        let touched = tokio::select! {
             biased;
             _ = frame.tick() => {
                 app.flush_seek(Instant::now());
@@ -1019,6 +1060,7 @@ async fn run_ui(
                 // stream / 60fps visualizer — which looked like a frozen library.
                 while let Ok((section, mut items)) = lib_rx.try_recv() {
                     let count = items.len();
+                    dirty = true;
                     liblog(format!("ui: received {} rows for {}", count, section.label()));
                     for (i, it) in items.iter_mut().enumerate() {
                         it.order = i as u32;
@@ -1031,6 +1073,7 @@ async fn run_ui(
                     app.status = format!("loaded {}", section.label());
                 }
                 while let Ok(got_any) = libdone_rx.try_recv() {
+                    dirty = true;
                     if got_any {
                         lib_attempts = 0;
                         app.status.clear();
@@ -1046,6 +1089,7 @@ async fn run_ui(
                 // same reason as the library: under the biased 16ms frame tick a
                 // pure recv arm starves and the station never plays.
                 while let Ok(rad) = radio_rx.try_recv() {
+                    dirty = true;
                     match rad {
                         Ok(radio) if !radio.uris.is_empty() => {
                             if let Err(e) = app.engine.play_tracks(radio.uris, None, radio.start_position_ms, false) {
@@ -1070,14 +1114,31 @@ async fn run_ui(
                     }
                 }
 
+                // Only the Now Playing pane animates; on Lyrics or Queue the
+                // visualizer is off-screen and its frame rate buys nothing.
                 let animating = app.fade.is_some()
-                    || app.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false);
-                let target = Duration::from_millis(if animating { 16 } else { 100 });
-                if app.view == RightView::NowPlaying && last_art_resend.elapsed() >= ART_RESEND {
+                    || (app.view == RightView::NowPlaying
+                        && app.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false));
+                if art_resend
+                    && app.view == RightView::NowPlaying
+                    && last_art_resend.elapsed() >= ART_RESEND
+                {
                     last_art_resend = Instant::now();
                     app.art_dirty = app.art_dirty.max(1);
+                    dirty = true;
                 }
-                if last_draw.elapsed() >= target {
+                if app.art_dirty > 0 {
+                    dirty = true;
+                }
+                // Switching away and back drops the image data on the
+                // terminal's side; the placeholder cells alone then point at
+                // nothing and whatever the other view drew shows through.
+                if (app.view, app.zen) != last_layout {
+                    last_layout = (app.view, app.zen);
+                    app.art_dirty = ART_REPAINTS;
+                    dirty = true;
+                }
+                if should_draw(dirty, animating, last_draw.elapsed()) {
                     advance_fade(&mut app);
                     // Inline images are written once by ratatui; invalidate so
                     // the re-encode produces a fresh cell.
@@ -1091,9 +1152,10 @@ async fn run_ui(
                     }
                     terminal.draw(|f| render(f, &mut app))?;
                     last_draw = Instant::now();
-                    frame_count += 1;
+                    dirty = false;
                 }
-                if frame_count > 0 && frame_count.is_multiple_of(240) {
+                if last_sync.elapsed() >= SYNC_EVERY {
+                    last_sync = Instant::now();
                     // Refresh the live queue while playing so the snapshot stays
                     // current, then persist it (survives reboot).
                     if app.playback_started || app.reclaimed {
@@ -1101,10 +1163,12 @@ async fn run_ui(
                     }
                     save_state(&app);
                 }
+                false
             }
             ev = ev_rx.recv_async() => {
                 let Ok(ev) = ev else { break };
                 handle_engine_event(&mut app, ev, &meta_tx);
+                true
             }
             ev = in_rx.recv_async() => {
                 match ev {
@@ -1240,17 +1304,18 @@ async fn run_ui(
                             }
                             _ => {}
                         }
-                        // Force immediate redraw so the volume meter updates without
-                        // waiting for the next 100ms idle tick.
-                        last_draw = Instant::now() - Duration::from_millis(200);
                     }
                     // A repaint from the terminal's own buffer loses inline art.
-                    Ok(Event::Resize(..)) | Ok(Event::FocusGained) => {
+                    Ok(Event::Resize(..)) => app.art_dirty = ART_REPAINTS,
+                    // Focus is reported, so the timer has nothing left to cover.
+                    Ok(Event::FocusGained) => {
+                        art_resend = false;
                         app.art_dirty = ART_REPAINTS;
-                        last_draw = Instant::now() - Duration::from_millis(200);
                     }
+                    Ok(Event::FocusLost) => art_resend = false,
                     _ => {}
                 }
+                true
             }
             ev = souvlaki_rx.recv_async(), if media_events_open => {
                 match consume_media_event(ev, &mut media_events_open) {
@@ -1260,9 +1325,11 @@ async fn run_ui(
                         liblog("media controls event channel closed; native integration disabled");
                     }
                 }
+                true
             }
             m = meta_rx.recv_async() => {
                 if let Ok(meta) = m { apply_meta(&mut app, meta, &lyrics_tx); }
+                true
             }
             q = queue_rx.recv_async() => {
                 // Don't let an empty live queue (e.g. a bare resumed track) wipe
@@ -1273,6 +1340,7 @@ async fn run_ui(
                         app.queue_uris = q.into_iter().map(|(_, u)| u).collect();
                     }
                 }
+                true
             }
             s = search_rx.recv_async() => {
                 if let Ok(results) = s {
@@ -1284,12 +1352,14 @@ async fn run_ui(
                         String::new()
                     };
                 }
+                true
             }
             ly = lyrics_rx.recv_async() => {
                 if let Ok((lines, synced)) = ly {
                     app.lyrics = lines;
                     app.lyrics_synced = synced;
                 }
+                true
             }
             d = detail_rx.recv_async() => {
                 if let Ok((context_uri, title, items)) = d {
@@ -1297,6 +1367,7 @@ async fn run_ui(
                     app.selected = app.first_selectable();
                     app.status.clear();
                 }
+                true
             }
             menu = menu_rx.recv_async() => {
                 if let Ok(mut menu) = menu {
@@ -1309,9 +1380,11 @@ async fn run_ui(
                         app.actions = Some(menu);
                     }
                 }
+                true
             }
             st = astatus_rx.recv_async() => {
                 if let Ok(msg) = st { app.status = msg; }
+                true
             }
             ps = pstate_rx.recv_async() => {
                 if let Ok(state) = ps {
@@ -1338,8 +1411,10 @@ async fn run_ui(
                     tokio::task::spawn_blocking(move || { let _ = tx.send(fetch_track_meta(&webapi, &id)); });
                     spawn_queue_fetch(app.webapi.clone(), queue_tx.clone());
                 }
+                true
             }
-        }
+        };
+        dirty |= touched;
     }
     Ok(())
 }
@@ -1909,7 +1984,7 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
             if let Some(v) = client
                 .as_ref()
                 .zip(token)
-                .and_then(|(c, t)| get_json(c, &format!("{API}/tracks/{id}"), t))
+                .and_then(|(c, t)| get_json_cached(c, &format!("{API}/tracks/{id}"), t))
             {
                 if let (Some(au), Some(an)) = (
                     v["artists"][0]["uri"].as_str(),
@@ -2003,7 +2078,7 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
             if let Some(v) = client
                 .as_ref()
                 .zip(token)
-                .and_then(|(c, t)| get_json(c, &format!("{API}/albums/{id}"), t))
+                .and_then(|(c, t)| get_json_cached(c, &format!("{API}/albums/{id}"), t))
             {
                 if let (Some(au), Some(an)) = (
                     v["artists"][0]["uri"].as_str(),
@@ -2502,6 +2577,54 @@ fn get_json(
     None
 }
 
+/// How long a cached catalogue response counts as fresh. Discographies and
+/// track lists change on the order of weeks; a day keeps browsing off the
+/// network without anyone noticing the lag.
+const CATALOGUE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// `get_json` for catalogue reads, served from disk when possible.
+///
+/// On a failed request an expired entry is used rather than nothing — that is
+/// the case that matters, since a spent quota is exactly when the network stops
+/// answering and the artist page would otherwise come up empty.
+fn get_json_cached(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    token: &str,
+) -> Option<serde_json::Value> {
+    if let Some(body) = myx::httpcache::get(url, Some(CATALOGUE_TTL)) {
+        return serde_json::from_str(&body).ok();
+    }
+    match get_json(client, url, token) {
+        Some(v) => {
+            myx::httpcache::put(url, &v.to_string());
+            Some(v)
+        }
+        None => {
+            let stale = myx::httpcache::get(url, None)?;
+            liblog(format!("api: {url} failed; serving cached copy"));
+            serde_json::from_str(&stale).ok()
+        }
+    }
+}
+
+/// Album art bytes, from disk when they've been seen before.
+fn fetch_cover(client: &reqwest::blocking::Client, url: &str) -> Option<Vec<u8>> {
+    if let Some(bytes) = myx::httpcache::get_bytes(url) {
+        return Some(bytes);
+    }
+    let resp = client.get(url).send().ok()?;
+    // An error page cached as image bytes would be a permanently broken cover:
+    // the entry never expires, because the URL only changes with the picture.
+    if !resp.status().is_success() {
+        liblog(format!("cover: {url} -> HTTP {}", resp.status().as_u16()));
+        return None;
+    }
+    let bytes = resp.bytes().ok()?.to_vec();
+    myx::httpcache::put_bytes(url, &bytes);
+    Some(bytes)
+}
+
 /// Fetch the library incrementally: fast sections first, Liked streamed in
 /// chunks so the UI is usable within ~1s instead of waiting for everything.
 fn spawn_library_fetch(
@@ -2811,7 +2934,7 @@ fn fetch_track_meta(webapi: &Arc<Mutex<WebApi>>, track_id: &str) -> TrackMeta {
         return empty();
     };
     let client = http_client();
-    let Some(v) = get_json(&client, &format!("{API}/tracks/{track_id}"), &token) else {
+    let Some(v) = get_json_cached(&client, &format!("{API}/tracks/{track_id}"), &token) else {
         return empty();
     };
 
@@ -2821,10 +2944,10 @@ fn fetch_track_meta(webapi: &Arc<Mutex<WebApi>>, track_id: &str) -> TrackMeta {
     let duration_ms = v["duration_ms"].as_u64().unwrap_or(0) as u32;
     let cover_url = v["album"]["images"][0]["url"].as_str().map(String::from);
 
-    let image = cover_url.clone().and_then(|u| {
-        let bytes = client.get(u).send().ok()?.bytes().ok()?;
-        image::load_from_memory(&bytes).ok()
-    });
+    let image = cover_url
+        .clone()
+        .and_then(|u| fetch_cover(&client, &u))
+        .and_then(|bytes| image::load_from_memory(&bytes).ok());
     let theme = image.as_ref().map(|img| derive_theme(img, "album ✦"));
 
     TrackMeta {
@@ -3051,7 +3174,7 @@ fn artist_top_tracks(
         "{API}/search?q={}&type=track&limit=10",
         urlencode(&format!("artist:{name}"))
     );
-    let Some(v) = get_json(client, &url, token) else {
+    let Some(v) = get_json_cached(client, &url, token) else {
         return Vec::new();
     };
     v["tracks"]["items"]
@@ -3087,7 +3210,7 @@ fn artist_albums(client: &reqwest::blocking::Client, token: &str, id: &str) -> V
         if pages >= 3 {
             break; // 30 releases; more pages burn the API quota per drill-in
         }
-        let Some(v) = get_json(client, &u, token) else {
+        let Some(v) = get_json_cached(client, &u, token) else {
             break;
         };
         for a in v["items"].as_array().into_iter().flatten() {
@@ -3141,7 +3264,7 @@ fn fetch_detail_blocking(token: &str, uri: &str, name: &str) -> (String, Vec<Lib
             }
         }
         "album" => {
-            if let Some(v) = get_json(
+            if let Some(v) = get_json_cached(
                 &client,
                 &format!("{API}/albums/{id}/tracks?limit=50"),
                 token,
@@ -3675,8 +3798,11 @@ fn render_nowplaying_view(f: &mut Frame, app: &mut App, theme: Theme, area: Rect
         height: art_h,
     };
 
-    if let Some(cover) = app.now.as_mut().and_then(|n| n.cover.as_mut()) {
-        cover.render(f, art_rect);
+    match app.now.as_mut().and_then(|n| n.cover.as_mut()) {
+        Some(cover) => cover.render(f, art_rect),
+        // No art to draw over the cells another view left behind. They are only
+        // ever written by the image widget, so wipe them explicitly.
+        None => f.render_widget(Clear, art_rect),
     }
 
     if let Some(n) = app.now.as_ref() {
@@ -4729,6 +4855,32 @@ mod nav_tests {
         assert_eq!(scrub_target(2_000, 200_000, -5_000), 0);
         assert_eq!(scrub_target(198_000, 200_000, 5_000), 200_000);
         assert_eq!(scrub_target(0, 0, -5_000), 0);
+    }
+
+    // ----------------------------------------------------------- should_draw
+
+    #[test]
+    fn input_redraws_at_the_next_terminal_refresh() {
+        // What made a held arrow key scroll in jerks: the cursor had moved but
+        // the frame was held back until the idle tick came round.
+        assert!(should_draw(true, false, MIN_FRAME));
+        assert!(!should_draw(
+            true,
+            false,
+            MIN_FRAME - Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn an_untouched_screen_redraws_rarely() {
+        assert!(!should_draw(false, false, ANIM_FRAME));
+        assert!(should_draw(false, false, IDLE_REDRAW));
+    }
+
+    #[test]
+    fn animation_redraws_between_the_two() {
+        assert!(should_draw(false, true, ANIM_FRAME));
+        assert!(!should_draw(false, true, MIN_FRAME));
     }
 }
 

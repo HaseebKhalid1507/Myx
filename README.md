@@ -80,13 +80,14 @@ Holding `⇧ ←` / `⇧ →` scrubs continuously and commits one seek when you 
 `⇧ ⏎` needs a terminal that reports modified Enter (kitty, WezTerm, foot); `P`
 does the same everywhere.
 
-Inside tmux, add `set -g focus-events on` to `~/.tmux.conf` so album art is
-re-sent the moment you switch back to myx's window.
+The album-art protocol is detected at startup and picked per terminal, including
+inside tmux. If your tmux has no sixel support, add `set -g focus-events on` to
+`~/.tmux.conf` so the art is re-sent when you switch back to myx's window.
 
 ## Config
 
-Optional, at `~/.config/myx/config.toml`. Every key has a default, so you only
-write the ones you want to change:
+`~/.config/myx/config.toml` is written on first run with every key commented
+out, so there is a file to edit and nothing to look up:
 
 ```toml
 # Rows kept visible above and below the cursor before the list scrolls.
@@ -94,6 +95,11 @@ scrolloff = 3
 
 # Spotify app client id. MYX_CLIENT_ID overrides this if it is set.
 client_id = "your-client-id"
+
+# kitty, iterm2, sixel or halfblocks. Leave it out to auto-detect; set it if
+# album art comes out as a coarse mosaic, which means the terminal never
+# answered the detection query. MYX_PROTOCOL overrides this.
+protocol = "kitty"
 ```
 
 ## Credits
