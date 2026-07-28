@@ -747,21 +747,37 @@ async fn main() -> Result<()> {
         saved.volume.min(100)
     };
 
-    // A first run prints an OAuth URL, which the alternate screen would hide.
-    // Later launches come from cache and fall through to the loading screen.
+    // OAuth may need to print a browser URL, including when a cached refresh
+    // token has been revoked. Complete both auth flows before entering the
+    // alternate screen so that recovery prompts can never be hidden by the TUI.
     if engine::needs_authorization() || !WebApi::is_cached() {
         println!("myx: first run — authorizing with Spotify…");
     }
-    let creds = engine::credentials()?;
-    let pre_authed = (!WebApi::is_cached())
-        .then(WebApi::init)
-        .transpose()
-        .context("authorize web api")?;
+    let ((creds, webapi), mut terminal) = auth_then_terminal(
+        || {
+            let creds = engine::credentials()?;
+            let webapi = WebApi::init().context("authorize web api")?;
+            Ok((creds, webapi))
+        },
+        init_terminal,
+    )?;
 
-    let mut terminal = init_terminal()?;
-    let res = boot(&mut terminal, saved, init_vol, creds, pre_authed).await;
+    let res = boot(&mut terminal, saved, init_vol, creds, webapi).await;
     restore_terminal(&mut terminal)?;
     res
+}
+
+// Run every potentially-interactive authentication step before constructing the
+// terminal. This tiny seam is deliberately generic so the ordering can be
+// regression-tested without Spotify credentials or a real terminal.
+fn auth_then_terminal<A, T, Auth, Init>(auth: Auth, init_terminal: Init) -> Result<(A, T)>
+where
+    Auth: FnOnce() -> Result<A>,
+    Init: FnOnce() -> Result<T>,
+{
+    let authenticated = auth()?;
+    let terminal = init_terminal()?;
+    Ok((authenticated, terminal))
 }
 
 /// Everything from the loading screen to the event loop. Split out of `main` so
@@ -771,7 +787,7 @@ async fn boot(
     saved: SavedState,
     init_vol: u8,
     creds: librespot_core::authentication::Credentials,
-    pre_authed: Option<WebApi>,
+    webapi: WebApi,
 ) -> Result<()> {
     let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
     let engine = with_loader(
@@ -782,17 +798,6 @@ async fn boot(
     .await?
     .context("start engine")?;
 
-    let webapi = match pre_authed {
-        Some(w) => w,
-        None => with_loader(
-            terminal,
-            "signing in",
-            tokio::task::spawn_blocking(WebApi::init),
-        )
-        .await?
-        .context("web api init task")?
-        .context("authorize web api")?,
-    };
     let webapi = Arc::new(Mutex::new(webapi));
 
     if let Some(uri) = std::env::args().nth(1) {
@@ -4126,6 +4131,44 @@ mod playlist_tests {
             "you · 142".into(),
             "spotify:playlist:1".into(),
         )
+    }
+
+    // ------------------------------------------------------ startup ordering
+
+    #[test]
+    fn authentication_finishes_before_terminal_initialization() {
+        let order = std::cell::RefCell::new(Vec::new());
+
+        let result = auth_then_terminal(
+            || {
+                order.borrow_mut().push("auth");
+                Ok("authenticated")
+            },
+            || {
+                order.borrow_mut().push("terminal");
+                Ok("terminal")
+            },
+        )
+        .expect("startup succeeds");
+
+        assert_eq!(result, ("authenticated", "terminal"));
+        assert_eq!(*order.borrow(), ["auth", "terminal"]);
+    }
+
+    #[test]
+    fn authentication_failure_never_initializes_terminal() {
+        let terminal_initialized = std::cell::Cell::new(false);
+
+        let result: Result<((), ())> = auth_then_terminal(
+            || anyhow::bail!("cached refresh token was rejected"),
+            || {
+                terminal_initialized.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!terminal_initialized.get());
     }
 
     // -------------------------------------------------------- context_target
