@@ -19,6 +19,7 @@ use librespot_connect::{
     ConnectConfig, LoadContextOptions, LoadRequest, LoadRequestOptions, Options as CtxOptions,
     PlayingTrack, Spirc,
 };
+use librespot_core::authentication::Credentials;
 use librespot_core::cache::Cache;
 use librespot_core::config::DeviceType;
 use librespot_core::{Session, SessionConfig};
@@ -306,13 +307,28 @@ fn map_event(ev: player::PlayerEvent) -> Option<EngineEvent> {
     }
 }
 
-/// Authenticate, start the Connect device, and begin emitting events on `tx`.
+/// Streaming credentials, prompting for OAuth only on a first run. Split out
+/// of [`run`] so the caller can do the interactive part before a TUI takes the
+/// screen — the prompt prints a URL that the alternate screen would swallow.
+pub fn credentials() -> Result<Credentials> {
+    auth::get_creds(&build_cache()?).context("get credentials")
+}
+
+/// Whether [`credentials`] would need to prompt — i.e. nothing is cached yet.
+pub fn needs_authorization() -> bool {
+    build_cache().is_ok_and(|c| c.credentials().is_none())
+}
+
+/// Start the Connect device and begin emitting events on `tx`.
 ///
 /// Must run inside a tokio runtime. Returns the live [`Engine`]; hold onto it for
 /// the lifetime of playback.
-pub async fn run(tx: flume::Sender<EngineEvent>, initial_volume_pct: u8) -> Result<Engine> {
+pub async fn run(
+    creds: Credentials,
+    tx: flume::Sender<EngineEvent>,
+    initial_volume_pct: u8,
+) -> Result<Engine> {
     let cache = build_cache()?;
-    let creds = auth::get_creds(&cache).context("get credentials")?;
     let session = Session::new(SessionConfig::default(), Some(cache));
 
     let bands = VisBands::shared();
