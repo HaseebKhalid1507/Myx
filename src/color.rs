@@ -113,9 +113,18 @@ mod tests {
         ] {
             let back = hsl_to_rgb(rgb_to_hsl(c));
             // allow ±2 per channel for float rounding
-            assert!((i16::from(back.r) - i16::from(c.r)).abs() <= 2, "{c:?} -> {back:?}");
-            assert!((i16::from(back.g) - i16::from(c.g)).abs() <= 2, "{c:?} -> {back:?}");
-            assert!((i16::from(back.b) - i16::from(c.b)).abs() <= 2, "{c:?} -> {back:?}");
+            assert!(
+                (i16::from(back.r) - i16::from(c.r)).abs() <= 2,
+                "{c:?} -> {back:?}"
+            );
+            assert!(
+                (i16::from(back.g) - i16::from(c.g)).abs() <= 2,
+                "{c:?} -> {back:?}"
+            );
+            assert!(
+                (i16::from(back.b) - i16::from(c.b)).abs() <= 2,
+                "{c:?} -> {back:?}"
+            );
         }
     }
 

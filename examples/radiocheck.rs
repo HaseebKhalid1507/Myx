@@ -5,7 +5,7 @@ use myx::engine;
 async fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (tx, _rx) = flume::unbounded();
-    let engine = engine::run(tx, 50).await?;
+    let engine = engine::run(engine::credentials()?, tx, 50).await?;
     let session = engine.session();
     let seed = "spotify:track:0VjIjW4GlUZAMYd2vXMi3b";
     match engine::radio_tracks(&session, seed).await {

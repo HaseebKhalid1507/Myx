@@ -200,7 +200,12 @@ fn render_library(f: &mut Frame, theme: Theme, area: Rect) {
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled("LIBRARY", theme.heading())]))
             .block(Block::default().style(theme.panel())),
-        Rect { x: inner.x, y, width: inner.width, height: 1 },
+        Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: 1,
+        },
     );
     y += 2;
 
@@ -208,7 +213,12 @@ fn render_library(f: &mut Frame, theme: Theme, area: Rect) {
         if y >= inner.bottom() {
             break;
         }
-        let row = Rect { x: inner.x, y, width: inner.width, height: 1 };
+        let row = Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: 1,
+        };
         let bg = if selected {
             theme.background_element.into()
         } else {
@@ -216,7 +226,9 @@ fn render_library(f: &mut Frame, theme: Theme, area: Rect) {
         };
         let block = left_bar_block(&theme, selected, bg);
         let text_style = if selected {
-            Style::default().fg(theme.text.into()).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.text.into())
+                .add_modifier(Modifier::BOLD)
         } else {
             theme.muted()
         };
@@ -239,7 +251,12 @@ fn render_now_playing(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     let cols = Layout::horizontal([Constraint::Length(art_w), Constraint::Min(10)])
         .spacing(2)
         .split(inner);
-    let art_rect = Rect { x: cols[0].x, y: cols[0].y, width: art_w, height: art_h };
+    let art_rect = Rect {
+        x: cols[0].x,
+        y: cols[0].y,
+        width: art_w,
+        height: art_h,
+    };
     let meta_rect = cols[1];
 
     // Album art (or a placeholder box if the image failed to load).
@@ -260,10 +277,15 @@ fn render_now_playing(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
         Line::raw(""),
         Line::from(vec![Span::styled(
             "Midnight City",
-            Style::default().fg(theme.text.into()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.text.into())
+                .add_modifier(Modifier::BOLD),
         )]),
         Line::from(vec![Span::styled("M83", theme.muted())]),
-        Line::from(vec![Span::styled("Hurry Up, We're Dreaming · 2011", theme.muted())]),
+        Line::from(vec![Span::styled(
+            "Hurry Up, We're Dreaming · 2011",
+            theme.muted(),
+        )]),
         Line::raw(""),
         Line::from(gradient_line(
             "▁▂▃▅▇▆▄▂▁▃▅▇▆▄▂▁▂▃▅▇▆▄▃▂▁▂▄▆▇▅▃▁",

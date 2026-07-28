@@ -36,6 +36,7 @@ serde_json = { version = "1", optional = true }
 anyhow = { version = "1", optional = true }
 open = { version = "5", optional = true }
 fs2 = { version = "0.4", optional = true }
+toml = { version = "1", default-features = false, features = ["parse", "serde"], optional = true }
 
 # Pins librespot-core's transitive `vergen` build-dep to a working version so a
 # fresh `cargo install` (which ignores Cargo.lock) resolves correctly.
@@ -61,6 +62,7 @@ streaming = [
     "dep:anyhow",
     "dep:open",
     "dep:fs2",
+    "dep:toml",
 ]
 
 # The one, fully-wired binary.
