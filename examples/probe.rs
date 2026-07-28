@@ -17,13 +17,13 @@ async fn main() -> anyhow::Result<()> {
 
     println!("myx-probe: authenticating…");
     let (tx, rx) = flume::unbounded::<EngineEvent>();
-    let engine = engine::run(tx).await?;
+    let engine = engine::run(engine::credentials()?, tx, 50).await?;
     println!("myx-probe: Connect device 'myx' is live.");
 
     // If a context URI was passed, start playing it immediately.
     if let Some(uri) = std::env::args().nth(1) {
         println!("▶ starting playback: {uri}");
-        if let Err(err) = engine.play_context(uri) {
+        if let Err(err) = engine.play_context(uri, false) {
             eprintln!("failed to start playback: {err:#}");
         }
     } else {
@@ -51,13 +51,17 @@ async fn main() -> anyhow::Result<()> {
                     EngineEvent::Playing { uri, position_ms } => println!("▶ playing   {uri} @ {position_ms}ms"),
                     EngineEvent::Paused { uri, position_ms } => println!("⏸ paused    {uri} @ {position_ms}ms"),
                     EngineEvent::EndOfTrack { uri } => println!("⏹ end       {uri}"),
+                    EngineEvent::Stopped => println!("⏹ stopped"),
+                    EngineEvent::PositionCorrection { uri, position_ms } => {
+                        println!("↔ position  {uri} @ {position_ms}ms")
+                    }
                 }
             }
             cmd = cmd_rx.recv_async() => {
                 let Ok(cmd) = cmd else { break };
                 let cmd = cmd.trim();
                 let result = match cmd.split_once(' ') {
-                    Some(("load", uri)) => engine.play_context(uri.trim().to_string()),
+                    Some(("load", uri)) => engine.play_context(uri.trim().to_string(), false),
                     _ => match cmd {
                         "play" => engine.play(),
                         "pause" => engine.pause(),
