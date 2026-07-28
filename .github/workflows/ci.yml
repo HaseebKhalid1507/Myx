@@ -1,9 +1,16 @@
 name: CI
 
+# Branch pushes are covered by `pull_request`; limiting `push` to main keeps a
+# commit on a PR branch from running the whole matrix twice.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+
+# A new push supersedes whatever was still running for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
