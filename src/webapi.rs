@@ -41,11 +41,18 @@ fn scopes_tag() -> String {
     SCOPES.join(",")
 }
 
-/// Resolve the Spotify app client id: `MYX_CLIENT_ID` env var, else
-/// `~/.config/myx/client_id`. No default is bundled — every user brings their
-/// own app (create one free at the Spotify developer dashboard).
+/// Resolve the Spotify app client id: `MYX_CLIENT_ID`, else `client_id` in
+/// `~/.config/myx/config.toml`, else the older bare `~/.config/myx/client_id`
+/// file (still honoured so upgrading doesn't log anyone out). No default is
+/// bundled — every user brings their own app.
 fn resolve_client_id() -> Result<String> {
     if let Ok(id) = std::env::var("MYX_CLIENT_ID") {
+        let id = id.trim().to_string();
+        if !id.is_empty() {
+            return Ok(id);
+        }
+    }
+    if let Some(id) = crate::config::get().client_id.as_deref() {
         let id = id.trim().to_string();
         if !id.is_empty() {
             return Ok(id);
@@ -65,7 +72,7 @@ fn resolve_client_id() -> Result<String> {
          Create a free app at https://developer.spotify.com/dashboard\n\
          (add redirect URI http://127.0.0.1:8989/login), then either:\n\
          \x20 export MYX_CLIENT_ID=<your-client-id>\n\
-         \x20 or write it to ~/.config/myx/client_id"
+         \x20 or write client_id = \"<your-client-id>\" to ~/.config/myx/config.toml"
     )
 }
 
@@ -88,6 +95,16 @@ pub struct WebApi {
 }
 
 impl WebApi {
+    /// Whether [`WebApi::init`] can start from cache instead of prompting, so
+    /// the caller can do the interactive part before a TUI takes the screen. An
+    /// expired token still counts: refreshing it is silent.
+    pub fn is_cached() -> bool {
+        resolve_client_id()
+            .ok()
+            .and_then(|id| Self::from_cache(&id))
+            .is_some()
+    }
+
     /// Load from cache (refreshing if stale), else run an interactive OAuth flow.
     /// Blocking: opens a browser + listens for the redirect. Call off the async
     /// thread (e.g. `spawn_blocking`) and before entering the alternate screen.
@@ -98,7 +115,11 @@ impl WebApi {
             // Only trust a cached token that's either fresh or successfully
             // refreshed; a stale token whose refresh fails falls through to a
             // clean interactive re-auth instead of poisoning the whole session.
-            let usable = if w.is_expiring() { w.refresh().is_ok() } else { true };
+            let usable = if w.is_expiring() {
+                w.refresh().is_ok()
+            } else {
+                true
+            };
             if usable && !w.access_token.is_empty() {
                 return Ok(w);
             }
@@ -152,7 +173,10 @@ impl WebApi {
         if let Some(rt) = resp.get("refresh_token").and_then(|v| v.as_str()) {
             self.refresh_token = Some(rt.to_string());
         }
-        let expires_in = resp.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(3600);
+        let expires_in = resp
+            .get("expires_in")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3600);
         self.expires_at = now() + expires_in;
         self.save();
         Ok(())
@@ -178,7 +202,9 @@ impl WebApi {
     }
 
     fn save(&self) {
-        let Some(path) = Self::cache_path() else { return };
+        let Some(path) = Self::cache_path() else {
+            return;
+        };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
             #[cfg(unix)]
@@ -220,8 +246,8 @@ fn now() -> u64 {
 /// Full interactive authorization → (access_token, refresh_token, expires_in).
 fn authorize(client_id: &str) -> Result<(String, Option<String>, u64)> {
     let verifier = random_url_safe(32);
-    let challenge =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
     let state = random_url_safe(16);
 
     let scope = SCOPES.join(" ");
@@ -263,7 +289,24 @@ fn authorize(client_id: &str) -> Result<(String, Option<String>, u64)> {
         .get("refresh_token")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let expires_in = resp.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(3600);
+    let expires_in = resp
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3600);
+
+    // Spotify may grant fewer scopes than asked, and a refresh keeps whatever
+    // the original grant had — a missing one then looks like a dead endpoint
+    // forever. Say it once, here.
+    let granted = resp.get("scope").and_then(|v| v.as_str()).unwrap_or("");
+    let missing: Vec<&str> = SCOPES
+        .iter()
+        .copied()
+        .filter(|want| !granted.split(' ').any(|g| g == *want))
+        .collect();
+    if !missing.is_empty() {
+        eprintln!("myx: Spotify did not grant: {}", missing.join(", "));
+    }
+
     Ok((access, refresh, expires_in))
 }
 
@@ -310,9 +353,9 @@ fn post_token_form(params: &[(&str, &str)]) -> Result<serde_json::Value> {
         .collect::<Vec<_>>()
         .join("&");
     let json = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_default()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default()
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)

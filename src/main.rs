@@ -39,6 +39,18 @@ use myx::webapi::WebApi;
 type Term = Terminal<CrosstermBackend<Stdout>>;
 const FADE_MS: u64 = 300;
 
+/// How far one Shift+arrow press moves the playhead.
+const SEEK_STEP_MS: i64 = 5_000;
+/// Fastest a held Shift+arrow may step. macOS repeats keys ~30×/s; unthrottled,
+/// a one-second hold would throw the playhead 2½ minutes down the track.
+const SEEK_REPEAT: Duration = Duration::from_millis(200);
+/// Quiet time after the last press before the scrub reaches the engine.
+const SEEK_SETTLE: Duration = Duration::from_millis(250);
+
+fn scrub_target(from_ms: u32, duration_ms: u32, delta_ms: i64) -> u32 {
+    (from_ms as i64 + delta_ms).clamp(0, duration_ms as i64) as u32
+}
+
 /// Frames to force a full repaint for after the album art changes.
 ///
 /// `ratatui-image` packs the entire encoded image into a single cell's symbol,
@@ -49,6 +61,10 @@ const FADE_MS: u64 = 300;
 /// the previous buffer so the same image gets written again; two frames allows
 /// one retry, costing two extra repaints per track change.
 const ART_REPAINTS: u8 = 2;
+
+/// How often the cover is re-sent anyway. tmux only forwards focus changes with
+/// `focus-events on`, so without a timer the art stays gone after a window switch.
+const ART_RESEND: Duration = Duration::from_secs(2);
 
 // ------------------------------------------------------------------ model
 
@@ -474,6 +490,12 @@ struct App {
     lib_rect: Option<Rect>,
     lib_offset: usize,
     last_click: Option<(u16, Instant)>,
+    // Sidebar hidden, so the right view (and its cover) gets the whole width.
+    zen: bool,
+    // Shift+arrow scrubbing, coalesced (see `seek_step`).
+    seek_target: Option<u32>,
+    seek_last_step: Instant,
+    seek_last_input: Instant,
 }
 
 impl App {
@@ -512,6 +534,18 @@ impl App {
             None => 0,
         }
     }
+    /// Move the progress bar, without telling the engine. Reports from the
+    /// engine are ignored mid-scrub — what we painted is newer than anything
+    /// librespot has heard about.
+    fn set_local_position(&mut self, position_ms: u32, from_engine: bool) {
+        if from_engine && self.seek_target.is_some() {
+            return;
+        }
+        if let Some(n) = self.now.as_mut() {
+            n.position_ms = position_ms.min(n.duration_ms);
+            n.position_at = Instant::now();
+        }
+    }
     /// Seek to an absolute position (clamped), updating the local display too.
     fn seek_to(&mut self, position_ms: u32) {
         let Some(dur) = self.now.as_ref().map(|n| n.duration_ms) else {
@@ -519,15 +553,38 @@ impl App {
         };
         let new = position_ms.min(dur);
         let _ = self.engine.seek(new);
-        if let Some(n) = self.now.as_mut() {
-            n.position_ms = new;
-            n.position_at = Instant::now();
-        }
+        self.set_local_position(new, false);
     }
-    /// Seek by a relative delta in milliseconds.
-    fn seek_by(&mut self, delta_ms: i64) {
-        let cur = self.position_ms() as i64;
-        self.seek_to((cur + delta_ms).max(0) as u32);
+    /// One Shift+arrow press, moving the playhead by `delta_ms`.
+    ///
+    /// A seek per key repeat overshot the track and made librespot flush and
+    /// refill its audio buffer 30×/s — that pile-up was the stutter. Repeats are
+    /// throttled and the engine seek deferred to `flush_seek`.
+    fn seek_step(&mut self, delta_ms: i64) {
+        let now = Instant::now();
+        if self.seek_target.is_some() && now.duration_since(self.seek_last_step) < SEEK_REPEAT {
+            // The settle timer must see it, or a long hold commits early.
+            self.seek_last_input = now;
+            return;
+        }
+        let Some(dur) = self.now.as_ref().map(|n| n.duration_ms) else {
+            return;
+        };
+        let from = self.seek_target.unwrap_or_else(|| self.position_ms());
+        let target = scrub_target(from, dur, delta_ms);
+        self.seek_target = Some(target);
+        self.seek_last_step = now;
+        self.seek_last_input = now;
+        self.set_local_position(target, false);
+    }
+    /// Commit a finished scrub as a single engine seek, once the keys stop.
+    fn flush_seek(&mut self, now: Instant) {
+        if now.duration_since(self.seek_last_input) < SEEK_SETTLE {
+            return;
+        }
+        if let Some(target) = self.seek_target.take() {
+            self.seek_to(target);
+        }
     }
     /// First non-header index (where a fresh selection should land).
     fn first_selectable(&self) -> usize {
@@ -690,22 +747,58 @@ async fn main() -> Result<()> {
         saved.volume.min(100)
     };
 
-    println!("myx: connecting to Spotify…");
-    let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
-    let engine = engine::run(ev_tx, init_vol).await.context("start engine")?;
-    println!("myx: streaming device live.");
-
-    let webapi = tokio::task::spawn_blocking(WebApi::init)
-        .await
-        .context("web api init task")?
+    // A first run prints an OAuth URL, which the alternate screen would hide.
+    // Later launches come from cache and fall through to the loading screen.
+    if engine::needs_authorization() || !WebApi::is_cached() {
+        println!("myx: first run — authorizing with Spotify…");
+    }
+    let creds = engine::credentials()?;
+    let pre_authed = (!WebApi::is_cached())
+        .then(WebApi::init)
+        .transpose()
         .context("authorize web api")?;
+
+    let mut terminal = init_terminal()?;
+    let res = boot(&mut terminal, saved, init_vol, creds, pre_authed).await;
+    restore_terminal(&mut terminal)?;
+    res
+}
+
+/// Everything from the loading screen to the event loop. Split out of `main` so
+/// a failure on the way up still leaves the terminal restored.
+async fn boot(
+    terminal: &mut Term,
+    saved: SavedState,
+    init_vol: u8,
+    creds: librespot_core::authentication::Credentials,
+    pre_authed: Option<WebApi>,
+) -> Result<()> {
+    let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
+    let engine = with_loader(
+        terminal,
+        "connecting to Spotify",
+        engine::run(creds, ev_tx, init_vol),
+    )
+    .await?
+    .context("start engine")?;
+
+    let webapi = match pre_authed {
+        Some(w) => w,
+        None => with_loader(
+            terminal,
+            "signing in",
+            tokio::task::spawn_blocking(WebApi::init),
+        )
+        .await?
+        .context("web api init task")?
+        .context("authorize web api")?,
+    };
     let webapi = Arc::new(Mutex::new(webapi));
 
     if let Some(uri) = std::env::args().nth(1) {
         let _ = engine.play_context(uri, false);
     }
 
-    let mut terminal = init_terminal()?;
     let picker = Cover::make_picker();
 
     // Rebuild the last now-playing (paused) for a seamless resume look.
@@ -770,11 +863,13 @@ async fn main() -> Result<()> {
         lib_rect: None,
         lib_offset: 0,
         last_click: None,
+        zen: false,
+        seek_target: None,
+        seek_last_step: Instant::now(),
+        seek_last_input: Instant::now(),
     };
 
-    let res = run_ui(&mut terminal, app, ev_rx).await;
-    restore_terminal(&mut terminal)?;
-    res
+    run_ui(terminal, app, ev_rx).await
 }
 
 struct Radio {
@@ -817,7 +912,11 @@ async fn run_ui(
     // Clone: `spawn_restore` sends once and exits. Moving the sender in would
     // drop the last one, and a disconnected receiver resolves `recv_async()`
     // instantly and forever — spinning the select loop below.
-    spawn_restore(app.webapi.clone(), app.engine.device_id(), pstate_tx.clone());
+    spawn_restore(
+        app.webapi.clone(),
+        app.engine.device_id(),
+        pstate_tx.clone(),
+    );
 
     // Re-enrich the restored last-played track (cover / theme / lyrics).
     if let Some(uri) = app.restore_uri.take() {
@@ -840,11 +939,13 @@ async fn run_ui(
     let mut frame = tokio::time::interval(Duration::from_millis(16));
     frame.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_draw = Instant::now() - Duration::from_millis(100);
+    let mut last_art_resend = Instant::now();
 
     loop {
         tokio::select! {
             biased;
             _ = frame.tick() => {
+                app.flush_seek(Instant::now());
                 // Drain library updates deterministically before rendering. Keeping
                 // this solely as a select arm could starve under a hot player-event
                 // stream / 60fps visualizer — which looked like a frozen library.
@@ -904,11 +1005,14 @@ async fn run_ui(
                 let animating = app.fade.is_some()
                     || app.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false);
                 let target = Duration::from_millis(if animating { 16 } else { 100 });
+                if app.view == RightView::NowPlaying && last_art_resend.elapsed() >= ART_RESEND {
+                    last_art_resend = Instant::now();
+                    app.art_dirty = app.art_dirty.max(1);
+                }
                 if last_draw.elapsed() >= target {
                     advance_fade(&mut app);
-                    // Retry cover transmission: inline images are written once
-                    // by ratatui. If the terminal drops that write, invalidate
-                    // the cover cache so re-encode produces a fresh cell.
+                    // Inline images are written once by ratatui; invalidate so
+                    // the re-encode produces a fresh cell.
                     if app.art_dirty > 0 {
                         app.art_dirty -= 1;
                         if let Some(n) = app.now.as_mut() {
@@ -1070,6 +1174,11 @@ async fn run_ui(
                         }
                         // Force immediate redraw so the volume meter updates without
                         // waiting for the next 100ms idle tick.
+                        last_draw = Instant::now() - Duration::from_millis(200);
+                    }
+                    // A repaint from the terminal's own buffer loses inline art.
+                    Ok(Event::Resize(..)) | Ok(Event::FocusGained) => {
+                        app.art_dirty = ART_REPAINTS;
                         last_draw = Instant::now() - Duration::from_millis(200);
                     }
                     _ => {}
@@ -1419,8 +1528,8 @@ fn handle_key(
             app.selected = app.first_selectable();
         }
         // Arrow keys rotate the right-pane view; Shift+arrows seek ±5s.
-        KeyCode::Right if mods.contains(KeyModifiers::SHIFT) => app.seek_by(5_000),
-        KeyCode::Left if mods.contains(KeyModifiers::SHIFT) => app.seek_by(-5_000),
+        KeyCode::Right if mods.contains(KeyModifiers::SHIFT) => app.seek_step(SEEK_STEP_MS),
+        KeyCode::Left if mods.contains(KeyModifiers::SHIFT) => app.seek_step(-SEEK_STEP_MS),
         KeyCode::Right => {
             app.view = app.view.shift(1);
             if app.view == RightView::Queue && (app.reclaimed || app.playback_started) {
@@ -1433,8 +1542,14 @@ fn handle_key(
                 spawn_queue_fetch(app.webapi.clone(), queue_tx.clone());
             }
         }
+        KeyCode::Char('z') => {
+            app.zen = !app.zen;
+            app.art_dirty = ART_REPAINTS;
+        }
         KeyCode::Down | KeyCode::Char('j') => app.move_sel(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_sel(-1),
+        // Needs a terminal that reports modified Enter (kitty, WezTerm, foot).
+        KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) => play_selected_context(app, false),
         KeyCode::Enter => match app.activate() {
             Activated::Open(uri, name) => {
                 spawn_detail_fetch(app.webapi.clone(), uri, name, detail_tx.clone());
@@ -1621,12 +1736,7 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
     match kind {
         "track" => {
             let saved = token
-                .map(|t| {
-                    api_contains(
-                        t,
-                        &format!("https://api.spotify.com/v1/me/tracks/contains?ids={id}"),
-                    )
-                })
+                .map(|t| api_contains(t, &format!("spotify:track:{id}")))
                 .unwrap_or(false);
             items.push(ActionItem {
                 label: if saved {
@@ -1650,9 +1760,11 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
                 },
             });
             // Resolve the track's artist + album for "Go to" navigation.
-            if let Some(v) = client.as_ref().zip(token).and_then(|(c, t)| {
-                get_json(c, &format!("https://api.spotify.com/v1/tracks/{id}"), t)
-            }) {
+            if let Some(v) = client
+                .as_ref()
+                .zip(token)
+                .and_then(|(c, t)| get_json(c, &format!("{API}/tracks/{id}"), t))
+            {
                 if let (Some(au), Some(an)) = (
                     v["artists"][0]["uri"].as_str(),
                     v["artists"][0]["name"].as_str(),
@@ -1684,14 +1796,7 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
         }
         "artist" => {
             let following = token
-                .map(|t| {
-                    api_contains(
-                        t,
-                        &format!(
-                            "https://api.spotify.com/v1/me/following/contains?type=artist&ids={id}"
-                        ),
-                    )
-                })
+                .map(|t| api_contains(t, &format!("spotify:artist:{id}")))
                 .unwrap_or(false);
             items.push(ActionItem {
                 label: if following {
@@ -1722,12 +1827,7 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
         }
         "album" => {
             let saved = token
-                .map(|t| {
-                    api_contains(
-                        t,
-                        &format!("https://api.spotify.com/v1/me/albums/contains?ids={id}"),
-                    )
-                })
+                .map(|t| api_contains(t, &format!("spotify:album:{id}")))
                 .unwrap_or(false);
             items.push(ActionItem {
                 label: if saved {
@@ -1754,9 +1854,11 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
                     name: item.name.clone(),
                 },
             });
-            if let Some(v) = client.as_ref().zip(token).and_then(|(c, t)| {
-                get_json(c, &format!("https://api.spotify.com/v1/albums/{id}"), t)
-            }) {
+            if let Some(v) = client
+                .as_ref()
+                .zip(token)
+                .and_then(|(c, t)| get_json(c, &format!("{API}/albums/{id}"), t))
+            {
                 if let (Some(au), Some(an)) = (
                     v["artists"][0]["uri"].as_str(),
                     v["artists"][0]["name"].as_str(),
@@ -1822,18 +1924,12 @@ fn run_action(token: &str, kind: ActionKind) -> String {
     let client = http_client();
     match kind {
         ActionKind::ToggleLike { id, saved } => {
-            let m = if saved { "DELETE" } else { "PUT" };
-            match api_modify(
-                &client,
-                token,
-                m,
-                &format!("https://api.spotify.com/v1/me/tracks?ids={id}"),
-            ) {
+            match library_write(&client, token, saved, &format!("spotify:track:{id}")) {
                 Ok(()) => {
                     if saved {
                         "removed from Liked".into()
                     } else {
-                        "added to Liked ♥ (press r to refresh)".into()
+                        "added to Liked \u{2665} (press r to refresh)".into()
                     }
                 }
                 Err(e) => format!("like failed: {e}"),
@@ -1844,10 +1940,7 @@ fn run_action(token: &str, kind: ActionKind) -> String {
                 &client,
                 token,
                 "POST",
-                &format!(
-                    "https://api.spotify.com/v1/me/player/queue?uri={}",
-                    urlencode(&uri)
-                ),
+                &format!("{API}/me/player/queue?uri={}", urlencode(&uri)),
             ) {
                 Ok(()) => "added to queue".into(),
                 Err(e) => format!("queue failed: {e} (start playback first)"),
@@ -1862,7 +1955,7 @@ fn run_action(token: &str, kind: ActionKind) -> String {
                 token,
                 "POST",
                 &format!(
-                    "https://api.spotify.com/v1/playlists/{playlist_id}/tracks?uris={}",
+                    "{API}/playlists/{playlist_id}/items?uris={}",
                     urlencode(&track_uri)
                 ),
             ) {
@@ -1871,13 +1964,7 @@ fn run_action(token: &str, kind: ActionKind) -> String {
             }
         }
         ActionKind::ToggleFollowArtist { id, following } => {
-            let m = if following { "DELETE" } else { "PUT" };
-            match api_modify(
-                &client,
-                token,
-                m,
-                &format!("https://api.spotify.com/v1/me/following?type=artist&ids={id}"),
-            ) {
+            match library_write(&client, token, following, &format!("spotify:artist:{id}")) {
                 Ok(()) => {
                     if following {
                         "unfollowed".into()
@@ -1889,13 +1976,7 @@ fn run_action(token: &str, kind: ActionKind) -> String {
             }
         }
         ActionKind::ToggleSaveAlbum { id, saved } => {
-            let m = if saved { "DELETE" } else { "PUT" };
-            match api_modify(
-                &client,
-                token,
-                m,
-                &format!("https://api.spotify.com/v1/me/albums?ids={id}"),
-            ) {
+            match library_write(&client, token, saved, &format!("spotify:album:{id}")) {
                 Ok(()) => {
                     if saved {
                         "removed album".into()
@@ -1907,18 +1988,32 @@ fn run_action(token: &str, kind: ActionKind) -> String {
             }
         }
         ActionKind::FollowPlaylist { id } => {
-            match api_modify(
-                &client,
-                token,
-                "PUT",
-                &format!("https://api.spotify.com/v1/playlists/{id}/followers"),
-            ) {
+            match library_write(&client, token, false, &format!("spotify:playlist:{id}")) {
                 Ok(()) => "added to library".into(),
                 Err(e) => format!("add failed: {e}"),
             }
         }
         _ => String::new(),
     }
+}
+
+/// Add or remove one library item — track, album, artist or playlist.
+///
+/// One endpoint for all four since February 2026; the per-type ones it replaced
+/// are gone and answer 403. `uris` must go in the query string: a JSON body is
+/// rejected as missing it.
+fn library_write(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    remove: bool,
+    uri: &str,
+) -> Result<(), String> {
+    api_modify(
+        client,
+        token,
+        if remove { "DELETE" } else { "PUT" },
+        &format!("{API}/me/library?uris={}", urlencode(uri)),
+    )
 }
 
 /// Returns Ok on 2xx, else a short reason (HTTP status / network) so the UI can
@@ -1960,9 +2055,12 @@ fn api_modify(
     Err("rate limited".into())
 }
 
-fn api_contains(token: &str, url: &str) -> bool {
+/// Is `uri` in the user's library? Replaced the `/me/*/contains` family in
+/// February 2026; those are gone and answer 403.
+fn api_contains(token: &str, uri: &str) -> bool {
     let client = http_client();
-    get_json(&client, url, token)
+    let url = format!("{API}/me/library/contains?uris={}", urlencode(uri));
+    get_json(&client, &url, token)
         .and_then(|v| v.get(0).and_then(|b| b.as_bool()))
         .unwrap_or(false)
 }
@@ -2026,26 +2124,21 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
             }
             if let Some(n) = app.now.as_mut() {
                 n.is_playing = true;
-                n.position_ms = position_ms;
-                n.position_at = Instant::now();
             }
+            app.set_local_position(position_ms, true);
         }
         EngineEvent::Paused { position_ms, .. } => {
             if let Some(n) = app.now.as_mut() {
                 n.is_playing = false;
-                n.position_ms = position_ms;
-                n.position_at = Instant::now();
             }
+            app.set_local_position(position_ms, true);
         }
         EngineEvent::Stopped => {
             app.now = None;
             app.playback_started = false;
         }
         EngineEvent::PositionCorrection { position_ms, .. } => {
-            if let Some(n) = app.now.as_mut() {
-                n.position_ms = position_ms;
-                n.position_at = Instant::now();
-            }
+            app.set_local_position(position_ms, true);
         }
         EngineEvent::EndOfTrack { .. } => {}
     }
@@ -2168,6 +2261,9 @@ fn token_of(webapi: &Arc<Mutex<WebApi>>) -> Option<String> {
     (!token.is_empty()).then_some(token)
 }
 
+/// Base URL every Spotify Web API call is built from.
+const API: &str = "https://api.spotify.com/v1";
+
 /// GET a JSON endpoint, retrying on 429 (respecting Retry-After).
 fn get_json(
     client: &reqwest::blocking::Client,
@@ -2175,7 +2271,13 @@ fn get_json(
     token: &str,
 ) -> Option<serde_json::Value> {
     for _ in 0..5 {
-        let resp = client.get(url).bearer_auth(token).send().ok()?;
+        let resp = match client.get(url).bearer_auth(token).send() {
+            Ok(r) => r,
+            Err(e) => {
+                liblog(format!("api: {url} transport error: {e}"));
+                return None;
+            }
+        };
         if resp.status().as_u16() == 429 {
             let wait = resp
                 .headers()
@@ -2188,6 +2290,8 @@ fn get_json(
             continue;
         }
         if !resp.status().is_success() {
+            // Swallowing the status made a dead endpoint look like an empty one.
+            liblog(format!("api: {url} -> HTTP {}", resp.status().as_u16()));
             return None;
         }
         return resp.json::<serde_json::Value>().ok();
@@ -2251,7 +2355,7 @@ fn spawn_library_fetch(
             let mut home: Vec<LibItem> = Vec::new();
             let recent5 = fetch_all_pages(
                 &client,
-                "https://api.spotify.com/v1/me/player/recently-played?limit=10",
+                &format!("{API}/me/player/recently-played?limit=10"),
                 &token,
                 None,
                 1,
@@ -2263,7 +2367,7 @@ fn spawn_library_fetch(
             }
             let top_tracks = fetch_all_pages(
                 &client,
-                "https://api.spotify.com/v1/me/top/tracks?limit=10",
+                &format!("{API}/me/top/tracks?limit=10"),
                 &token,
                 None,
                 1,
@@ -2275,7 +2379,7 @@ fn spawn_library_fetch(
             }
             let top_artists = fetch_all_pages(
                 &client,
-                "https://api.spotify.com/v1/me/top/artists?limit=10",
+                &format!("{API}/me/top/artists?limit=10"),
                 &token,
                 None,
                 1,
@@ -2285,25 +2389,14 @@ fn spawn_library_fetch(
                 home.push(LibItem::header("Your Top Artists"));
                 home.extend(top_artists.into_iter().take(6));
             }
-            let new_releases = fetch_all_pages(
-                &client,
-                "https://api.spotify.com/v1/browse/new-releases?limit=10",
-                &token,
-                Some("albums"),
-                1,
-                |a| album_from(a),
-            );
-            if !new_releases.is_empty() {
-                home.push(LibItem::header("New Releases"));
-                home.extend(new_releases.into_iter().take(6));
-            }
+            // `/browse/new-releases` was removed in February 2026.
             got_any |= !home.is_empty();
             liblog(format!("worker: home done, {} rows", home.len()));
             let _ = tx.send((Section::Home, home));
 
             let recent = fetch_all_pages(
                 &client,
-                "https://api.spotify.com/v1/me/player/recently-played?limit=50",
+                &format!("{API}/me/player/recently-played?limit=50"),
                 &token,
                 None,
                 1,
@@ -2314,7 +2407,7 @@ fn spawn_library_fetch(
 
             let playlists = fetch_all_pages(
                 &client,
-                "https://api.spotify.com/v1/me/playlists?limit=50",
+                &format!("{API}/me/playlists?limit=50"),
                 &token,
                 None,
                 10,
@@ -2334,7 +2427,7 @@ fn spawn_library_fetch(
 
             let albums = fetch_all_pages(
                 &client,
-                "https://api.spotify.com/v1/me/albums?limit=50",
+                &format!("{API}/me/albums?limit=50"),
                 &token,
                 None,
                 10,
@@ -2345,7 +2438,7 @@ fn spawn_library_fetch(
 
             let artists = fetch_all_pages(
                 &client,
-                "https://api.spotify.com/v1/me/following?type=artist&limit=50",
+                &format!("{API}/me/following?type=artist&limit=50"),
                 &token,
                 Some("artists"),
                 5,
@@ -2360,7 +2453,7 @@ fn spawn_library_fetch(
                 LibItem::play("▶︎  Play Liked Songs".into(), "myx:action:liked-play".into()),
                 LibItem::header("Songs"),
             ];
-            let mut url = Some("https://api.spotify.com/v1/me/tracks?limit=50".to_string());
+            let mut url = Some(format!("{API}/me/tracks?limit=50"));
             let mut pages = 0;
             while let Some(u) = url.take() {
                 if pages >= 100 {
@@ -2479,7 +2572,7 @@ fn spawn_queue_fetch(webapi: Arc<Mutex<WebApi>>, tx: flume::Sender<Vec<(String, 
 /// Returns (display, uri) for each queued item.
 fn fetch_queue_blocking(token: &str) -> Vec<(String, String)> {
     let client = http_client();
-    let Some(v) = get_json(&client, "https://api.spotify.com/v1/me/player/queue", token) else {
+    let Some(v) = get_json(&client, &format!("{API}/me/player/queue"), token) else {
         return Vec::new();
     };
     v["queue"]
@@ -2512,11 +2605,7 @@ fn fetch_track_meta(webapi: &Arc<Mutex<WebApi>>, track_id: &str) -> TrackMeta {
         return empty();
     };
     let client = http_client();
-    let Some(v) = get_json(
-        &client,
-        &format!("https://api.spotify.com/v1/tracks/{track_id}"),
-        &token,
-    ) else {
+    let Some(v) = get_json(&client, &format!("{API}/tracks/{track_id}"), &token) else {
         return empty();
     };
 
@@ -2558,7 +2647,7 @@ fn spawn_search(webapi: Arc<Mutex<WebApi>>, query: String, tx: flume::Sender<Vec
 fn search_blocking(token: &str, query: &str) -> Vec<LibItem> {
     let client = http_client();
     let url = format!(
-        "https://api.spotify.com/v1/search?q={}&type=track,artist,album,playlist&limit=6",
+        "{API}/search?q={}&type=track,artist,album,playlist&limit=6",
         urlencode(query)
     );
     let Some(v) = get_json(&client, &url, token) else {
@@ -2741,6 +2830,78 @@ fn spawn_detail_fetch(
     });
 }
 
+/// An artist's most popular tracks. `/artists/{id}/top-tracks` was removed in
+/// February 2026, so this searches instead — also popularity-ranked, ten max.
+fn artist_top_tracks(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    id: &str,
+    name: &str,
+) -> Vec<LibItem> {
+    let url = format!(
+        "{API}/search?q={}&type=track&limit=10",
+        urlencode(&format!("artist:{name}"))
+    );
+    let Some(v) = get_json(client, &url, token) else {
+        return Vec::new();
+    };
+    v["tracks"]["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        // Search matches loosely — keep only tracks this artist is credited on.
+        .filter(|t| {
+            t["artists"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|x| x["id"].as_str() == Some(id)))
+        })
+        .filter_map(|t| {
+            Some(LibItem::track(
+                t["name"].as_str()?.to_string(),
+                t["artists"][0]["name"].as_str().unwrap_or("").to_string(),
+                t["uri"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// An artist's albums and singles, deduped by name, newest first. Paged ten at
+/// a time — since February 2026 a larger page is a 400 "Invalid limit".
+fn artist_albums(client: &reqwest::blocking::Client, token: &str, id: &str) -> Vec<LibItem> {
+    let mut seen = std::collections::HashSet::new();
+    let mut albums: Vec<(String, LibItem)> = Vec::new();
+    let mut url = Some(format!(
+        "{API}/artists/{id}/albums?include_groups=album,single&limit=10"
+    ));
+    let mut pages = 0;
+    while let Some(u) = url.take() {
+        if pages >= 5 {
+            break; // 50 releases, the ceiling the single-page version had
+        }
+        let Some(v) = get_json(client, &u, token) else {
+            break;
+        };
+        for a in v["items"].as_array().into_iter().flatten() {
+            let (Some(aname), Some(auri)) = (a["name"].as_str(), a["uri"].as_str()) else {
+                continue;
+            };
+            if !seen.insert(aname.to_lowercase()) {
+                continue;
+            }
+            let date = a["release_date"].as_str().unwrap_or("").to_string();
+            let year = date.split('-').next().unwrap_or("").to_string();
+            albums.push((
+                date,
+                LibItem::ctx(aname.to_string(), year, auri.to_string()),
+            ));
+        }
+        url = v["next"].as_str().map(String::from);
+        pages += 1;
+    }
+    albums.sort_by(|x, y| y.0.cmp(&x.0)); // newest first
+    albums.into_iter().map(|(_, it)| it).collect()
+}
+
 fn fetch_detail_blocking(token: &str, uri: &str, name: &str) -> (String, Vec<LibItem>) {
     let client = http_client();
     let mut parts = uri.split(':');
@@ -2751,61 +2912,24 @@ fn fetch_detail_blocking(token: &str, uri: &str, name: &str) -> (String, Vec<Lib
     // "Play all" row first.
     let mut items = vec![LibItem::play(format!("▶︎ Play {name}"), uri.to_string())];
 
+    liblog(format!("detail: kind={kind} id={id} uri={uri}"));
     match kind {
         "artist" => {
-            // Popular tracks (already ranked by popularity).
-            if let Some(v) = get_json(
-                &client,
-                &format!("https://api.spotify.com/v1/artists/{id}/top-tracks?market=from_token"),
-                token,
-            ) {
-                let tracks: Vec<LibItem> = v["tracks"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|t| {
-                        Some(LibItem::track(
-                            t["name"].as_str()?.to_string(),
-                            t["artists"][0]["name"].as_str().unwrap_or("").to_string(),
-                            t["uri"].as_str()?.to_string(),
-                        ))
-                    })
-                    .collect();
-                if !tracks.is_empty() {
-                    items.push(LibItem::header("Popular"));
-                    items.extend(tracks);
-                }
+            let tracks = artist_top_tracks(&client, token, id, name);
+            if !tracks.is_empty() {
+                items.push(LibItem::header("Popular"));
+                items.extend(tracks);
             }
-            // Albums + singles, deduped by name, newest first, year in subtitle.
-            if let Some(v) = get_json(
-                &client,
-                &format!("https://api.spotify.com/v1/artists/{id}/albums?include_groups=album,single&limit=50"),
-                token,
-            ) {
-                let mut seen = std::collections::HashSet::new();
-                let mut albums: Vec<(String, LibItem)> = Vec::new();
-                for a in v["items"].as_array().into_iter().flatten() {
-                    let (Some(aname), Some(auri)) = (a["name"].as_str(), a["uri"].as_str()) else {
-                        continue;
-                    };
-                    if !seen.insert(aname.to_lowercase()) {
-                        continue;
-                    }
-                    let date = a["release_date"].as_str().unwrap_or("").to_string();
-                    let year = date.split('-').next().unwrap_or("").to_string();
-                    albums.push((date, LibItem::ctx(aname.to_string(), year, auri.to_string())));
-                }
-                albums.sort_by(|x, y| y.0.cmp(&x.0)); // newest first
-                if !albums.is_empty() {
-                    items.push(LibItem::header("Albums"));
-                    items.extend(albums.into_iter().map(|(_, it)| it));
-                }
+            let albums = artist_albums(&client, token, id);
+            if !albums.is_empty() {
+                items.push(LibItem::header("Albums"));
+                items.extend(albums);
             }
         }
         "album" => {
             if let Some(v) = get_json(
                 &client,
-                &format!("https://api.spotify.com/v1/albums/{id}/tracks?limit=50"),
+                &format!("{API}/albums/{id}/tracks?limit=50"),
                 token,
             ) {
                 for t in v["items"].as_array().into_iter().flatten() {
@@ -2826,7 +2950,7 @@ fn fetch_detail_blocking(token: &str, uri: &str, name: &str) -> (String, Vec<Lib
             let before = items.len();
             items.extend(fetch_all_pages(
                 &client,
-                &format!("https://api.spotify.com/v1/playlists/{id}/items?limit=100"),
+                &format!("{API}/playlists/{id}/items?limit=100"),
                 token,
                 None, // items[] is top-level on this endpoint
                 10,   // 1,000 tracks, matching the other sections' ceiling
@@ -2843,6 +2967,7 @@ fn fetch_detail_blocking(token: &str, uri: &str, name: &str) -> (String, Vec<Lib
         _ => {}
     }
 
+    liblog(format!("detail: {} rows for {uri}", items.len()));
     (name.to_string(), items)
 }
 
@@ -2860,7 +2985,7 @@ struct PlaybackState {
 fn fetch_playback_state(token: &str) -> Option<PlaybackState> {
     let client = http_client();
     let resp = client
-        .get("https://api.spotify.com/v1/me/player")
+        .get(format!("{API}/me/player"))
         .bearer_auth(token)
         .send()
         .ok()?;
@@ -2886,7 +3011,7 @@ fn fetch_playback_state(token: &str) -> Option<PlaybackState> {
 fn transfer_playback(token: &str, device_id: &str, play: bool) -> bool {
     let client = http_client();
     client
-        .put("https://api.spotify.com/v1/me/player")
+        .put(format!("{API}/me/player"))
         .bearer_auth(token)
         .json(&serde_json::json!({ "device_ids": [device_id], "play": play }))
         .send()
@@ -2993,15 +3118,22 @@ fn render(f: &mut Frame, app: &mut App) {
     }
     app.tab_rects = tabs;
 
-    let body = Layout::horizontal([Constraint::Percentage(30), Constraint::Min(24)])
-        .spacing(3)
-        .split(rows[2]);
-
-    render_library(f, app, theme, body[0]);
+    let right = if app.zen {
+        // Hidden, not zero-width: a rendered sidebar still claims mouse rects.
+        app.lib_rect = None;
+        app.scroll_rect = None;
+        rows[2]
+    } else {
+        let body = Layout::horizontal([Constraint::Percentage(30), Constraint::Min(24)])
+            .spacing(3)
+            .split(rows[2]);
+        render_library(f, app, theme, body[0]);
+        body[1]
+    };
     match app.view {
-        RightView::NowPlaying => render_nowplaying_view(f, app, theme, body[1]),
-        RightView::Lyrics => render_lyrics(f, app, theme, body[1]),
-        RightView::Queue => render_queue_view(f, app, theme, body[1]),
+        RightView::NowPlaying => render_nowplaying_view(f, app, theme, right),
+        RightView::Lyrics => render_lyrics(f, app, theme, right),
+        RightView::Queue => render_queue_view(f, app, theme, right),
     }
 
     render_now_strip(f, app, theme, rows[4]);
@@ -3029,6 +3161,23 @@ fn view_tabs<'a>(app: &App, theme: Theme) -> Vec<Span<'a>> {
         spans.push(Span::styled(v.label(), style));
     }
     spans
+}
+
+/// Where the list viewport starts, given where it started last frame.
+///
+/// Keeps `margin` rows visible either side of the cursor (vim's `scrolloff`).
+/// Threading the previous `offset` back in is what makes it sticky: the cursor
+/// moves freely inside the window, which follows only when pushed.
+fn scroll_offset(offset: usize, selected: usize, cap: usize, total: usize, margin: usize) -> usize {
+    if cap == 0 || total <= cap {
+        return 0;
+    }
+    // Wider than half the viewport and the two bounds below would fight.
+    let margin = margin.min((cap - 1) / 2);
+    offset
+        .min(selected.saturating_sub(margin)) // cursor near the top → scroll up
+        .max((selected + margin + 1).saturating_sub(cap)) // near the bottom → down
+        .min(total - cap)
 }
 
 fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
@@ -3118,11 +3267,13 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
         return;
     }
 
-    let offset = if app.selected >= cap {
-        app.selected + 1 - cap
-    } else {
-        0
-    };
+    let offset = scroll_offset(
+        app.lib_offset,
+        app.selected,
+        cap,
+        total_items,
+        myx::config::get().scrolloff,
+    );
     app.lib_rect = Some(Rect {
         x: inner.x,
         y: list_top,
@@ -3629,8 +3780,6 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let on = |b: bool| if b { theme.success } else { theme.text_muted };
     let key = |k: &'static str| Span::styled(k, Style::default().fg(theme.primary.into()));
     let lbl = |t: &'static str| Span::styled(t, theme.muted());
-    // Enter opens contexts and plays tracks — label it for the selected row
-    // rather than always claiming "play".
     let enter_lbl = enter_label(app.cur_items().get(app.selected));
     let line = Line::from(vec![
         key("⇥"),
@@ -3641,12 +3790,19 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         lbl(" search   "),
         key("⏎"),
         Span::styled(format!(" {enter_lbl}   "), theme.muted()),
-        key("P"),
+        key("⇧⏎"),
         lbl(" play   "),
         key("S"),
         lbl(" shuffle   "),
         key("␣"),
-        Span::styled(if app.now.as_ref().is_some_and(|n| n.is_playing) { " pause   " } else { " play    " }, theme.muted()),
+        Span::styled(
+            if app.now.as_ref().is_some_and(|n| n.is_playing) {
+                " pause   "
+            } else {
+                " play    "
+            },
+            theme.muted(),
+        ),
         key("n/b"),
         lbl(" skip   "),
         key("⇧←→"),
@@ -3659,6 +3815,8 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         lbl(" shuffle   "),
         key("a"),
         lbl(" actions   "),
+        Span::styled("z", Style::default().fg(on(app.zen).into())),
+        lbl(" zen   "),
         key("q"),
         lbl(" quit"),
     ]);
@@ -3827,6 +3985,64 @@ fn acquire_single_instance_lock() -> std::fs::File {
     file
 }
 
+const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+
+/// Run `task`, drawing the startup screen until it finishes.
+async fn with_loader<T>(
+    terminal: &mut Term,
+    label: &str,
+    task: impl std::future::Future<Output = T>,
+) -> Result<T> {
+    tokio::pin!(task);
+    let mut tick = tokio::time::interval(Duration::from_millis(80));
+    let mut frame: usize = 0;
+    loop {
+        tokio::select! {
+            biased;
+            done = &mut task => return Ok(done),
+            _ = tick.tick() => {
+                terminal.draw(|f| render_loading(f, label, frame))?;
+                frame = frame.wrapping_add(1);
+            }
+        }
+    }
+}
+
+/// The startup screen: wordmark, spinner, and what we're waiting on.
+fn render_loading(f: &mut Frame, label: &str, frame: usize) {
+    let theme = TOKYONIGHT;
+    let area = f.area();
+    f.render_widget(Block::default().style(theme.panel()), area);
+
+    let top = area.y + area.height.saturating_sub(3) / 2;
+    let row = |dy: u16| Rect {
+        x: area.x,
+        y: top.saturating_add(dy).min(area.bottom().saturating_sub(1)),
+        width: area.width,
+        height: 1,
+    };
+
+    let mark: Vec<Span> = gradient_line("\u{FF2D}\u{FF39}\u{FF38}", &[theme.primary, theme.accent])
+        .into_iter()
+        .map(|mut sp| {
+            sp.style = sp.style.add_modifier(Modifier::BOLD);
+            sp
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(Line::from(mark)).alignment(Alignment::Center),
+        row(0),
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(SPINNER[frame % SPINNER.len()], theme.heading()),
+            Span::styled(format!("  {label}…"), theme.muted()),
+        ]))
+        .alignment(Alignment::Center),
+        row(2),
+    );
+}
+
 fn init_terminal() -> Result<Term> {
     // Restore the terminal on panic so a crash doesn't strand the user in a
     // raw-mode / alt-screen shell (audit H6). Runs before the default hook (and
@@ -3837,6 +4053,7 @@ fn init_terminal() -> Result<Term> {
         let _ = execute!(
             out,
             crossterm::event::DisableMouseCapture,
+            crossterm::event::DisableFocusChange,
             LeaveAlternateScreen,
             crossterm::cursor::Show
         );
@@ -3849,7 +4066,9 @@ fn init_terminal() -> Result<Term> {
     execute!(
         stdout,
         EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
+        crossterm::event::EnableMouseCapture,
+        // Notices a return to this tmux window, when art must be re-sent.
+        crossterm::event::EnableFocusChange
     )?;
     // Media key support requires keyboard enhancement (Windows Terminal, kitty, etc.).
     // Silently skip on terminals that don't support it (legacy Windows console).
@@ -3865,6 +4084,7 @@ fn restore_terminal(terminal: &mut Term) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableFocusChange,
         LeaveAlternateScreen
     )?;
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
@@ -4029,9 +4249,9 @@ mod playlist_tests {
     fn enter_label_matches_context_target() {
         let track = LibItem::track("Song".into(), "Artist".into(), "spotify:track:9".into());
         assert_eq!(enter_label(Some(&ctx_row())), "open");
-        assert_eq!(enter_label(Some(&track)), "play");
-        assert_eq!(enter_label(Some(&LibItem::header("Songs"))), "play");
-        assert_eq!(enter_label(None), "play");
+        assert_eq!(enter_label(Some(&track)), "select");
+        assert_eq!(enter_label(Some(&LibItem::header("Songs"))), "select");
+        assert_eq!(enter_label(None), "select");
 
         // The invariant the footer relies on: Enter says "open" for exactly
         // the rows P can play.
@@ -4039,5 +4259,296 @@ mod playlist_tests {
             let opens = enter_label(Some(&row)) == "open";
             assert_eq!(opens, context_target(&row).is_some() && !row.is_play);
         }
+    }
+}
+
+#[cfg(test)]
+mod nav_tests {
+    use super::*;
+
+    // -------------------------------------------------------- scroll_offset
+
+    /// Walk the cursor from `from` to `to` one row at a time, as the arrow keys
+    /// do, threading the offset through — the sticky viewport only makes sense
+    /// as a sequence. Returns the offset the walk ends on.
+    fn walk(mut offset: usize, from: usize, to: usize, cap: usize, total: usize) -> usize {
+        let step = if to >= from { 1isize } else { -1 };
+        let mut sel = from as isize;
+        while sel != to as isize {
+            sel += step;
+            offset = scroll_offset(offset, sel as usize, cap, total, 3);
+        }
+        offset
+    }
+
+    #[test]
+    fn short_lists_never_scroll() {
+        assert_eq!(scroll_offset(0, 4, 10, 5, 3), 0);
+        assert_eq!(scroll_offset(0, 9, 10, 10, 3), 0, "total == cap still fits");
+    }
+
+    #[test]
+    fn top_of_a_long_list_stays_put() {
+        // Nothing to reveal above row 0, so no margin is owed there.
+        for sel in 0..=4 {
+            assert_eq!(scroll_offset(0, sel, 8, 50, 3), 0, "sel={sel}");
+        }
+    }
+
+    #[test]
+    fn scrolling_down_keeps_the_margin_below_the_cursor() {
+        // cap=8, margin=3: the cursor may reach row 4, then the list moves.
+        let offset = walk(0, 0, 20, 8, 50);
+        assert_eq!(20 - offset, 4, "3 rows stay visible below the cursor");
+    }
+
+    #[test]
+    fn scrolling_back_up_keeps_the_margin_above_the_cursor() {
+        let offset = walk(0, 0, 30, 8, 50);
+        let offset = walk(offset, 30, 10, 8, 50);
+        assert_eq!(10 - offset, 3, "3 rows stay visible above the cursor");
+    }
+
+    #[test]
+    fn the_cursor_moves_inside_the_viewport_before_the_list_does() {
+        // The whole point of the sticky offset: a short move well inside the
+        // window must not scroll at all.
+        let offset = walk(0, 0, 30, 20, 100);
+        assert_eq!(scroll_offset(offset, 20, 20, 100, 3), offset);
+    }
+
+    #[test]
+    fn the_end_of_the_list_is_reachable() {
+        // The last row must still be selectable — the bottom margin cannot push
+        // the viewport past the end.
+        assert_eq!(walk(0, 0, 49, 8, 50), 42, "clamped to total - cap");
+    }
+
+    #[test]
+    fn the_cursor_is_always_inside_the_viewport() {
+        // The invariant the renderer depends on: `selected` must be one of the
+        // rows actually drawn — whatever the previous offset was, and however
+        // absurd the configured margin is.
+        for margin in [0usize, 3, 99] {
+            for total in [1usize, 5, 40] {
+                for cap in 1..12usize {
+                    for prev in 0..total {
+                        for sel in 0..total {
+                            let off = scroll_offset(prev, sel, cap, total, margin);
+                            let shown = cap.min(total);
+                            assert!(off <= total.saturating_sub(cap), "{margin}/{total}/{cap}");
+                            assert!(
+                                sel >= off && sel < off + shown,
+                                "{margin}/{total}/{cap}/{prev}/{sel}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --------------------------------------------------------- render_loading
+
+    /// The rendered rows, trailing blanks trimmed, paired with their y.
+    fn loading_rows(w: u16, h: u16) -> Vec<(u16, String)> {
+        use ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+        term.draw(|f| render_loading(f, "connecting to Spotify", 0))
+            .expect("draw");
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                let line: String = (0..w).map(|x| buf[(x, y)].symbol()).collect();
+                (y, line)
+            })
+            .filter(|(_, line)| !line.trim().is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn the_loading_screen_names_what_it_is_waiting_on() {
+        let text = loading_rows(40, 12)
+            .into_iter()
+            .map(|(_, l)| l)
+            .collect::<String>();
+        assert!(text.contains("connecting to Spotify"), "{text}");
+        assert!(text.contains(SPINNER[0]), "spinner missing");
+        assert!(text.contains('\u{FF2D}'), "wordmark missing");
+    }
+
+    #[test]
+    fn the_loading_screen_is_centred_on_both_axes() {
+        let (w, h) = (41u16, 13u16);
+        let rows = loading_rows(w, h);
+        assert_eq!(rows.len(), 2, "expected a wordmark row and a spinner row");
+        for (y, line) in &rows {
+            // Measured from the content's midpoint, not its margins: the
+            // fullwidth wordmark leaves a blank continuation cell per letter.
+            let first = line.chars().take_while(|c| *c == ' ').count();
+            let last = line.trim_end().chars().count();
+            let centre = (first + last) / 2;
+            assert!(
+                centre.abs_diff(w as usize / 2) <= 1,
+                "row {y} centres at {centre}, screen centre {} ({line:?})",
+                w / 2
+            );
+        }
+        // Two rows of content, so the block straddles the middle of the screen.
+        let mid = (rows[0].0 + rows[1].0) / 2;
+        assert!(
+            mid.abs_diff(h / 2) <= 1,
+            "block sits at {mid}, screen mid {}",
+            h / 2
+        );
+    }
+
+    // ---------------------------------------------------------- scrub_target
+
+    #[test]
+    fn a_scrub_step_moves_by_the_step_size() {
+        assert_eq!(scrub_target(10_000, 200_000, 5_000), 15_000);
+        assert_eq!(scrub_target(10_000, 200_000, -5_000), 5_000);
+    }
+
+    #[test]
+    fn a_scrub_cannot_leave_the_track() {
+        // Held keys walk into both walls; neither may underflow or overshoot.
+        assert_eq!(scrub_target(2_000, 200_000, -5_000), 0);
+        assert_eq!(scrub_target(198_000, 200_000, 5_000), 200_000);
+        assert_eq!(scrub_target(0, 0, -5_000), 0);
+    }
+}
+
+/// Live-API tests, `#[ignore]`d so `cargo test` stays offline:
+///
+///     cargo test --bin myx -- --ignored --nocapture
+///
+/// They catch Spotify changing an endpoint out from under the artist page,
+/// which is how the 403/400 pair that emptied it went unnoticed.
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    fn token() -> Option<String> {
+        let path = myx::home_dir()?.join(".cache/myx/webapi.json");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        if now + 30 >= v["expires_at"].as_u64().unwrap_or(0) {
+            eprintln!("cached token expired — run `myx` once, then retry");
+            return None;
+        }
+        v["access_token"].as_str().map(str::to_string)
+    }
+
+    /// girl in red: a real artist with a discography larger than one page.
+    const ARTIST_ID: &str = "3uwAm6vQy7kWPS2bciKWx9";
+    const ARTIST_NAME: &str = "girl in red";
+
+    /// The February 2026 library endpoints: check, save, check again. Uses a
+    /// track that is already saved, so a pass leaves the library as it was.
+    #[test]
+    #[ignore = "hits the Spotify API"]
+    fn live_library_contains_and_write() {
+        let Some(token) = token() else { return };
+        let client = http_client();
+        let v = get_json(&client, &format!("{API}/me/tracks?limit=1"), &token).expect("liked page");
+        let Some(id) = v["items"][0]["track"]["id"].as_str() else {
+            return println!("no liked tracks to test with");
+        };
+        let uri = format!("spotify:track:{id}");
+        assert!(
+            api_contains(&token, &uri),
+            "a track from /me/tracks reads as unsaved"
+        );
+        library_write(&client, &token, false, &uri).expect("re-saving an already saved track");
+        assert!(api_contains(&token, &uri), "still saved after the write");
+    }
+
+    /// Reproduces "liked failed http 403": page the whole Liked library the way
+    /// `spawn_library_fetch` does and report the first page Spotify refuses.
+    #[test]
+    #[ignore = "hits the Spotify API"]
+    fn live_liked_songs_page_all_the_way_through() {
+        let Some(token) = token() else { return };
+        let client = http_client();
+        let mut url = Some(format!("{API}/me/tracks?limit=50"));
+        let mut pages = 0;
+        let mut tracks = 0;
+        let mut total = None;
+        while let Some(u) = url.take() {
+            let resp = client.get(&u).bearer_auth(&token).send().expect("send");
+            let status = resp.status().as_u16();
+            let v: serde_json::Value = resp.json().unwrap_or(serde_json::Value::Null);
+            assert!(
+                (200..300).contains(&status),
+                "page {pages} -> HTTP {status}: {} ({u})",
+                v["error"]["message"].as_str().unwrap_or("(no message)")
+            );
+            total.get_or_insert(v["total"].as_u64().unwrap_or(0));
+            tracks += v["items"].as_array().map(Vec::len).unwrap_or(0);
+            url = v["next"].as_str().map(String::from);
+            pages += 1;
+        }
+        println!("liked: {tracks} tracks over {pages} pages, total={total:?}");
+        assert_eq!(Some(tracks as u64), total, "pagination dropped tracks");
+    }
+
+    #[test]
+    #[ignore = "hits the Spotify API"]
+    fn live_artist_top_tracks_are_not_empty() {
+        let Some(token) = token() else { return };
+        let rows = artist_top_tracks(&http_client(), &token, ARTIST_ID, ARTIST_NAME);
+        println!("top tracks: {}", rows.len());
+        for r in rows.iter().take(3) {
+            println!("  {} · {}", r.name, r.subtitle);
+        }
+        assert!(!rows.is_empty(), "the Popular section came back empty");
+        assert!(rows.iter().all(|r| r.is_track));
+    }
+
+    #[test]
+    #[ignore = "hits the Spotify API"]
+    fn live_artist_albums_page_past_the_first_ten() {
+        let Some(token) = token() else { return };
+        let rows = artist_albums(&http_client(), &token, ARTIST_ID);
+        println!("albums: {}", rows.len());
+        for r in rows.iter().take(3) {
+            println!("  {} · {}", r.name, r.subtitle);
+        }
+        // The bug was a single page rejected outright; more than one page's
+        // worth proves both that it succeeds and that `next` is followed.
+        assert!(
+            rows.len() > 10,
+            "expected a paged discography, got {}",
+            rows.len()
+        );
+        assert!(rows.iter().all(|r| !r.is_track && !r.is_header));
+        // Newest first.
+        let years: Vec<&str> = rows.iter().map(|r| r.subtitle.as_str()).collect();
+        assert!(
+            years.windows(2).all(|w| w[0] >= w[1]),
+            "not newest-first: {years:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "hits the Spotify API"]
+    fn live_artist_detail_has_both_sections() {
+        let Some(token) = token() else { return };
+        let (title, items) =
+            fetch_detail_blocking(&token, &format!("spotify:artist:{ARTIST_ID}"), ARTIST_NAME);
+        let headers: Vec<&str> = items
+            .iter()
+            .filter(|i| i.is_header)
+            .map(|i| i.name.as_str())
+            .collect();
+        println!("{title}: {} rows, headers {headers:?}", items.len());
+        assert_eq!(headers, ["Popular", "Albums"], "artist page lost a section");
+        assert!(items.len() > 20, "only {} rows", items.len());
     }
 }
