@@ -1675,12 +1675,12 @@ fn handle_media_control_event(
             app.engine.stop();
         }
         MediaControlEvent::Seek(direction) => match direction {
-            SeekDirection::Backward => app.seek_by(-5_000),
-            SeekDirection::Forward => app.seek_by(5_000),
+            SeekDirection::Backward => app.seek_step(-5_000),
+            SeekDirection::Forward => app.seek_step(5_000),
         },
         MediaControlEvent::SeekBy(direction, duration) => match direction {
-            SeekDirection::Backward => app.seek_by(-(duration.as_millis() as i64)),
-            SeekDirection::Forward => app.seek_by(duration.as_millis() as i64),
+            SeekDirection::Backward => app.seek_step(-(duration.as_millis() as i64)),
+            SeekDirection::Forward => app.seek_step(duration.as_millis() as i64),
         },
         MediaControlEvent::SetPosition(MediaPosition(duration)) => {
             app.seek_to(duration.as_millis() as u32);
