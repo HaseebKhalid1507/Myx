@@ -149,6 +149,20 @@ impl Engine {
         })
     }
 
+    /// A [`Self::command`] that first reclaims the active-device role, which
+    /// Spotify revokes from an idle paused device. Once revoked, librespot
+    /// discards every other command; `Activate` is the one it still honours,
+    /// and it no-ops when we are already active. Volume stays out of here — it
+    /// must never yank playback off whatever device actually holds it.
+    fn active_command<T>(
+        &self,
+        what: &'static str,
+        f: impl FnOnce(&Spirc) -> Result<T, librespot_core::Error>,
+    ) -> Result<T> {
+        let _ = self.inner.link().spirc.activate();
+        self.command(what, f)
+    }
+
     /// Start playing a context (playlist / album / artist / track URI). When
     /// `shuffle` is set, Spotify shuffles the *entire* context server-side.
     pub fn play_context(&self, context_uri: impl Into<String>, shuffle: bool) -> Result<()> {
@@ -157,8 +171,7 @@ impl Engine {
             context_options: context_options(shuffle),
             ..Default::default()
         };
-        self.command("load context", |spirc| {
-            spirc.activate().ok();
+        self.active_command("load context", |spirc| {
             spirc.load(LoadRequest::from_context_uri(context_uri.into(), options))
         })
     }
@@ -177,8 +190,7 @@ impl Engine {
             context_options: context_options(shuffle),
             playing_track: track_uri.map(PlayingTrack::Uri),
         };
-        self.command("load context at", |spirc| {
-            spirc.activate().ok();
+        self.active_command("load context at", |spirc| {
             spirc.load(LoadRequest::from_context_uri(context_uri, options))
         })
     }
@@ -199,8 +211,7 @@ impl Engine {
             playing_track: start_uri.map(PlayingTrack::Uri),
             seek_to: start_position_ms,
         };
-        self.command("load tracks", |spirc| {
-            spirc.activate().ok();
+        self.active_command("load tracks", |spirc| {
             spirc.load(LoadRequest::from_tracks(tracks, options))
         })
     }
@@ -213,35 +224,34 @@ impl Engine {
             seek_to: position_ms,
             ..Default::default()
         };
-        self.command("resume track", |spirc| {
-            spirc.activate().ok();
+        self.active_command("resume track", |spirc| {
             spirc.load(LoadRequest::from_tracks(vec![uri], options))
         })
     }
 
     pub fn play(&self) -> Result<()> {
-        self.command("play", Spirc::play)
+        self.active_command("play", Spirc::play)
     }
     pub fn pause(&self) -> Result<()> {
-        self.command("pause", Spirc::pause)
+        self.active_command("pause", Spirc::pause)
     }
     pub fn stop(&self) {
         self.inner.link().player.stop()
     }
     pub fn toggle(&self) -> Result<()> {
-        self.command("toggle", Spirc::play_pause)
+        self.active_command("toggle", Spirc::play_pause)
     }
     pub fn next(&self) -> Result<()> {
-        self.command("next", Spirc::next)
+        self.active_command("next", Spirc::next)
     }
     pub fn prev(&self) -> Result<()> {
-        self.command("prev", Spirc::prev)
+        self.active_command("prev", Spirc::prev)
     }
     pub fn shuffle(&self, on: bool) -> Result<()> {
-        self.command("shuffle", |spirc| spirc.shuffle(on))
+        self.active_command("shuffle", |spirc| spirc.shuffle(on))
     }
     pub fn repeat(&self, on: bool) -> Result<()> {
-        self.command("repeat", |spirc| spirc.repeat(on))
+        self.active_command("repeat", |spirc| spirc.repeat(on))
     }
     /// Set volume in librespot's 0..=65535 range.
     pub fn set_volume(&self, vol: u16) -> Result<()> {
@@ -252,7 +262,7 @@ impl Engine {
     }
     /// Seek to an absolute position in the current track.
     pub fn seek(&self, position_ms: u32) -> Result<()> {
-        self.command("seek", |spirc| spirc.set_position_ms(position_ms))
+        self.active_command("seek", |spirc| spirc.set_position_ms(position_ms))
     }
     /// This device's Spotify Connect id — used to transfer playback back to myx.
     pub fn device_id(&self) -> String {
@@ -426,7 +436,10 @@ async fn connect(
 
     let backend = audio_backend::find(None).expect("an audio backend should be available");
     let player_config = PlayerConfig {
-        position_update_interval: Some(Duration::from_millis(100)),
+        // Each correction pushes the whole Connect state to Spotify, so the old
+        // 100ms announced us ten times a second. Position is extrapolated
+        // locally; this only trims the drift.
+        position_update_interval: Some(Duration::from_secs(1)),
         ..Default::default()
     };
 

@@ -43,7 +43,7 @@ use souvlaki::{
 };
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
-const FADE_MS: u64 = 1200;
+const FADE_MS: u64 = 1500;
 
 /// How far one Shift+arrow press moves the playhead.
 const SEEK_STEP_MS: i64 = 5_000;
@@ -783,6 +783,7 @@ impl App {
 // ------------------------------------------------------------------ main
 
 fn main() -> Result<()> {
+    install_librespot_log();
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Refuse to start a second instance — two myx's racing on the shared Web API
@@ -2369,6 +2370,10 @@ fn advance_fade(app: &mut App) {
 }
 
 fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<TrackMeta>) {
+    // Position ticks would bury everything else in the log.
+    if !matches!(ev, EngineEvent::PositionCorrection { .. }) {
+        liblog(format!("engine: {ev:?}"));
+    }
     match ev {
         EngineEvent::TrackChanged { uri } => {
             app.status = "loading track…".to_string();
@@ -2415,6 +2420,9 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
         EngineEvent::Stopped => {
             app.now = None;
             app.playback_started = false;
+            // librespot cleared its context too, so only a fresh load can
+            // resume from here — not a bare `play`.
+            app.reclaimed = false;
 
             if let Some(controls) = app.media_controls.as_mut() {
                 let _ = controls.set_playback(MediaPlayback::Stopped);
@@ -2538,6 +2546,45 @@ fn apply_meta(
 
 /// Temporary-but-useful diagnostics for startup/library failures. Kept out of
 /// the TUI because alternate-screen rendering hides stderr.
+/// Forwards librespot's own `log` output into `myx.log`. Its Connect
+/// diagnostics are the only account of why the device went inactive, and
+/// without a logger installed they go nowhere.
+struct LibrespotLog;
+
+impl log::Log for LibrespotLog {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+    fn log(&self, record: &log::Record) {
+        liblog(format!(
+            "{} {}: {}",
+            record.level(),
+            record.target(),
+            record.args()
+        ));
+    }
+    fn flush(&self) {}
+}
+
+/// Any value of `MYX_LOG` turns logging on; the value only picks how loud
+/// librespot is. `debug`/`trace` open it up, `warn` quiets it back down.
+fn install_librespot_log() {
+    let Ok(level) = std::env::var("MYX_LOG") else {
+        return;
+    };
+    let filter = match level.to_ascii_lowercase().as_str() {
+        "trace" => log::LevelFilter::Trace,
+        "debug" => log::LevelFilter::Debug,
+        "warn" => log::LevelFilter::Warn,
+        // Connect names its own faults at info ("device became inactive");
+        // warn shows only the fallout.
+        _ => log::LevelFilter::Info,
+    };
+    if log::set_boxed_logger(Box::new(LibrespotLog)).is_ok() {
+        log::set_max_level(filter);
+    }
+}
+
 /// Optional debug log — silent unless `MYX_LOG` is set. Writes to
 /// ~/.cache/myx/myx.log (user-owned dir 0700, file 0600) instead of a
 /// world-writable fixed /tmp path (audit H5).

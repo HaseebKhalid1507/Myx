@@ -12,6 +12,9 @@ they are added to, never rewritten.
   out, so there is a file to edit instead of a path to guess.
 - `protocol` config key (`kitty`, `iterm2`, `sixel`, `halfblocks`) for when the
   startup detection picks wrong. `MYX_PROTOCOL` still overrides it.
+- `MYX_LOG` also captures librespot's own log, which is where Spotify Connect
+  explains itself. Any value turns the log on; `debug` and `trace` widen it,
+  `warn` narrows it.
 - On-disk cache for catalogue reads and album art in `~/.cache/myx/api`. Repeat
   visits skip the network, and a stale entry is served when a request fails —
   which is what a spent API quota looks like. Entries older than 30 days are
@@ -29,7 +32,7 @@ they are added to, never rewritten.
 - Frames are presented atomically (synchronized output, DECSET 2026). A track
   change recolours every glyph at once, and the terminal used to render that
   half-applied.
-- The theme cross-fade runs 1200ms instead of 300ms. Smoothness comes from the
+- The theme cross-fade runs 1800ms instead of 300ms. Smoothness comes from the
   duration, not the frame rate: every present recomposes the viewport, and the
   inline cover shimmers if that happens 60 times a second.
 - Zen mode ignores the keys that only drive the hidden library — `Tab`, `↑`/`↓`,
@@ -82,6 +85,16 @@ they are added to, never rewritten.
 - Cache writes go through a temporary file and a rename, so an interrupted write
   can't leave a truncated entry behind. The temp name is unique per write, so two
   threads fetching the same URL can't interleave into one corrupt entry.
+- Playback controls keep working after Spotify drops myx from the Connect
+  cluster, which it does to a device left paused. librespot answers that by
+  clearing its context and discarding every later command, and the state it then
+  publishes reads as paused — so the phone greyed out its pause button and
+  neither it nor the keyboard could resume. Transport commands now reclaim the
+  active-device role first, and a forced stop routes the next play through a
+  fresh load, which is the only thing that resumes from there.
+- Position corrections are emitted once a second instead of ten times, since
+  each one pushes the whole Connect state to Spotify. Position is extrapolated
+  locally, so nothing on screen moves less smoothly.
 
 ## [0.3.0] — 2026-07-28
 

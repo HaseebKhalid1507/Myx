@@ -38,6 +38,7 @@ open = { version = "5", optional = true }
 fs2 = { version = "0.4", optional = true }
 souvlaki = { version = "0.8.3", default-features = false, features = ["pollster", "zbus", "zvariant"] }
 toml = { version = "1", default-features = false, features = ["parse", "serde"], optional = true }
+log = { version = "0.4.33", features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-win = "3.0.0"

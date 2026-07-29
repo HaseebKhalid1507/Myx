@@ -2808,6 +2808,7 @@ dependencies = [
  "librespot-connect",
  "librespot-core",
  "librespot-playback",
+ "log",
  "open",
  "rand 0.9.5",
  "ratatui",
