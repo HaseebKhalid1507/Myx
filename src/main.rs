@@ -16,9 +16,11 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
+    EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::CellDiffOption;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -41,7 +43,7 @@ use souvlaki::{
 };
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
-const FADE_MS: u64 = 300;
+const FADE_MS: u64 = 1200;
 
 /// How far one Shift+arrow press moves the playhead.
 const SEEK_STEP_MS: i64 = 5_000;
@@ -55,22 +57,31 @@ fn scrub_target(from_ms: u32, duration_ms: u32, delta_ms: i64) -> u32 {
     (from_ms as i64 + delta_ms).clamp(0, duration_ms as i64) as u32
 }
 
-/// Frames to force a full repaint for after the album art changes.
+/// What the album art box owes the next frame.
 ///
-/// `ratatui-image` packs the entire encoded image into a single cell's symbol,
-/// and ratatui writes a cell only when it differs from the previous frame — so a
-/// new cover is transmitted exactly once. Terminals never acknowledge an inline
-/// image, and if that single write is dropped the symbol never changes again,
-/// leaving the previous track's art on screen indefinitely. Clearing invalidates
-/// the previous buffer so the same image gets written again; two frames allows
-/// one retry, costing two extra repaints per track change.
-const ART_REPAINTS: u8 = 2;
+/// `ratatui-image` puts the whole image in one cell's symbol and marks the rest
+/// of the box `Skip`, which the diff never touches again — so leftovers stay,
+/// and a re-encode is byte-identical for sixel and iTerm2 and gets discarded.
+/// Blanking the box for one frame is the only change the diff will emit, and it
+/// makes the image that follows one too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtRepaint {
+    /// The box holds what it should.
+    Idle,
+    /// Blank the box this frame.
+    Wipe,
+    /// Draw the art; the wipe has gone out.
+    Draw,
+}
 
-/// How often the cover is re-sent anyway. tmux only forwards focus changes with
-/// `focus-events on`, so without a timer the art stays gone after a window switch.
-/// Every resend re-encodes and retransmits the whole image, so it runs under tmux
-/// only — elsewhere `FocusGained` covers it.
-const ART_RESEND: Duration = Duration::from_secs(2);
+impl ArtRepaint {
+    fn advance(self) -> Self {
+        match self {
+            Self::Wipe => Self::Draw,
+            _ => Self::Idle,
+        }
+    }
+}
 
 /// Ceiling on the redraw rate: one frame per ~60Hz terminal refresh.
 const MIN_FRAME: Duration = Duration::from_millis(16);
@@ -84,9 +95,10 @@ const SYNC_EVERY: Duration = Duration::from_secs(24);
 
 /// Whether this frame is worth drawing.
 ///
-/// Input beats animation beats the idle clock: a keypress redraws within one
-/// terminal refresh, so a held arrow scrolls smoothly, while an untouched
-/// screen redraws twice a second instead of sixty times.
+/// Input beats animation beats the idle clock. Smoothness of the recolour comes
+/// from its duration, not from the frame rate: every present makes the terminal
+/// recompose the viewport, and the inline cover shimmers if that happens 60
+/// times a second.
 fn should_draw(dirty: bool, animating: bool, since_last: Duration) -> bool {
     if dirty {
         since_last >= MIN_FRAME
@@ -496,17 +508,13 @@ struct App {
     details: Vec<Detail>,
     // Context actions menu overlay (opened with `a`).
     actions: Option<ActionMenu>,
-    // A last-played track URI to re-enrich (cover/theme/lyrics) on boot.
     restore_uri: Option<String>,
     // Track URI whose metadata was last requested. Fetches run on separate
     // blocking tasks and can land out of order when skipping quickly, so a
     // reply for any other track is stale and must be dropped.
     pending_meta: Option<String>,
-    // Blank plate drawn while a cover loads, cached alongside the colour it was
-    // built for so a theme change rebuilds it but an ordinary redraw does not.
-    // Frames still owed a forced repaint because the album art changed. See
-    // ART_REPAINTS — an inline image is written once and never retried.
-    art_dirty: u8,
+    // What the album art box owes the next frame. See ArtRepaint.
+    art_repaint: ArtRepaint,
     // Whether real playback has started this session (gates resume-on-play).
     playback_started: bool,
     // Whether we reclaimed a live server-side session (vs. local fallback).
@@ -774,8 +782,7 @@ impl App {
 
 // ------------------------------------------------------------------ main
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Refuse to start a second instance — two myx's racing on the shared Web API
@@ -805,7 +812,26 @@ async fn main() -> Result<()> {
         init_terminal,
     )?;
 
-    let res = boot(&mut terminal, saved, init_vol, creds, webapi).await;
+    // Query the terminal for its graphics protocol before anything else is
+    // running: picking sixel swaps `TERM` around the query, and `setenv` is only
+    // safe without concurrent readers. Hence the hand-built runtime below rather
+    // than `#[tokio::main]`, which would already have spawned its workers by the
+    // time this line ran.
+    let picker = Cover::make_picker(myx::config::get().protocol.as_deref());
+    // Halfblocks here means the graphics query got no answer — the art will look
+    // like a 25×26 mosaic. MYX_PROTOCOL overrides it.
+    liblog(format!(
+        "cover: {:?}, font {:?}",
+        picker.protocol_type(),
+        picker.font_size()
+    ));
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .context("start tokio runtime")?;
+    let res = runtime.block_on(boot(&mut terminal, saved, init_vol, creds, webapi, picker));
     restore_terminal(&mut terminal)?;
     res
 }
@@ -835,6 +861,7 @@ async fn boot(
     init_vol: u8,
     creds: librespot_core::authentication::Credentials,
     webapi: WebApi,
+    picker: Picker,
 ) -> Result<()> {
     let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
     let engine = with_loader(
@@ -850,15 +877,6 @@ async fn boot(
     if let Some(uri) = std::env::args().nth(1) {
         let _ = engine.play_context(uri, false);
     }
-
-    let picker = Cover::make_picker(myx::config::get().protocol.as_deref());
-    // Halfblocks here means the graphics query got no answer — the art will look
-    // like a 25×26 mosaic. MYX_PROTOCOL overrides it.
-    liblog(format!(
-        "cover: {:?}, font {:?}",
-        picker.protocol_type(),
-        picker.font_size()
-    ));
 
     // Rebuild the last now-playing (paused) for a seamless resume look.
     let now = saved.last_played.as_ref().map(|last_played| NowPlaying {
@@ -936,7 +954,7 @@ async fn boot(
         actions: None,
         restore_uri,
         pending_meta: None,
-        art_dirty: 0,
+        art_repaint: ArtRepaint::Idle,
         playback_started: false,
         reclaimed: false,
         source: saved.source.clone(),
@@ -1040,15 +1058,11 @@ async fn run_ui(
     let mut frame = tokio::time::interval(Duration::from_millis(16));
     frame.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_draw = Instant::now() - IDLE_REDRAW;
-    let mut last_art_resend = Instant::now();
     let mut last_sync = Instant::now();
     // Nothing is on screen yet, so the first tick must draw.
     let mut dirty = true;
     let mut last_layout = (app.view, app.zen);
-    // The resend timer only exists for terminals that never report focus. tmux
-    // is the one that does this by default (`focus-events off`), and the first
-    // focus event it does forward retires the timer for good.
-    let mut art_resend = std::env::var_os("TMUX").is_some();
+    let mut overlay_open = app.actions.is_some();
 
     loop {
         let touched = tokio::select! {
@@ -1114,43 +1128,44 @@ async fn run_ui(
                     }
                 }
 
-                // Only the Now Playing pane animates; on Lyrics or Queue the
-                // visualizer is off-screen and its frame rate buys nothing.
+                // The visualizer only animates while it is on screen; on Queue
+                // its frame rate buys nothing. Synced lyrics move too — at the
+                // idle rate the highlighted line lands half a second late.
                 let animating = app.fade.is_some()
+                    || (app.view == RightView::Lyrics && app.lyrics_synced)
                     || (app.view == RightView::NowPlaying
                         && app.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false));
-                if art_resend
-                    && app.view == RightView::NowPlaying
-                    && last_art_resend.elapsed() >= ART_RESEND
-                {
-                    last_art_resend = Instant::now();
-                    app.art_dirty = app.art_dirty.max(1);
+                if app.art_repaint != ArtRepaint::Idle {
                     dirty = true;
                 }
-                if app.art_dirty > 0 {
-                    dirty = true;
-                }
-                // Switching away and back drops the image data on the
-                // terminal's side; the placeholder cells alone then point at
-                // nothing and whatever the other view drew shows through.
                 if (app.view, app.zen) != last_layout {
                     last_layout = (app.view, app.zen);
-                    app.art_dirty = ART_REPAINTS;
+                    app.art_repaint = ArtRepaint::Wipe;
+                    dirty = true;
+                }
+                // An overlay draws over the art and the terminal loses those
+                // pixels, so the cover has to be sent again once it closes.
+                // Opening one must not wipe: the image would be redrawn a frame
+                // later, back on top of the popup.
+                let overlay = app.actions.is_some();
+                if overlay != overlay_open {
+                    overlay_open = overlay;
+                    if !overlay {
+                        app.art_repaint = ArtRepaint::Wipe;
+                    }
                     dirty = true;
                 }
                 if should_draw(dirty, animating, last_draw.elapsed()) {
                     advance_fade(&mut app);
-                    // Inline images are written once by ratatui; invalidate so
-                    // the re-encode produces a fresh cell.
-                    if app.art_dirty > 0 {
-                        app.art_dirty -= 1;
-                        if let Some(n) = app.now.as_mut() {
-                            if let Some(c) = n.cover.as_mut() {
-                                c.invalidate_cache();
-                            }
-                        }
-                    }
-                    terminal.draw(|f| render(f, &mut app))?;
+                    // Present the frame atomically. Without this the terminal
+                    // renders whatever has arrived so far, and a recolour that
+                    // touches every glyph on screen shows up half-applied.
+                    // Terminals that don't know the mode ignore it.
+                    let _ = execute!(io::stdout(), BeginSynchronizedUpdate);
+                    let drawn = terminal.draw(|f| render(f, &mut app));
+                    let _ = execute!(io::stdout(), EndSynchronizedUpdate);
+                    drawn?;
+                    app.art_repaint = app.art_repaint.advance();
                     last_draw = Instant::now();
                     dirty = false;
                 }
@@ -1306,13 +1321,13 @@ async fn run_ui(
                         }
                     }
                     // A repaint from the terminal's own buffer loses inline art.
-                    Ok(Event::Resize(..)) => app.art_dirty = ART_REPAINTS,
-                    // Focus is reported, so the timer has nothing left to cover.
-                    Ok(Event::FocusGained) => {
-                        art_resend = false;
-                        app.art_dirty = ART_REPAINTS;
+                    // A repaint from the terminal's own buffer loses inline art;
+                    // returning to the window is when it has to go back out.
+                    // tmux only forwards focus with `focus-events on` — see the
+                    // README — and stores sixel itself either way.
+                    Ok(Event::Resize(..)) | Ok(Event::FocusGained) => {
+                        app.art_repaint = ArtRepaint::Wipe;
                     }
-                    Ok(Event::FocusLost) => art_resend = false,
                     _ => {}
                 }
                 true
@@ -1582,6 +1597,13 @@ fn handle_key(
         return false;
     }
 
+    // Zen hides the library, so the keys that drive one do nothing rather than
+    // moving a selection nobody can see. Placed after the overlays above, which
+    // stay usable if one was already open when zen came on.
+    if app.zen && drives_library(code) {
+        return false;
+    }
+
     match code {
         KeyCode::Char('/') => {
             app.input_mode = true;
@@ -1659,7 +1681,17 @@ fn handle_key(
             app.status = format!("sorted by {}", m.label());
         }
         KeyCode::Char('a') => {
-            let item = app.cur_items().get(app.selected).cloned();
+            // Zen hides the library, so the menu belongs to what is playing —
+            // acting on a selection nobody can see is how it ends up offering
+            // "remove from Liked" for the wrong track.
+            let item = if app.zen {
+                app.now
+                    .as_ref()
+                    .filter(|n| !n.uri.is_empty())
+                    .map(|n| LibItem::track(n.title.clone(), n.artist.clone(), n.uri.clone()))
+            } else {
+                app.cur_items().get(app.selected).cloned()
+            };
             if let Some(item) = item {
                 if !item.is_header && !item.is_play {
                     // Instant menu (no network), then enrich when the API returns.
@@ -1694,10 +1726,8 @@ fn handle_key(
                 spawn_queue_fetch(app.webapi.clone(), queue_tx.clone());
             }
         }
-        KeyCode::Char('z') => {
-            app.zen = !app.zen;
-            app.art_dirty = ART_REPAINTS;
-        }
+        // The frame loop notices the layout change and wipes the art box.
+        KeyCode::Char('z') => app.zen = !app.zen,
         KeyCode::Down | KeyCode::Char('j') => app.move_sel(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_sel(-1),
         // Needs a terminal that reports modified Enter (kitty, WezTerm, foot).
@@ -1733,6 +1763,24 @@ fn handle_key(
         _ => {}
     }
     false
+}
+
+/// Keys whose whole effect is on the library pane.
+///
+/// Zen hides that pane, so these do nothing there rather than moving a selection
+/// nobody can see — and `a` is deliberately absent, because it retargets onto
+/// the playing track instead of going quiet.
+fn drives_library(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Enter
+            | KeyCode::Esc
+            | KeyCode::Char('/' | '[' | ']' | 'j' | 'k' | 'o' | 'r' | 'P' | 'S')
+    )
 }
 
 fn consume_media_event<T>(event: Result<T, flume::RecvError>, open: &mut bool) -> Option<T> {
@@ -2387,6 +2435,19 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
                 let _ = controls.set_playback(playback);
             }
         }
+        EngineEvent::Reconnecting => {
+            app.status = "connection dropped — reconnecting…".to_string();
+        }
+        EngineEvent::Reconnected => {
+            // The replacement Connect device starts idle, so whatever was
+            // playing is not resumed; say so rather than leave a silent player
+            // looking broken.
+            app.status = if app.playback_started {
+                "reconnected — press play to resume".to_string()
+            } else {
+                "reconnected".to_string()
+            };
+        }
         EngineEvent::EndOfTrack { .. } => {}
     }
 }
@@ -2418,8 +2479,9 @@ fn apply_meta(
         .image
         .as_ref()
         .map(|img| Cover::from_image(img.clone(), app.picker.clone()));
-    // New art to transmit — see ART_REPAINTS.
-    app.art_dirty = ART_REPAINTS;
+    // A different cover encodes to a different symbol, so the diff emits it on
+    // its own — no wipe, which would flash a blank box between the two covers.
+    app.art_repaint = ArtRepaint::Draw;
     app.status.clear();
     app.lyrics.clear();
     app.lyrics_synced = false;
@@ -3345,15 +3407,27 @@ fn fetch_playback_state(token: &str) -> Option<PlaybackState> {
 
 /// Transfer the current server-side playback onto the myx device (with its full
 /// context + queue + position). `play=false` transfers paused.
-fn transfer_playback(token: &str, device_id: &str, play: bool) -> bool {
+/// `Ok(())` on success, `Err(reason)` with something worth showing otherwise.
+fn transfer_playback(token: &str, device_id: &str, play: bool) -> Result<(), String> {
     let client = http_client();
-    client
+    match client
         .put(format!("{API}/me/player"))
         .bearer_auth(token)
         .json(&serde_json::json!({ "device_ids": [device_id], "play": play }))
         .send()
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+    {
+        Ok(r) if r.status().is_success() => Ok(()),
+        Ok(r) => {
+            let code = r.status().as_u16();
+            let body = r.text().unwrap_or_default();
+            liblog(format!("transfer -> HTTP {code}: {body}"));
+            Err(format!("HTTP {code}"))
+        }
+        Err(e) => {
+            liblog(format!("transfer failed: {e}"));
+            Err("network error".to_string())
+        }
+    }
 }
 
 /// Boot restore: read the live playback state, transfer it onto myx (retrying
@@ -3368,7 +3442,7 @@ fn spawn_restore(webapi: Arc<Mutex<WebApi>>, device_id: String, tx: flume::Sende
         };
         // Retry the transfer — the Connect device can take a moment to appear.
         for _ in 0..6 {
-            if transfer_playback(&token, &device_id, false) {
+            if transfer_playback(&token, &device_id, false).is_ok() {
                 break;
             }
             std::thread::sleep(Duration::from_secs(1));
@@ -3478,6 +3552,51 @@ fn render(f: &mut Frame, app: &mut App) {
 
     if app.actions.is_some() {
         render_actions_overlay(f, app, theme, area);
+    }
+}
+
+/// Blank `area` and force it out to the terminal, erasing an inline image.
+///
+/// `ratatui-image` marks the image's cells `Skip` without changing their
+/// symbols, and a blank cell compares equal to the blank that was already there
+/// — so an ordinary `Clear` writes nothing and the picture survives it.
+/// `AlwaysUpdate` is what makes the diff emit them anyway.
+fn wipe_area(f: &mut Frame, area: Rect) {
+    let buf = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.reset();
+                cell.set_diff_option(CellDiffOption::AlwaysUpdate);
+            }
+        }
+    }
+}
+
+/// Keep the terminal's own pixels in `area` by telling the diff to leave those
+/// cells alone — what `ratatui-image` does for the image it just drew, without
+/// drawing it again.
+fn hold_area(f: &mut Frame, area: Rect) {
+    let buf = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_diff_option(CellDiffOption::Skip);
+            }
+        }
+    }
+}
+
+/// Force whatever is already in `area` out to the terminal, so an overlay lands
+/// on top of an inline image instead of being skipped over it.
+fn force_area(f: &mut Frame, area: Rect) {
+    let buf = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_diff_option(CellDiffOption::AlwaysUpdate);
+            }
+        }
     }
 }
 
@@ -3798,11 +3917,20 @@ fn render_nowplaying_view(f: &mut Frame, app: &mut App, theme: Theme, area: Rect
         height: art_h,
     };
 
+    let repaint = app.art_repaint;
     match app.now.as_mut().and_then(|n| n.cover.as_mut()) {
-        Some(cover) => cover.render(f, art_rect),
-        // No art to draw over the cells another view left behind. They are only
-        // ever written by the image widget, so wipe them explicitly.
-        None => f.render_widget(Clear, art_rect),
+        _ if repaint == ArtRepaint::Wipe => wipe_area(f, art_rect),
+        // Writing the escape means transmitting the image, so only do it when
+        // something actually asked for it. A theme fade repaints every glyph on
+        // screen dozens of times, and re-sending the cover on each of those is
+        // what made it flicker.
+        Some(cover) if repaint == ArtRepaint::Draw || cover.needs_send(art_rect) => {
+            cover.render(f, art_rect)
+        }
+        // Already on screen: hold the cells so nothing overwrites the picture,
+        // and send nothing.
+        Some(_) => hold_area(f, art_rect),
+        None => wipe_area(f, art_rect),
     }
 
     if let Some(n) = app.now.as_ref() {
@@ -3852,7 +3980,8 @@ fn center_v(area: Rect, height: u16) -> Rect {
 fn render_now_strip(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
 
-    // Volume meter (top row, far right).
+    // Volume meter (top row, far right). Still honest in remote mode: +/- goes
+    // to the remote device's volume.
     render_volume(f, app, theme, rows[0]);
 
     // Seek/progress bar (bottom row). Record bar geometry for click-to-seek.
@@ -4121,45 +4250,49 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let key = |k: &'static str| Span::styled(k, Style::default().fg(theme.primary.into()));
     let lbl = |t: &'static str| Span::styled(t, theme.muted());
     let enter_lbl = enter_label(app.cur_items().get(app.selected));
-    let line = Line::from(vec![
-        key("⇥"),
-        lbl(" section   "),
-        key("←→"),
-        lbl(" view   "),
-        key("/"),
-        lbl(" search   "),
-        key("⏎"),
-        Span::styled(format!(" {enter_lbl}   "), theme.muted()),
-        key("⇧⏎"),
-        lbl(" play   "),
-        key("S"),
-        lbl(" shuffle   "),
-        key("␣"),
-        Span::styled(
-            if app.now.as_ref().is_some_and(|n| n.is_playing) {
-                " pause   "
-            } else {
-                " play    "
-            },
-            theme.muted(),
+    let play_lbl = if app.now.as_ref().is_some_and(|n| n.is_playing) {
+        " pause   "
+    } else {
+        " play    "
+    };
+    // Flagged hints go with the library pane, which zen hides — a key that does
+    // nothing must not be advertised.
+    let hints = [
+        (true, key("⇥"), lbl(" section   ")),
+        (false, key("←→"), lbl(" view   ")),
+        (true, key("/"), lbl(" search   ")),
+        (
+            true,
+            key("⏎"),
+            Span::styled(format!(" {enter_lbl}   "), theme.muted()),
         ),
-        key("n/b"),
-        lbl(" skip   "),
-        key("⇧←→"),
-        lbl(" seek   "),
-        key("o"),
-        lbl(" sort   "),
-        key("+/-"),
-        lbl(" vol   "),
-        Span::styled("s", Style::default().fg(on(app.shuffle).into())),
-        lbl(" shuffle   "),
-        key("a"),
-        lbl(" actions   "),
-        Span::styled("z", Style::default().fg(on(app.zen).into())),
-        lbl(" zen   "),
-        key("q"),
-        lbl(" quit"),
-    ]);
+        (true, key("⇧⏎"), lbl(" play   ")),
+        (true, key("S"), lbl(" shuffle   ")),
+        (false, key("␣"), Span::styled(play_lbl, theme.muted())),
+        (false, key("n/b"), lbl(" skip   ")),
+        (false, key("⇧←→"), lbl(" seek   ")),
+        (true, key("o"), lbl(" sort   ")),
+        (false, key("+/-"), lbl(" vol   ")),
+        (
+            false,
+            Span::styled("s", Style::default().fg(on(app.shuffle).into())),
+            lbl(" shuffle   "),
+        ),
+        (false, key("a"), lbl(" actions   ")),
+        (
+            false,
+            Span::styled("z", Style::default().fg(on(app.zen).into())),
+            lbl(" zen   "),
+        ),
+        (false, key("q"), lbl(" quit")),
+    ];
+    let line = Line::from(
+        hints
+            .into_iter()
+            .filter(|(needs_library, ..)| !needs_library || !app.zen)
+            .flat_map(|(_, k, label)| [k, label])
+            .collect::<Vec<_>>(),
+    );
     f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
 
@@ -4209,6 +4342,7 @@ fn render_actions_overlay(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         }
     }
     f.render_widget(Paragraph::new(lines), inner);
+    force_area(f, rect);
 }
 
 fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
@@ -4857,6 +4991,54 @@ mod nav_tests {
         assert_eq!(scrub_target(0, 0, -5_000), 0);
     }
 
+    // -------------------------------------------------------- drives_library
+
+    #[test]
+    fn zen_ignores_the_keys_that_only_move_the_hidden_library() {
+        for code in [
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Enter,
+            KeyCode::Char('j'),
+            KeyCode::Char('/'),
+            KeyCode::Char('o'),
+        ] {
+            assert!(drives_library(code), "{code:?} only drives the library");
+        }
+    }
+
+    #[test]
+    fn zen_keeps_playback_and_the_right_hand_pane() {
+        for code in [
+            KeyCode::Char(' '),
+            KeyCode::Char('n'),
+            KeyCode::Char('b'),
+            KeyCode::Char('s'),
+            KeyCode::Char('z'),
+            KeyCode::Char('q'),
+            KeyCode::Left,
+            KeyCode::Right,
+            // Retargets onto the playing track rather than going quiet.
+            KeyCode::Char('a'),
+        ] {
+            assert!(!drives_library(code), "{code:?} must still work in zen");
+        }
+    }
+
+    // ---------------------------------------------------------- ArtRepaint
+
+    #[test]
+    fn a_forced_repaint_blanks_the_box_before_redrawing_it() {
+        // The wipe is the whole mechanism: re-encoding is byte-identical for
+        // sixel and iTerm2, so a blank frame is the only thing the diff will
+        // emit — and it takes the overlay's leftovers with it.
+        assert_eq!(ArtRepaint::Wipe.advance(), ArtRepaint::Draw);
+        assert_eq!(ArtRepaint::Draw.advance(), ArtRepaint::Idle);
+        assert_eq!(ArtRepaint::Idle.advance(), ArtRepaint::Idle);
+    }
+
     // ----------------------------------------------------------- should_draw
 
     #[test]
@@ -4881,6 +5063,14 @@ mod nav_tests {
     fn animation_redraws_between_the_two() {
         assert!(should_draw(false, true, ANIM_FRAME));
         assert!(!should_draw(false, true, MIN_FRAME));
+    }
+
+    #[test]
+    fn a_fade_is_long_enough_to_be_smooth_at_the_animation_rate() {
+        // Smoothness has to come from duration, not frame rate: every present
+        // recomposes the viewport and the inline cover shimmers at 60fps.
+        let steps = FADE_MS / ANIM_FRAME.as_millis() as u64;
+        assert!(steps >= 30, "only {steps} steps of recolour");
     }
 }
 

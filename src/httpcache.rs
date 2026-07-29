@@ -12,6 +12,7 @@
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -107,8 +108,13 @@ pub fn put_bytes(url: &str, bytes: &[u8]) {
 /// Write via a temporary file and rename, so a kill mid-write can't leave a
 /// truncated entry behind — image bytes never expire, and a corrupt one would
 /// mean a cover that stays broken forever.
+///
+/// The temp name carries a counter because two library threads can fetch the
+/// same URL at once; sharing one scratch file would interleave their writes into
+/// a corrupt entry that then never expires.
 fn write_atomic(path: &Path, bytes: &[u8]) {
-    let tmp = path.with_extension("tmp");
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!("{}.tmp", SEQ.fetch_add(1, Ordering::Relaxed)));
     if fs::write(&tmp, bytes).is_ok() && fs::rename(&tmp, path).is_err() {
         let _ = fs::remove_file(&tmp);
     }
