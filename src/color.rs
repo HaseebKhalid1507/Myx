@@ -84,11 +84,22 @@ pub fn vibrance(c: Rgb) -> f32 {
     h.s * l_penalty.max(0.0)
 }
 
+/// Below this saturation a colour has no meaningful hue: `rgb_to_hsl` reports 0
+/// for every grey, and 0 is red.
+pub const ACHROMATIC: f32 = 0.12;
+
 /// Clamp a color into a range that reads cleanly as a foreground on a dark
 /// surface: bright enough to pop, saturated enough to feel intentional.
 pub fn for_dark_fg(c: Rgb) -> Rgb {
     let h = rgb_to_hsl(c);
-    hsl_to_rgb(Hsl::new(h.h, h.s.clamp(0.45, 0.95), h.l.clamp(0.58, 0.76)))
+    // Raising the floor on a grey would invent a hue it never had, turning a
+    // black-and-white cover into a red one.
+    let s = if h.s < ACHROMATIC {
+        h.s
+    } else {
+        h.s.clamp(0.45, 0.95)
+    };
+    hsl_to_rgb(Hsl::new(h.h, s, h.l.clamp(0.58, 0.76)))
 }
 
 /// Build a color from a base hue with explicit saturation & lightness. The

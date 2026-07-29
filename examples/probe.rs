@@ -52,6 +52,8 @@ async fn main() -> anyhow::Result<()> {
                     EngineEvent::Paused { uri, position_ms } => println!("⏸ paused    {uri} @ {position_ms}ms"),
                     EngineEvent::EndOfTrack { uri } => println!("⏹ end       {uri}"),
                     EngineEvent::Stopped => println!("⏹ stopped"),
+                    EngineEvent::Reconnecting => println!("⟳ access point lost, reconnecting"),
+                    EngineEvent::Reconnected => println!("⟳ reconnected"),
                     EngineEvent::PositionCorrection { uri, position_ms } => {
                         println!("↔ position  {uri} @ {position_ms}ms")
                     }

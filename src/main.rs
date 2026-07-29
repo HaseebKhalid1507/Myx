@@ -16,9 +16,11 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
+    EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::CellDiffOption;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -41,7 +43,7 @@ use souvlaki::{
 };
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
-const FADE_MS: u64 = 300;
+const FADE_MS: u64 = 1500;
 
 /// How far one Shift+arrow press moves the playhead.
 const SEEK_STEP_MS: i64 = 5_000;
@@ -55,20 +57,57 @@ fn scrub_target(from_ms: u32, duration_ms: u32, delta_ms: i64) -> u32 {
     (from_ms as i64 + delta_ms).clamp(0, duration_ms as i64) as u32
 }
 
-/// Frames to force a full repaint for after the album art changes.
+/// What the album art box owes the next frame.
 ///
-/// `ratatui-image` packs the entire encoded image into a single cell's symbol,
-/// and ratatui writes a cell only when it differs from the previous frame — so a
-/// new cover is transmitted exactly once. Terminals never acknowledge an inline
-/// image, and if that single write is dropped the symbol never changes again,
-/// leaving the previous track's art on screen indefinitely. Clearing invalidates
-/// the previous buffer so the same image gets written again; two frames allows
-/// one retry, costing two extra repaints per track change.
-const ART_REPAINTS: u8 = 2;
+/// `ratatui-image` puts the whole image in one cell's symbol and marks the rest
+/// of the box `Skip`, which the diff never touches again — so leftovers stay,
+/// and a re-encode is byte-identical for sixel and iTerm2 and gets discarded.
+/// Blanking the box for one frame is the only change the diff will emit, and it
+/// makes the image that follows one too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtRepaint {
+    /// The box holds what it should.
+    Idle,
+    /// Blank the box this frame.
+    Wipe,
+    /// Draw the art; the wipe has gone out.
+    Draw,
+}
 
-/// How often the cover is re-sent anyway. tmux only forwards focus changes with
-/// `focus-events on`, so without a timer the art stays gone after a window switch.
-const ART_RESEND: Duration = Duration::from_secs(2);
+impl ArtRepaint {
+    fn advance(self) -> Self {
+        match self {
+            Self::Wipe => Self::Draw,
+            _ => Self::Idle,
+        }
+    }
+}
+
+/// Ceiling on the redraw rate: one frame per ~60Hz terminal refresh.
+const MIN_FRAME: Duration = Duration::from_millis(16);
+/// Redraw rate while the visualizer or a theme fade is running.
+const ANIM_FRAME: Duration = Duration::from_millis(33);
+/// Redraw rate when nothing changed — enough to keep the clock and progress bar
+/// honest without repainting an identical frame 60 times a second.
+const IDLE_REDRAW: Duration = Duration::from_millis(500);
+/// How often the live queue is re-fetched and the session persisted.
+const SYNC_EVERY: Duration = Duration::from_secs(24);
+
+/// Whether this frame is worth drawing.
+///
+/// Input beats animation beats the idle clock. Smoothness of the recolour comes
+/// from its duration, not from the frame rate: every present makes the terminal
+/// recompose the viewport, and the inline cover shimmers if that happens 60
+/// times a second.
+fn should_draw(dirty: bool, animating: bool, since_last: Duration) -> bool {
+    if dirty {
+        since_last >= MIN_FRAME
+    } else if animating {
+        since_last >= ANIM_FRAME
+    } else {
+        since_last >= IDLE_REDRAW
+    }
+}
 
 // ------------------------------------------------------------------ model
 
@@ -469,17 +508,13 @@ struct App {
     details: Vec<Detail>,
     // Context actions menu overlay (opened with `a`).
     actions: Option<ActionMenu>,
-    // A last-played track URI to re-enrich (cover/theme/lyrics) on boot.
     restore_uri: Option<String>,
     // Track URI whose metadata was last requested. Fetches run on separate
     // blocking tasks and can land out of order when skipping quickly, so a
     // reply for any other track is stale and must be dropped.
     pending_meta: Option<String>,
-    // Blank plate drawn while a cover loads, cached alongside the colour it was
-    // built for so a theme change rebuilds it but an ordinary redraw does not.
-    // Frames still owed a forced repaint because the album art changed. See
-    // ART_REPAINTS — an inline image is written once and never retried.
-    art_dirty: u8,
+    // What the album art box owes the next frame. See ArtRepaint.
+    art_repaint: ArtRepaint,
     // Whether real playback has started this session (gates resume-on-play).
     playback_started: bool,
     // Whether we reclaimed a live server-side session (vs. local fallback).
@@ -747,8 +782,8 @@ impl App {
 
 // ------------------------------------------------------------------ main
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    install_librespot_log();
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Refuse to start a second instance — two myx's racing on the shared Web API
@@ -778,7 +813,26 @@ async fn main() -> Result<()> {
         init_terminal,
     )?;
 
-    let res = boot(&mut terminal, saved, init_vol, creds, webapi).await;
+    // Query the terminal for its graphics protocol before anything else is
+    // running: picking sixel swaps `TERM` around the query, and `setenv` is only
+    // safe without concurrent readers. Hence the hand-built runtime below rather
+    // than `#[tokio::main]`, which would already have spawned its workers by the
+    // time this line ran.
+    let picker = Cover::make_picker(myx::config::get().protocol.as_deref());
+    // Halfblocks here means the graphics query got no answer — the art will look
+    // like a 25×26 mosaic. MYX_PROTOCOL overrides it.
+    liblog(format!(
+        "cover: {:?}, font {:?}",
+        picker.protocol_type(),
+        picker.font_size()
+    ));
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .context("start tokio runtime")?;
+    let res = runtime.block_on(boot(&mut terminal, saved, init_vol, creds, webapi, picker));
     restore_terminal(&mut terminal)?;
     res
 }
@@ -808,6 +862,7 @@ async fn boot(
     init_vol: u8,
     creds: librespot_core::authentication::Credentials,
     webapi: WebApi,
+    picker: Picker,
 ) -> Result<()> {
     let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
     let engine = with_loader(
@@ -823,8 +878,6 @@ async fn boot(
     if let Some(uri) = std::env::args().nth(1) {
         let _ = engine.play_context(uri, false);
     }
-
-    let picker = Cover::make_picker();
 
     // Rebuild the last now-playing (paused) for a seamless resume look.
     let now = saved.last_played.as_ref().map(|last_played| NowPlaying {
@@ -902,7 +955,7 @@ async fn boot(
         actions: None,
         restore_uri,
         pending_meta: None,
-        art_dirty: 0,
+        art_repaint: ArtRepaint::Idle,
         playback_started: false,
         reclaimed: false,
         source: saved.source.clone(),
@@ -998,7 +1051,6 @@ async fn run_ui(
     }
     let mut media_events_open = true;
 
-    let mut frame_count: u64 = 0;
     let mut lib_attempts: u32 = 0;
     // A persistent interval must live OUTSIDE the select loop. Recreating a
     // `sleep()` every loop starves forever when player events are continuously
@@ -1006,11 +1058,15 @@ async fn run_ui(
     // frozen-UI bug.
     let mut frame = tokio::time::interval(Duration::from_millis(16));
     frame.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut last_draw = Instant::now() - Duration::from_millis(100);
-    let mut last_art_resend = Instant::now();
+    let mut last_draw = Instant::now() - IDLE_REDRAW;
+    let mut last_sync = Instant::now();
+    // Nothing is on screen yet, so the first tick must draw.
+    let mut dirty = true;
+    let mut last_layout = (app.view, app.zen);
+    let mut overlay_open = app.actions.is_some();
 
     loop {
-        tokio::select! {
+        let touched = tokio::select! {
             biased;
             _ = frame.tick() => {
                 app.flush_seek(Instant::now());
@@ -1019,6 +1075,7 @@ async fn run_ui(
                 // stream / 60fps visualizer — which looked like a frozen library.
                 while let Ok((section, mut items)) = lib_rx.try_recv() {
                     let count = items.len();
+                    dirty = true;
                     liblog(format!("ui: received {} rows for {}", count, section.label()));
                     for (i, it) in items.iter_mut().enumerate() {
                         it.order = i as u32;
@@ -1031,6 +1088,7 @@ async fn run_ui(
                     app.status = format!("loaded {}", section.label());
                 }
                 while let Ok(got_any) = libdone_rx.try_recv() {
+                    dirty = true;
                     if got_any {
                         lib_attempts = 0;
                         app.status.clear();
@@ -1046,6 +1104,7 @@ async fn run_ui(
                 // same reason as the library: under the biased 16ms frame tick a
                 // pure recv arm starves and the station never plays.
                 while let Ok(rad) = radio_rx.try_recv() {
+                    dirty = true;
                     match rad {
                         Ok(radio) if !radio.uris.is_empty() => {
                             if let Err(e) = app.engine.play_tracks(radio.uris, None, radio.start_position_ms, false) {
@@ -1070,30 +1129,49 @@ async fn run_ui(
                     }
                 }
 
+                // The visualizer only animates while it is on screen; on Queue
+                // its frame rate buys nothing. Synced lyrics move too — at the
+                // idle rate the highlighted line lands half a second late.
                 let animating = app.fade.is_some()
-                    || app.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false);
-                let target = Duration::from_millis(if animating { 16 } else { 100 });
-                if app.view == RightView::NowPlaying && last_art_resend.elapsed() >= ART_RESEND {
-                    last_art_resend = Instant::now();
-                    app.art_dirty = app.art_dirty.max(1);
+                    || (app.view == RightView::Lyrics && app.lyrics_synced)
+                    || (app.view == RightView::NowPlaying
+                        && app.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false));
+                if app.art_repaint != ArtRepaint::Idle {
+                    dirty = true;
                 }
-                if last_draw.elapsed() >= target {
-                    advance_fade(&mut app);
-                    // Inline images are written once by ratatui; invalidate so
-                    // the re-encode produces a fresh cell.
-                    if app.art_dirty > 0 {
-                        app.art_dirty -= 1;
-                        if let Some(n) = app.now.as_mut() {
-                            if let Some(c) = n.cover.as_mut() {
-                                c.invalidate_cache();
-                            }
-                        }
+                if (app.view, app.zen) != last_layout {
+                    last_layout = (app.view, app.zen);
+                    app.art_repaint = ArtRepaint::Wipe;
+                    dirty = true;
+                }
+                // An overlay draws over the art and the terminal loses those
+                // pixels, so the cover has to be sent again once it closes.
+                // Opening one must not wipe: the image would be redrawn a frame
+                // later, back on top of the popup.
+                let overlay = app.actions.is_some();
+                if overlay != overlay_open {
+                    overlay_open = overlay;
+                    if !overlay {
+                        app.art_repaint = ArtRepaint::Wipe;
                     }
-                    terminal.draw(|f| render(f, &mut app))?;
-                    last_draw = Instant::now();
-                    frame_count += 1;
+                    dirty = true;
                 }
-                if frame_count > 0 && frame_count.is_multiple_of(240) {
+                if should_draw(dirty, animating, last_draw.elapsed()) {
+                    advance_fade(&mut app);
+                    // Present the frame atomically. Without this the terminal
+                    // renders whatever has arrived so far, and a recolour that
+                    // touches every glyph on screen shows up half-applied.
+                    // Terminals that don't know the mode ignore it.
+                    let _ = execute!(io::stdout(), BeginSynchronizedUpdate);
+                    let drawn = terminal.draw(|f| render(f, &mut app));
+                    let _ = execute!(io::stdout(), EndSynchronizedUpdate);
+                    drawn?;
+                    app.art_repaint = app.art_repaint.advance();
+                    last_draw = Instant::now();
+                    dirty = false;
+                }
+                if last_sync.elapsed() >= SYNC_EVERY {
+                    last_sync = Instant::now();
                     // Refresh the live queue while playing so the snapshot stays
                     // current, then persist it (survives reboot).
                     if app.playback_started || app.reclaimed {
@@ -1101,10 +1179,12 @@ async fn run_ui(
                     }
                     save_state(&app);
                 }
+                false
             }
             ev = ev_rx.recv_async() => {
                 let Ok(ev) = ev else { break };
                 handle_engine_event(&mut app, ev, &meta_tx);
+                true
             }
             ev = in_rx.recv_async() => {
                 match ev {
@@ -1240,17 +1320,18 @@ async fn run_ui(
                             }
                             _ => {}
                         }
-                        // Force immediate redraw so the volume meter updates without
-                        // waiting for the next 100ms idle tick.
-                        last_draw = Instant::now() - Duration::from_millis(200);
                     }
                     // A repaint from the terminal's own buffer loses inline art.
+                    // A repaint from the terminal's own buffer loses inline art;
+                    // returning to the window is when it has to go back out.
+                    // tmux only forwards focus with `focus-events on` — see the
+                    // README — and stores sixel itself either way.
                     Ok(Event::Resize(..)) | Ok(Event::FocusGained) => {
-                        app.art_dirty = ART_REPAINTS;
-                        last_draw = Instant::now() - Duration::from_millis(200);
+                        app.art_repaint = ArtRepaint::Wipe;
                     }
                     _ => {}
                 }
+                true
             }
             ev = souvlaki_rx.recv_async(), if media_events_open => {
                 match consume_media_event(ev, &mut media_events_open) {
@@ -1260,9 +1341,11 @@ async fn run_ui(
                         liblog("media controls event channel closed; native integration disabled");
                     }
                 }
+                true
             }
             m = meta_rx.recv_async() => {
                 if let Ok(meta) = m { apply_meta(&mut app, meta, &lyrics_tx); }
+                true
             }
             q = queue_rx.recv_async() => {
                 // Don't let an empty live queue (e.g. a bare resumed track) wipe
@@ -1273,6 +1356,7 @@ async fn run_ui(
                         app.queue_uris = q.into_iter().map(|(_, u)| u).collect();
                     }
                 }
+                true
             }
             s = search_rx.recv_async() => {
                 if let Ok(results) = s {
@@ -1284,12 +1368,14 @@ async fn run_ui(
                         String::new()
                     };
                 }
+                true
             }
             ly = lyrics_rx.recv_async() => {
                 if let Ok((lines, synced)) = ly {
                     app.lyrics = lines;
                     app.lyrics_synced = synced;
                 }
+                true
             }
             d = detail_rx.recv_async() => {
                 if let Ok((context_uri, title, items)) = d {
@@ -1297,6 +1383,7 @@ async fn run_ui(
                     app.selected = app.first_selectable();
                     app.status.clear();
                 }
+                true
             }
             menu = menu_rx.recv_async() => {
                 if let Ok(mut menu) = menu {
@@ -1309,9 +1396,11 @@ async fn run_ui(
                         app.actions = Some(menu);
                     }
                 }
+                true
             }
             st = astatus_rx.recv_async() => {
                 if let Ok(msg) = st { app.status = msg; }
+                true
             }
             ps = pstate_rx.recv_async() => {
                 if let Ok(state) = ps {
@@ -1338,8 +1427,10 @@ async fn run_ui(
                     tokio::task::spawn_blocking(move || { let _ = tx.send(fetch_track_meta(&webapi, &id)); });
                     spawn_queue_fetch(app.webapi.clone(), queue_tx.clone());
                 }
+                true
             }
-        }
+        };
+        dirty |= touched;
     }
     Ok(())
 }
@@ -1507,6 +1598,13 @@ fn handle_key(
         return false;
     }
 
+    // Zen hides the library, so the keys that drive one do nothing rather than
+    // moving a selection nobody can see. Placed after the overlays above, which
+    // stay usable if one was already open when zen came on.
+    if app.zen && drives_library(code) {
+        return false;
+    }
+
     match code {
         KeyCode::Char('/') => {
             app.input_mode = true;
@@ -1584,7 +1682,17 @@ fn handle_key(
             app.status = format!("sorted by {}", m.label());
         }
         KeyCode::Char('a') => {
-            let item = app.cur_items().get(app.selected).cloned();
+            // Zen hides the library, so the menu belongs to what is playing —
+            // acting on a selection nobody can see is how it ends up offering
+            // "remove from Liked" for the wrong track.
+            let item = if app.zen {
+                app.now
+                    .as_ref()
+                    .filter(|n| !n.uri.is_empty())
+                    .map(|n| LibItem::track(n.title.clone(), n.artist.clone(), n.uri.clone()))
+            } else {
+                app.cur_items().get(app.selected).cloned()
+            };
             if let Some(item) = item {
                 if !item.is_header && !item.is_play {
                     // Instant menu (no network), then enrich when the API returns.
@@ -1619,10 +1727,8 @@ fn handle_key(
                 spawn_queue_fetch(app.webapi.clone(), queue_tx.clone());
             }
         }
-        KeyCode::Char('z') => {
-            app.zen = !app.zen;
-            app.art_dirty = ART_REPAINTS;
-        }
+        // The frame loop notices the layout change and wipes the art box.
+        KeyCode::Char('z') => app.zen = !app.zen,
         KeyCode::Down | KeyCode::Char('j') => app.move_sel(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_sel(-1),
         // Needs a terminal that reports modified Enter (kitty, WezTerm, foot).
@@ -1658,6 +1764,24 @@ fn handle_key(
         _ => {}
     }
     false
+}
+
+/// Keys whose whole effect is on the library pane.
+///
+/// Zen hides that pane, so these do nothing there rather than moving a selection
+/// nobody can see — and `a` is deliberately absent, because it retargets onto
+/// the playing track instead of going quiet.
+fn drives_library(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Enter
+            | KeyCode::Esc
+            | KeyCode::Char('/' | '[' | ']' | 'j' | 'k' | 'o' | 'r' | 'P' | 'S')
+    )
 }
 
 fn consume_media_event<T>(event: Result<T, flume::RecvError>, open: &mut bool) -> Option<T> {
@@ -1909,7 +2033,7 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
             if let Some(v) = client
                 .as_ref()
                 .zip(token)
-                .and_then(|(c, t)| get_json(c, &format!("{API}/tracks/{id}"), t))
+                .and_then(|(c, t)| get_json_cached(c, &format!("{API}/tracks/{id}"), t))
             {
                 if let (Some(au), Some(an)) = (
                     v["artists"][0]["uri"].as_str(),
@@ -2003,7 +2127,7 @@ fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMenu {
             if let Some(v) = client
                 .as_ref()
                 .zip(token)
-                .and_then(|(c, t)| get_json(c, &format!("{API}/albums/{id}"), t))
+                .and_then(|(c, t)| get_json_cached(c, &format!("{API}/albums/{id}"), t))
             {
                 if let (Some(au), Some(an)) = (
                     v["artists"][0]["uri"].as_str(),
@@ -2246,6 +2370,10 @@ fn advance_fade(app: &mut App) {
 }
 
 fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<TrackMeta>) {
+    // Position ticks would bury everything else in the log.
+    if !matches!(ev, EngineEvent::PositionCorrection { .. }) {
+        liblog(format!("engine: {ev:?}"));
+    }
     match ev {
         EngineEvent::TrackChanged { uri } => {
             app.status = "loading track…".to_string();
@@ -2292,6 +2420,9 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
         EngineEvent::Stopped => {
             app.now = None;
             app.playback_started = false;
+            // librespot cleared its context too, so only a fresh load can
+            // resume from here — not a bare `play`.
+            app.reclaimed = false;
 
             if let Some(controls) = app.media_controls.as_mut() {
                 let _ = controls.set_playback(MediaPlayback::Stopped);
@@ -2311,6 +2442,19 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
                 };
                 let _ = controls.set_playback(playback);
             }
+        }
+        EngineEvent::Reconnecting => {
+            app.status = "connection dropped — reconnecting…".to_string();
+        }
+        EngineEvent::Reconnected => {
+            // The replacement Connect device starts idle, so whatever was
+            // playing is not resumed; say so rather than leave a silent player
+            // looking broken.
+            app.status = if app.playback_started {
+                "reconnected — press play to resume".to_string()
+            } else {
+                "reconnected".to_string()
+            };
         }
         EngineEvent::EndOfTrack { .. } => {}
     }
@@ -2343,8 +2487,9 @@ fn apply_meta(
         .image
         .as_ref()
         .map(|img| Cover::from_image(img.clone(), app.picker.clone()));
-    // New art to transmit — see ART_REPAINTS.
-    app.art_dirty = ART_REPAINTS;
+    // A different cover encodes to a different symbol, so the diff emits it on
+    // its own — no wipe, which would flash a blank box between the two covers.
+    app.art_repaint = ArtRepaint::Draw;
     app.status.clear();
     app.lyrics.clear();
     app.lyrics_synced = false;
@@ -2401,6 +2546,45 @@ fn apply_meta(
 
 /// Temporary-but-useful diagnostics for startup/library failures. Kept out of
 /// the TUI because alternate-screen rendering hides stderr.
+/// Forwards librespot's own `log` output into `myx.log`. Its Connect
+/// diagnostics are the only account of why the device went inactive, and
+/// without a logger installed they go nowhere.
+struct LibrespotLog;
+
+impl log::Log for LibrespotLog {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+    fn log(&self, record: &log::Record) {
+        liblog(format!(
+            "{} {}: {}",
+            record.level(),
+            record.target(),
+            record.args()
+        ));
+    }
+    fn flush(&self) {}
+}
+
+/// Any value of `MYX_LOG` turns logging on; the value only picks how loud
+/// librespot is. `debug`/`trace` open it up, `warn` quiets it back down.
+fn install_librespot_log() {
+    let Ok(level) = std::env::var("MYX_LOG") else {
+        return;
+    };
+    let filter = match level.to_ascii_lowercase().as_str() {
+        "trace" => log::LevelFilter::Trace,
+        "debug" => log::LevelFilter::Debug,
+        "warn" => log::LevelFilter::Warn,
+        // Connect names its own faults at info ("device became inactive");
+        // warn shows only the fallout.
+        _ => log::LevelFilter::Info,
+    };
+    if log::set_boxed_logger(Box::new(LibrespotLog)).is_ok() {
+        log::set_max_level(filter);
+    }
+}
+
 /// Optional debug log — silent unless `MYX_LOG` is set. Writes to
 /// ~/.cache/myx/myx.log (user-owned dir 0700, file 0600) instead of a
 /// world-writable fixed /tmp path (audit H5).
@@ -2500,6 +2684,54 @@ fn get_json(
         return resp.json::<serde_json::Value>().ok();
     }
     None
+}
+
+/// How long a cached catalogue response counts as fresh. Discographies and
+/// track lists change on the order of weeks; a day keeps browsing off the
+/// network without anyone noticing the lag.
+const CATALOGUE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// `get_json` for catalogue reads, served from disk when possible.
+///
+/// On a failed request an expired entry is used rather than nothing — that is
+/// the case that matters, since a spent quota is exactly when the network stops
+/// answering and the artist page would otherwise come up empty.
+fn get_json_cached(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    token: &str,
+) -> Option<serde_json::Value> {
+    if let Some(body) = myx::httpcache::get(url, Some(CATALOGUE_TTL)) {
+        return serde_json::from_str(&body).ok();
+    }
+    match get_json(client, url, token) {
+        Some(v) => {
+            myx::httpcache::put(url, &v.to_string());
+            Some(v)
+        }
+        None => {
+            let stale = myx::httpcache::get(url, None)?;
+            liblog(format!("api: {url} failed; serving cached copy"));
+            serde_json::from_str(&stale).ok()
+        }
+    }
+}
+
+/// Album art bytes, from disk when they've been seen before.
+fn fetch_cover(client: &reqwest::blocking::Client, url: &str) -> Option<Vec<u8>> {
+    if let Some(bytes) = myx::httpcache::get_bytes(url) {
+        return Some(bytes);
+    }
+    let resp = client.get(url).send().ok()?;
+    // An error page cached as image bytes would be a permanently broken cover:
+    // the entry never expires, because the URL only changes with the picture.
+    if !resp.status().is_success() {
+        liblog(format!("cover: {url} -> HTTP {}", resp.status().as_u16()));
+        return None;
+    }
+    let bytes = resp.bytes().ok()?.to_vec();
+    myx::httpcache::put_bytes(url, &bytes);
+    Some(bytes)
 }
 
 /// Fetch the library incrementally: fast sections first, Liked streamed in
@@ -2811,7 +3043,7 @@ fn fetch_track_meta(webapi: &Arc<Mutex<WebApi>>, track_id: &str) -> TrackMeta {
         return empty();
     };
     let client = http_client();
-    let Some(v) = get_json(&client, &format!("{API}/tracks/{track_id}"), &token) else {
+    let Some(v) = get_json_cached(&client, &format!("{API}/tracks/{track_id}"), &token) else {
         return empty();
     };
 
@@ -2821,10 +3053,10 @@ fn fetch_track_meta(webapi: &Arc<Mutex<WebApi>>, track_id: &str) -> TrackMeta {
     let duration_ms = v["duration_ms"].as_u64().unwrap_or(0) as u32;
     let cover_url = v["album"]["images"][0]["url"].as_str().map(String::from);
 
-    let image = cover_url.clone().and_then(|u| {
-        let bytes = client.get(u).send().ok()?.bytes().ok()?;
-        image::load_from_memory(&bytes).ok()
-    });
+    let image = cover_url
+        .clone()
+        .and_then(|u| fetch_cover(&client, &u))
+        .and_then(|bytes| image::load_from_memory(&bytes).ok());
     let theme = image.as_ref().map(|img| derive_theme(img, "album ✦"));
 
     TrackMeta {
@@ -3051,7 +3283,7 @@ fn artist_top_tracks(
         "{API}/search?q={}&type=track&limit=10",
         urlencode(&format!("artist:{name}"))
     );
-    let Some(v) = get_json(client, &url, token) else {
+    let Some(v) = get_json_cached(client, &url, token) else {
         return Vec::new();
     };
     v["tracks"]["items"]
@@ -3087,7 +3319,7 @@ fn artist_albums(client: &reqwest::blocking::Client, token: &str, id: &str) -> V
         if pages >= 3 {
             break; // 30 releases; more pages burn the API quota per drill-in
         }
-        let Some(v) = get_json(client, &u, token) else {
+        let Some(v) = get_json_cached(client, &u, token) else {
             break;
         };
         for a in v["items"].as_array().into_iter().flatten() {
@@ -3141,7 +3373,7 @@ fn fetch_detail_blocking(token: &str, uri: &str, name: &str) -> (String, Vec<Lib
             }
         }
         "album" => {
-            if let Some(v) = get_json(
+            if let Some(v) = get_json_cached(
                 &client,
                 &format!("{API}/albums/{id}/tracks?limit=50"),
                 token,
@@ -3222,15 +3454,27 @@ fn fetch_playback_state(token: &str) -> Option<PlaybackState> {
 
 /// Transfer the current server-side playback onto the myx device (with its full
 /// context + queue + position). `play=false` transfers paused.
-fn transfer_playback(token: &str, device_id: &str, play: bool) -> bool {
+/// `Ok(())` on success, `Err(reason)` with something worth showing otherwise.
+fn transfer_playback(token: &str, device_id: &str, play: bool) -> Result<(), String> {
     let client = http_client();
-    client
+    match client
         .put(format!("{API}/me/player"))
         .bearer_auth(token)
         .json(&serde_json::json!({ "device_ids": [device_id], "play": play }))
         .send()
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+    {
+        Ok(r) if r.status().is_success() => Ok(()),
+        Ok(r) => {
+            let code = r.status().as_u16();
+            let body = r.text().unwrap_or_default();
+            liblog(format!("transfer -> HTTP {code}: {body}"));
+            Err(format!("HTTP {code}"))
+        }
+        Err(e) => {
+            liblog(format!("transfer failed: {e}"));
+            Err("network error".to_string())
+        }
+    }
 }
 
 /// Boot restore: read the live playback state, transfer it onto myx (retrying
@@ -3245,7 +3489,7 @@ fn spawn_restore(webapi: Arc<Mutex<WebApi>>, device_id: String, tx: flume::Sende
         };
         // Retry the transfer — the Connect device can take a moment to appear.
         for _ in 0..6 {
-            if transfer_playback(&token, &device_id, false) {
+            if transfer_playback(&token, &device_id, false).is_ok() {
                 break;
             }
             std::thread::sleep(Duration::from_secs(1));
@@ -3355,6 +3599,51 @@ fn render(f: &mut Frame, app: &mut App) {
 
     if app.actions.is_some() {
         render_actions_overlay(f, app, theme, area);
+    }
+}
+
+/// Blank `area` and force it out to the terminal, erasing an inline image.
+///
+/// `ratatui-image` marks the image's cells `Skip` without changing their
+/// symbols, and a blank cell compares equal to the blank that was already there
+/// — so an ordinary `Clear` writes nothing and the picture survives it.
+/// `AlwaysUpdate` is what makes the diff emit them anyway.
+fn wipe_area(f: &mut Frame, area: Rect) {
+    let buf = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.reset();
+                cell.set_diff_option(CellDiffOption::AlwaysUpdate);
+            }
+        }
+    }
+}
+
+/// Keep the terminal's own pixels in `area` by telling the diff to leave those
+/// cells alone — what `ratatui-image` does for the image it just drew, without
+/// drawing it again.
+fn hold_area(f: &mut Frame, area: Rect) {
+    let buf = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_diff_option(CellDiffOption::Skip);
+            }
+        }
+    }
+}
+
+/// Force whatever is already in `area` out to the terminal, so an overlay lands
+/// on top of an inline image instead of being skipped over it.
+fn force_area(f: &mut Frame, area: Rect) {
+    let buf = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_diff_option(CellDiffOption::AlwaysUpdate);
+            }
+        }
     }
 }
 
@@ -3675,8 +3964,20 @@ fn render_nowplaying_view(f: &mut Frame, app: &mut App, theme: Theme, area: Rect
         height: art_h,
     };
 
-    if let Some(cover) = app.now.as_mut().and_then(|n| n.cover.as_mut()) {
-        cover.render(f, art_rect);
+    let repaint = app.art_repaint;
+    match app.now.as_mut().and_then(|n| n.cover.as_mut()) {
+        _ if repaint == ArtRepaint::Wipe => wipe_area(f, art_rect),
+        // Writing the escape means transmitting the image, so only do it when
+        // something actually asked for it. A theme fade repaints every glyph on
+        // screen dozens of times, and re-sending the cover on each of those is
+        // what made it flicker.
+        Some(cover) if repaint == ArtRepaint::Draw || cover.needs_send(art_rect) => {
+            cover.render(f, art_rect)
+        }
+        // Already on screen: hold the cells so nothing overwrites the picture,
+        // and send nothing.
+        Some(_) => hold_area(f, art_rect),
+        None => wipe_area(f, art_rect),
     }
 
     if let Some(n) = app.now.as_ref() {
@@ -3726,7 +4027,8 @@ fn center_v(area: Rect, height: u16) -> Rect {
 fn render_now_strip(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
 
-    // Volume meter (top row, far right).
+    // Volume meter (top row, far right). Still honest in remote mode: +/- goes
+    // to the remote device's volume.
     render_volume(f, app, theme, rows[0]);
 
     // Seek/progress bar (bottom row). Record bar geometry for click-to-seek.
@@ -3995,45 +4297,49 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let key = |k: &'static str| Span::styled(k, Style::default().fg(theme.primary.into()));
     let lbl = |t: &'static str| Span::styled(t, theme.muted());
     let enter_lbl = enter_label(app.cur_items().get(app.selected));
-    let line = Line::from(vec![
-        key("⇥"),
-        lbl(" section   "),
-        key("←→"),
-        lbl(" view   "),
-        key("/"),
-        lbl(" search   "),
-        key("⏎"),
-        Span::styled(format!(" {enter_lbl}   "), theme.muted()),
-        key("⇧⏎"),
-        lbl(" play   "),
-        key("S"),
-        lbl(" shuffle   "),
-        key("␣"),
-        Span::styled(
-            if app.now.as_ref().is_some_and(|n| n.is_playing) {
-                " pause   "
-            } else {
-                " play    "
-            },
-            theme.muted(),
+    let play_lbl = if app.now.as_ref().is_some_and(|n| n.is_playing) {
+        " pause   "
+    } else {
+        " play    "
+    };
+    // Flagged hints go with the library pane, which zen hides — a key that does
+    // nothing must not be advertised.
+    let hints = [
+        (true, key("⇥"), lbl(" section   ")),
+        (false, key("←→"), lbl(" view   ")),
+        (true, key("/"), lbl(" search   ")),
+        (
+            true,
+            key("⏎"),
+            Span::styled(format!(" {enter_lbl}   "), theme.muted()),
         ),
-        key("n/b"),
-        lbl(" skip   "),
-        key("⇧←→"),
-        lbl(" seek   "),
-        key("o"),
-        lbl(" sort   "),
-        key("+/-"),
-        lbl(" vol   "),
-        Span::styled("s", Style::default().fg(on(app.shuffle).into())),
-        lbl(" shuffle   "),
-        key("a"),
-        lbl(" actions   "),
-        Span::styled("z", Style::default().fg(on(app.zen).into())),
-        lbl(" zen   "),
-        key("q"),
-        lbl(" quit"),
-    ]);
+        (true, key("⇧⏎"), lbl(" play   ")),
+        (true, key("S"), lbl(" shuffle   ")),
+        (false, key("␣"), Span::styled(play_lbl, theme.muted())),
+        (false, key("n/b"), lbl(" skip   ")),
+        (false, key("⇧←→"), lbl(" seek   ")),
+        (true, key("o"), lbl(" sort   ")),
+        (false, key("+/-"), lbl(" vol   ")),
+        (
+            false,
+            Span::styled("s", Style::default().fg(on(app.shuffle).into())),
+            lbl(" shuffle   "),
+        ),
+        (false, key("a"), lbl(" actions   ")),
+        (
+            false,
+            Span::styled("z", Style::default().fg(on(app.zen).into())),
+            lbl(" zen   "),
+        ),
+        (false, key("q"), lbl(" quit")),
+    ];
+    let line = Line::from(
+        hints
+            .into_iter()
+            .filter(|(needs_library, ..)| !needs_library || !app.zen)
+            .flat_map(|(_, k, label)| [k, label])
+            .collect::<Vec<_>>(),
+    );
     f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
 
@@ -4083,6 +4389,7 @@ fn render_actions_overlay(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         }
     }
     f.render_widget(Paragraph::new(lines), inner);
+    force_area(f, rect);
 }
 
 fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
@@ -4729,6 +5036,88 @@ mod nav_tests {
         assert_eq!(scrub_target(2_000, 200_000, -5_000), 0);
         assert_eq!(scrub_target(198_000, 200_000, 5_000), 200_000);
         assert_eq!(scrub_target(0, 0, -5_000), 0);
+    }
+
+    // -------------------------------------------------------- drives_library
+
+    #[test]
+    fn zen_ignores_the_keys_that_only_move_the_hidden_library() {
+        for code in [
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Enter,
+            KeyCode::Char('j'),
+            KeyCode::Char('/'),
+            KeyCode::Char('o'),
+        ] {
+            assert!(drives_library(code), "{code:?} only drives the library");
+        }
+    }
+
+    #[test]
+    fn zen_keeps_playback_and_the_right_hand_pane() {
+        for code in [
+            KeyCode::Char(' '),
+            KeyCode::Char('n'),
+            KeyCode::Char('b'),
+            KeyCode::Char('s'),
+            KeyCode::Char('z'),
+            KeyCode::Char('q'),
+            KeyCode::Left,
+            KeyCode::Right,
+            // Retargets onto the playing track rather than going quiet.
+            KeyCode::Char('a'),
+        ] {
+            assert!(!drives_library(code), "{code:?} must still work in zen");
+        }
+    }
+
+    // ---------------------------------------------------------- ArtRepaint
+
+    #[test]
+    fn a_forced_repaint_blanks_the_box_before_redrawing_it() {
+        // The wipe is the whole mechanism: re-encoding is byte-identical for
+        // sixel and iTerm2, so a blank frame is the only thing the diff will
+        // emit — and it takes the overlay's leftovers with it.
+        assert_eq!(ArtRepaint::Wipe.advance(), ArtRepaint::Draw);
+        assert_eq!(ArtRepaint::Draw.advance(), ArtRepaint::Idle);
+        assert_eq!(ArtRepaint::Idle.advance(), ArtRepaint::Idle);
+    }
+
+    // ----------------------------------------------------------- should_draw
+
+    #[test]
+    fn input_redraws_at_the_next_terminal_refresh() {
+        // What made a held arrow key scroll in jerks: the cursor had moved but
+        // the frame was held back until the idle tick came round.
+        assert!(should_draw(true, false, MIN_FRAME));
+        assert!(!should_draw(
+            true,
+            false,
+            MIN_FRAME - Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn an_untouched_screen_redraws_rarely() {
+        assert!(!should_draw(false, false, ANIM_FRAME));
+        assert!(should_draw(false, false, IDLE_REDRAW));
+    }
+
+    #[test]
+    fn animation_redraws_between_the_two() {
+        assert!(should_draw(false, true, ANIM_FRAME));
+        assert!(!should_draw(false, true, MIN_FRAME));
+    }
+
+    #[test]
+    fn a_fade_is_long_enough_to_be_smooth_at_the_animation_rate() {
+        // Smoothness has to come from duration, not frame rate: every present
+        // recomposes the viewport and the inline cover shimmers at 60fps.
+        let steps = FADE_MS / ANIM_FRAME.as_millis() as u64;
+        assert!(steps >= 30, "only {steps} steps of recolour");
     }
 }
 

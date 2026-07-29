@@ -42,10 +42,25 @@ fn nearest_hue(swatches: &[Rgb], target_hue: f32, max_dist: f32) -> Option<Rgb> 
         .map(|(c, _)| for_dark_fg(c))
 }
 
+/// How saturated the palette's most colourful swatch must be for the surface to
+/// take its full tint. Below this the UI slides toward neutral, which is what a
+/// black-and-white cover should actually look like.
+const FULL_TINT_AT: f32 = 0.35;
+
 fn theme_from_swatches(swatches: &[Rgb], name: &'static str) -> Theme {
-    // Dominant swatch (color-thief returns it first) → base hue for the surface.
-    let dominant = swatches[0];
-    let base_hue = rgb_to_hsl(dominant).h;
+    // The dominant swatch is usually the surface hue, but a white or black cover
+    // has no hue at all — `rgb_to_hsl` reports 0 for grey, and 0 is red. Take the
+    // hue from the most saturated swatch that has one instead.
+    let hue_src = swatches
+        .iter()
+        .copied()
+        .max_by(|&a, &b| rgb_to_hsl(a).s.total_cmp(&rgb_to_hsl(b).s))
+        .unwrap_or(swatches[0]);
+    let base_hue = rgb_to_hsl(hue_src).h;
+    // ...and if even that swatch is grey, tint nothing: the art has no colour to
+    // borrow, so the UI stays neutral rather than picking one at random.
+    let tint_strength = (rgb_to_hsl(hue_src).s / FULL_TINT_AT).clamp(0.0, 1.0);
+    let surface = |s: f32, l: f32| color::tint(base_hue, s * tint_strength, l);
 
     // Rank by vibrance for the accent selection.
     let mut ranked: Vec<Rgb> = swatches.to_vec();
@@ -92,16 +107,70 @@ fn theme_from_swatches(swatches: &[Rgb], name: &'static str) -> Theme {
         warning,
         success,
         info,
-        text: color::tint(base_hue, 0.14, 0.93),
-        text_muted: color::tint(base_hue, 0.13, 0.58),
+        text: surface(0.14, 0.93),
+        text_muted: surface(0.13, 0.58),
         // Three background layers, all sharing the album's hue at rising lightness.
-        background: color::tint(base_hue, 0.28, 0.075),
-        background_panel: color::tint(base_hue, 0.26, 0.11),
-        background_element: color::tint(base_hue, 0.22, 0.16),
+        background: surface(0.28, 0.075),
+        background_panel: surface(0.26, 0.11),
+        background_element: surface(0.22, 0.16),
         // Border shades: subtle chrome that still belongs to the palette.
-        border: color::tint(base_hue, 0.16, 0.34),
+        border: surface(0.16, 0.34),
         border_active: primary,
-        border_subtle: color::tint(base_hue, 0.16, 0.24),
-        border_dimmest: color::tint(base_hue, 0.18, 0.17),
+        border_subtle: surface(0.16, 0.24),
+        border_dimmest: surface(0.18, 0.17),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::hue_distance;
+
+    #[test]
+    fn a_greyscale_cover_does_not_come_out_red() {
+        // `rgb_to_hsl` reports hue 0 for every grey, and hue 0 is red — which is
+        // how a black-and-white cover used to tint the whole UI burgundy.
+        let greys = [
+            Rgb::new(250, 250, 250),
+            Rgb::new(18, 18, 18),
+            Rgb::new(128, 128, 130),
+        ];
+        let theme = theme_from_swatches(&greys, "grey");
+        for (what, c) in [
+            ("background", theme.background),
+            ("text", theme.text),
+            ("border", theme.border),
+            ("primary", theme.primary),
+        ] {
+            let s = rgb_to_hsl(c).s;
+            assert!(s < 0.15, "{what} invented a hue: saturation {s}");
+        }
+    }
+
+    #[test]
+    fn a_colourful_cover_keeps_its_hue() {
+        let blues = [
+            Rgb::new(30, 60, 200),
+            Rgb::new(20, 40, 160),
+            Rgb::new(60, 90, 220),
+        ];
+        let theme = theme_from_swatches(&blues, "blue");
+        let bg = rgb_to_hsl(theme.background);
+        assert!(bg.s > 0.15, "colourful art lost its tint: {}", bg.s);
+        assert!(hue_distance(bg.h, 225.0) < 45.0, "hue drifted to {}", bg.h);
+    }
+
+    #[test]
+    fn a_mostly_white_cover_borrows_the_one_colour_it_has() {
+        // A white sleeve with a small coloured mark should take that mark's hue,
+        // not the hue of the white that dominates it.
+        let mostly_white = [
+            Rgb::new(252, 252, 250),
+            Rgb::new(240, 240, 238),
+            Rgb::new(40, 150, 90),
+        ];
+        let theme = theme_from_swatches(&mostly_white, "white");
+        let bg = rgb_to_hsl(theme.background);
+        assert!(hue_distance(bg.h, 150.0) < 45.0, "hue is {}", bg.h);
     }
 }

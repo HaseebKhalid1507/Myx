@@ -12,6 +12,7 @@ pub mod color;
 pub mod components;
 pub mod cover;
 pub mod gradient;
+pub mod httpcache;
 pub mod reactive;
 pub mod theme;
 

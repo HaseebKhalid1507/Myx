@@ -52,7 +52,7 @@ fn main() -> io::Result<()> {
     let mut terminal = init()?;
 
     // Build the image picker *after* raw mode so the terminal query round-trips.
-    let picker = Cover::make_picker();
+    let picker = Cover::make_picker(None);
 
     // Load the cover once, derive a reactive theme from the same pixels, then hand
     // the decoded image to the Cover renderer.

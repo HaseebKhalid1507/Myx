@@ -11,7 +11,7 @@
 
 pub mod auth;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -48,6 +48,11 @@ pub enum EngineEvent {
         position_ms: u32,
     },
     Stopped,
+    /// The access point went away and a replacement connection is being built.
+    Reconnecting,
+    /// Playback control works again. Whatever was playing is not resumed — the
+    /// new Connect device starts idle.
+    Reconnected,
     EndOfTrack {
         uri: String,
     },
@@ -57,21 +62,68 @@ pub enum EngineEvent {
     },
 }
 
-/// A running engine: keep `spirc` alive (dropping it tears down the device), and
-/// read `bands` for the live visualizer.
-pub struct Engine {
-    pub spirc: Spirc,
-    pub bands: Arc<Mutex<VisBands>>,
-    pub player: Arc<Player>,
-    pub mixer: Arc<SoftMixer>,
+/// Everything that dies with the access-point connection.
+///
+/// librespot invalidates the session when its keep-alive ping goes unanswered
+/// and documents that one "cannot yet be reused once invalidated", so coming
+/// back from an idle spell means building a fresh set of these rather than
+/// repairing the old ones.
+struct Link {
+    spirc: Spirc,
+    player: Arc<Player>,
     session: Session,
+}
+
+/// A running engine: keep it alive (dropping it tears down the Connect device),
+/// and read `bands` for the live visualizer.
+pub struct Engine {
+    pub bands: Arc<Mutex<VisBands>>,
+    inner: Arc<Inner>,
+}
+
+/// The half of the engine the reconnect watchdog needs to hold, so it can swap
+/// the connection out from under the `Engine` the UI is using.
+struct Inner {
+    link: Mutex<Arc<Link>>,
+    mixer: Arc<SoftMixer>,
+    bands: Arc<Mutex<VisBands>>,
+    events: flume::Sender<EngineEvent>,
+    /// First-login credentials, used only until librespot has cached reusable
+    /// ones: a first run authenticates with a one-shot OAuth token that a
+    /// relogin hours later would be refused.
+    creds: Credentials,
+}
+
+impl Inner {
+    fn link(&self) -> Arc<Link> {
+        Arc::clone(&self.link.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Whether the access point has gone away and every command would now fail
+    /// with a closed channel.
+    fn is_stale(&self) -> bool {
+        self.link().session.is_invalid()
+    }
+
+    /// Build a replacement connection and swap it in. The dead one is dropped
+    /// afterwards, which stops its player and ends its event bridge.
+    async fn reconnect(&self) -> Result<()> {
+        let fresh = Arc::new(connect(&self.creds, &self.mixer, &self.bands, &self.events).await?);
+        let dead = std::mem::replace(
+            &mut *self.link.lock().unwrap_or_else(PoisonError::into_inner),
+            fresh,
+        );
+        drop(dead);
+        Ok(())
+    }
 }
 
 impl Engine {
     /// Fetch a fresh Web API access token off the librespot session (login5).
     /// Used for track metadata + cover art lookups.
     pub async fn web_token(&self) -> Result<String> {
-        let fut = self.session.login5().auth_token();
+        let session = self.inner.link().session.clone();
+        let fut = session.login5().auth_token();
         let token = tokio::time::timeout(Duration::from_secs(5), fut)
             .await
             .map_err(|_| anyhow!("timed out fetching web token"))?
@@ -79,24 +131,49 @@ impl Engine {
         Ok(token.access_token)
     }
 
+    /// Run a Spirc command, translating the failure that follows a dropped
+    /// access point into something the status line can explain. The watchdog is
+    /// already building a replacement; the key just has to be pressed again.
+    fn command<T>(
+        &self,
+        what: &'static str,
+        f: impl FnOnce(&Spirc) -> Result<T, librespot_core::Error>,
+    ) -> Result<T> {
+        let link = self.inner.link();
+        f(&link.spirc).map_err(|e| {
+            if link.session.is_invalid() {
+                anyhow!("connection dropped — reconnecting, try again in a moment")
+            } else {
+                anyhow!("{what}: {e}")
+            }
+        })
+    }
+
+    /// A [`Self::command`] that first reclaims the active-device role, which
+    /// Spotify revokes from an idle paused device. Once revoked, librespot
+    /// discards every other command; `Activate` is the one it still honours,
+    /// and it no-ops when we are already active. Volume stays out of here — it
+    /// must never yank playback off whatever device actually holds it.
+    fn active_command<T>(
+        &self,
+        what: &'static str,
+        f: impl FnOnce(&Spirc) -> Result<T, librespot_core::Error>,
+    ) -> Result<T> {
+        let _ = self.inner.link().spirc.activate();
+        self.command(what, f)
+    }
+
     /// Start playing a context (playlist / album / artist / track URI). When
     /// `shuffle` is set, Spotify shuffles the *entire* context server-side.
     pub fn play_context(&self, context_uri: impl Into<String>, shuffle: bool) -> Result<()> {
-        self.spirc.activate().ok();
         let options = LoadRequestOptions {
             start_playing: true,
-            context_options: shuffle.then(|| {
-                LoadContextOptions::Options(CtxOptions {
-                    shuffle: true,
-                    ..Default::default()
-                })
-            }),
+            context_options: context_options(shuffle),
             ..Default::default()
         };
-        self.spirc
-            .load(LoadRequest::from_context_uri(context_uri.into(), options))
-            .context("load context")?;
-        Ok(())
+        self.active_command("load context", |spirc| {
+            spirc.load(LoadRequest::from_context_uri(context_uri.into(), options))
+        })
     }
 
     /// Load a context and start at a specific track + position (context resume).
@@ -107,22 +184,15 @@ impl Engine {
         position_ms: u32,
         shuffle: bool,
     ) -> Result<()> {
-        self.spirc.activate().ok();
         let options = LoadRequestOptions {
             start_playing: true,
             seek_to: position_ms,
-            context_options: shuffle.then(|| {
-                LoadContextOptions::Options(CtxOptions {
-                    shuffle: true,
-                    ..Default::default()
-                })
-            }),
+            context_options: context_options(shuffle),
             playing_track: track_uri.map(PlayingTrack::Uri),
         };
-        self.spirc
-            .load(LoadRequest::from_context_uri(context_uri, options))
-            .context("load context at")?;
-        Ok(())
+        self.active_command("load context at", |spirc| {
+            spirc.load(LoadRequest::from_context_uri(context_uri, options))
+        })
     }
 
     /// Play an explicit list of track URIs as a context. `start_uri` picks the
@@ -135,82 +205,83 @@ impl Engine {
         start_position_ms: u32,
         shuffle: bool,
     ) -> Result<()> {
-        self.spirc.activate().ok();
         let options = LoadRequestOptions {
             start_playing: true,
-            context_options: shuffle.then(|| {
-                LoadContextOptions::Options(CtxOptions {
-                    shuffle: true,
-                    ..Default::default()
-                })
-            }),
+            context_options: context_options(shuffle),
             playing_track: start_uri.map(PlayingTrack::Uri),
             seek_to: start_position_ms,
         };
-        self.spirc
-            .load(LoadRequest::from_tracks(tracks, options))
-            .context("load tracks")?;
-        Ok(())
+        self.active_command("load tracks", |spirc| {
+            spirc.load(LoadRequest::from_tracks(tracks, options))
+        })
     }
 
     /// Load a single track and start playing at `position_ms` — used to resume
     /// the last session's track when the user first hits play.
     pub fn play_track_at(&self, uri: String, position_ms: u32) -> Result<()> {
-        self.spirc.activate().ok();
         let options = LoadRequestOptions {
             start_playing: true,
             seek_to: position_ms,
             ..Default::default()
         };
-        self.spirc
-            .load(LoadRequest::from_tracks(vec![uri], options))
-            .context("resume track")?;
-        Ok(())
+        self.active_command("resume track", |spirc| {
+            spirc.load(LoadRequest::from_tracks(vec![uri], options))
+        })
     }
 
     pub fn play(&self) -> Result<()> {
-        self.spirc.play().context("play")
+        self.active_command("play", Spirc::play)
     }
     pub fn pause(&self) -> Result<()> {
-        self.spirc.pause().context("pause")
+        self.active_command("pause", Spirc::pause)
     }
     pub fn stop(&self) {
-        self.player.stop()
+        self.inner.link().player.stop()
     }
     pub fn toggle(&self) -> Result<()> {
-        self.spirc.play_pause().context("toggle")
+        self.active_command("toggle", Spirc::play_pause)
     }
     pub fn next(&self) -> Result<()> {
-        self.spirc.next().context("next")
+        self.active_command("next", Spirc::next)
     }
     pub fn prev(&self) -> Result<()> {
-        self.spirc.prev().context("prev")
+        self.active_command("prev", Spirc::prev)
     }
     pub fn shuffle(&self, on: bool) -> Result<()> {
-        self.spirc.shuffle(on).context("shuffle")
+        self.active_command("shuffle", |spirc| spirc.shuffle(on))
     }
     pub fn repeat(&self, on: bool) -> Result<()> {
-        self.spirc.repeat(on).context("repeat")
+        self.active_command("repeat", |spirc| spirc.repeat(on))
     }
     /// Set volume in librespot's 0..=65535 range.
     pub fn set_volume(&self, vol: u16) -> Result<()> {
         // Apply to the local software mixer immediately (no network round-trip).
-        self.mixer.set_volume(vol);
+        self.inner.mixer.set_volume(vol);
         // Sync the volume to Spotify Connect in the background.
-        self.spirc.set_volume(vol).context("set volume")
+        self.command("set volume", |spirc| spirc.set_volume(vol))
     }
     /// Seek to an absolute position in the current track.
     pub fn seek(&self, position_ms: u32) -> Result<()> {
-        self.spirc.set_position_ms(position_ms).context("seek")
+        self.active_command("seek", |spirc| spirc.set_position_ms(position_ms))
     }
     /// This device's Spotify Connect id — used to transfer playback back to myx.
     pub fn device_id(&self) -> String {
-        self.session.device_id().to_string()
+        self.inner.link().session.device_id().to_string()
     }
     /// A cheap clone of the session (for off-thread mercury calls like radio).
     pub fn session(&self) -> Session {
-        self.session.clone()
+        self.inner.link().session.clone()
     }
+}
+
+/// Server-side shuffle options, or `None` to leave the context's own order.
+fn context_options(shuffle: bool) -> Option<LoadContextOptions> {
+    shuffle.then(|| {
+        LoadContextOptions::Options(CtxOptions {
+            shuffle: true,
+            ..Default::default()
+        })
+    })
 }
 
 /// Fetch a track-seeded radio station via librespot's internal mercury protocol
@@ -328,9 +399,6 @@ pub async fn run(
     tx: flume::Sender<EngineEvent>,
     initial_volume_pct: u8,
 ) -> Result<Engine> {
-    let cache = build_cache()?;
-    let session = Session::new(SessionConfig::default(), Some(cache));
-
     let bands = VisBands::shared();
 
     // 50% volume in librespot's 0..=65535 range.
@@ -338,14 +406,45 @@ pub async fn run(
     let mixer = Arc::new(SoftMixer::open(MixerConfig::default()).context("open softmixer")?);
     mixer.set_volume(volume);
 
+    let link = connect(&creds, &mixer, &bands, &tx).await?;
+    let inner = Arc::new(Inner {
+        link: Mutex::new(Arc::new(link)),
+        mixer,
+        bands: Arc::clone(&bands),
+        events: tx,
+        creds,
+    });
+    spawn_watchdog(&inner);
+
+    Ok(Engine { bands, inner })
+}
+
+/// Bring up a session, a player and a Connect device, and bridge the player's
+/// events onto `events`. This is what a reconnect rebuilds.
+async fn connect(
+    first_login: &Credentials,
+    mixer: &Arc<SoftMixer>,
+    bands: &Arc<Mutex<VisBands>>,
+    events: &flume::Sender<EngineEvent>,
+) -> Result<Link> {
+    let cache = build_cache()?;
+    // Prefer the reusable credentials librespot stores on a successful login:
+    // `first_login` may be the one-shot OAuth token from a first run, which
+    // Spotify would refuse hours later.
+    let creds = cache.credentials().unwrap_or_else(|| first_login.clone());
+    let session = Session::new(SessionConfig::default(), Some(cache));
+
     let backend = audio_backend::find(None).expect("an audio backend should be available");
     let player_config = PlayerConfig {
-        position_update_interval: Some(Duration::from_millis(100)),
+        // Each correction pushes the whole Connect state to Spotify, so the old
+        // 100ms announced us ten times a second. Position is extrapolated
+        // locally; this only trims the drift.
+        position_update_interval: Some(Duration::from_secs(1)),
         ..Default::default()
     };
 
     let player = {
-        let bands = Arc::clone(&bands);
+        let bands = Arc::clone(bands);
         Player::new(
             player_config,
             session.clone(),
@@ -361,7 +460,8 @@ pub async fn run(
     // `is_active` flag here (the sink fills the bands, but only playback state
     // knows whether audio is actually flowing).
     let mut channel = player.get_player_event_channel();
-    let ev_bands = Arc::clone(&bands);
+    let ev_bands = Arc::clone(bands);
+    let tx = events.clone();
     tokio::spawn(async move {
         while let Some(ev) = channel.recv().await {
             match &ev {
@@ -388,7 +488,9 @@ pub async fn run(
     let connect_config = ConnectConfig {
         name: "myx".to_string(),
         device_type: DeviceType::Computer,
-        initial_volume: volume,
+        // Carry the live volume across a reconnect — the mixer outlives the
+        // connection, so the new device must not announce a stale level.
+        initial_volume: mixer.volume(),
         is_group: false,
         disable_volume: false,
         volume_steps: 64,
@@ -405,11 +507,76 @@ pub async fn run(
     .context("initialize spirc")?;
     tokio::spawn(spirc_task);
 
-    Ok(Engine {
+    Ok(Link {
         spirc,
-        bands,
         player,
-        mixer,
         session,
     })
+}
+
+/// How often the watchdog asks whether the access point is still there. The
+/// check is a lock read; only an actual reconnect costs anything.
+const HEALTH_CHECK: Duration = Duration::from_secs(5);
+/// First and last wait between failed reconnects, so a laptop closed overnight
+/// with no network doesn't resolve access points every five seconds until dawn.
+const RETRY_MIN: Duration = Duration::from_secs(5);
+const RETRY_MAX: Duration = Duration::from_secs(120);
+
+fn next_backoff(current: Duration) -> Duration {
+    (current * 2).min(RETRY_MAX)
+}
+
+/// Rebuild the connection whenever the access point drops it.
+///
+/// librespot marks the session invalid on a keep-alive timeout and leaves
+/// recovery to the caller (`session.rs`: "TODO: Optionally reconnect"). Without
+/// this, an idle myx wakes up to every command failing with a closed channel,
+/// and the only fix is a restart. Polling means the repair usually lands long
+/// before anyone presses a key.
+fn spawn_watchdog(inner: &Arc<Inner>) {
+    let weak = Arc::downgrade(inner);
+    tokio::spawn(async move {
+        let mut backoff = RETRY_MIN;
+        loop {
+            tokio::time::sleep(HEALTH_CHECK).await;
+            // Gone means myx is quitting; the watchdog must not be what keeps
+            // the Connect device alive.
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            if !inner.is_stale() {
+                backoff = RETRY_MIN;
+                continue;
+            }
+            let _ = inner.events.send(EngineEvent::Reconnecting);
+            let failed = inner.reconnect().await.is_err();
+            if !failed {
+                backoff = RETRY_MIN;
+                let _ = inner.events.send(EngineEvent::Reconnected);
+                continue;
+            }
+            // Hold nothing across the wait, or quitting blocks on it.
+            drop(inner);
+            tokio::time::sleep(backoff).await;
+            backoff = next_backoff(backoff);
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failing_reconnect_backs_off_up_to_the_cap() {
+        assert!(next_backoff(RETRY_MIN) > RETRY_MIN);
+        let mut wait = RETRY_MIN;
+        for _ in 0..10 {
+            wait = next_backoff(wait);
+            assert!(wait <= RETRY_MAX, "{wait:?} is past the cap");
+        }
+        // An offline night must settle at the cap rather than grow without
+        // bound — the watchdog has to still be trying when the network returns.
+        assert_eq!(wait, RETRY_MAX);
+    }
 }
