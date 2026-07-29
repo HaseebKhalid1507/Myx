@@ -4,16 +4,13 @@ A lean, beautiful terminal Spotify player in Rust. Streams natively as a Spotify
 Connect device, with album-art-reactive theming, a live audio visualizer, and
 synced lyrics.
 
-<p align="center"><img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/myx.png" alt="myx recolors the whole interface to the album art" width="100%"></p>
+<p align="center"><video src="https://github.com/user-attachments/assets/90706ba9-4c48-43d0-ad16-17b95c95dc94" alt="myx recolors the whole interface to the album art" width="100%"></p>
 
 <p align="center">
-  <a href="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/myx-demo.mp4"><strong>▶ Watch the demo (MP4)</strong></a>
-</p>
-
-<p align="center">
-  <img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/theme-1.png" width="32%">
-  <img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/theme-2.png" width="32%">
-  <img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/theme-3.png" width="32%">
+  <img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/myx.png" width="49%">
+  <img src="https://github.com/user-attachments/assets/48dfec67-edd1-4903-a18d-8ed6d06ee5f9" width="49%">
+  <img src="https://github.com/user-attachments/assets/dd3844ad-f0c7-41ec-a934-86bb0e3ef75b" width="49%">
+  <img src="https://github.com/user-attachments/assets/08b3f505-5e48-4cd8-9b8d-0788d37f30c2" width="49%">
 </p>
 
 > Requires **Spotify Premium**. Works on Linux, macOS, and Windows. Album art is
