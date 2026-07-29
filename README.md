@@ -7,6 +7,10 @@ synced lyrics.
 <p align="center"><img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/myx.png" alt="myx recolors the whole interface to the album art" width="100%"></p>
 
 <p align="center">
+  <a href="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/myx-demo.mp4"><strong>▶ Watch the demo (MP4)</strong></a>
+</p>
+
+<p align="center">
   <img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/theme-1.png" width="32%">
   <img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/theme-2.png" width="32%">
   <img src="https://github.com/HaseebKhalid1507/Myx/releases/download/readme-assets/theme-3.png" width="32%">
