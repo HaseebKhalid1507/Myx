@@ -503,14 +503,21 @@ struct FrameOut {
     lib_offset: usize,
 }
 
-struct App {
+/// Long-lived services the UI talks to. All three are used through `&self`
+/// (the `Arc<Mutex<_>>` is only ever cloned), so grouping them costs no
+/// borrow flexibility.
+struct Services {
     engine: Engine,
     picker: Picker,
+    webapi: Arc<Mutex<WebApi>>,
+}
+
+struct App {
+    svc: Services,
     displayed: Theme,
     target: Theme,
     fade: Option<ThemeFade>,
     now: Option<NowPlaying>,
-    webapi: Arc<Mutex<WebApi>>,
     // Best-effort OS integration. Headless/SSH sessions may not expose the
     // platform media service, but that must never prevent Myx from playing.
     media_controls: Option<MediaControls>,
@@ -621,7 +628,7 @@ impl App {
             return;
         };
         let new = position_ms.min(dur);
-        let _ = self.engine.seek(new);
+        let _ = self.svc.engine.seek(new);
         self.set_local_position(new, false);
     }
     /// One Shift+arrow press, moving the playhead by `delta_ms`.
@@ -702,7 +709,7 @@ impl App {
         self.status = format!("starting {name}…");
         self.source = PlaySource::Context(uri.clone());
         self.source_name = name;
-        if let Err(e) = self.engine.play_context(uri, shuffle) {
+        if let Err(e) = self.svc.engine.play_context(uri, shuffle) {
             self.status = format!("couldn't play: {e:#}");
         }
     }
@@ -731,7 +738,7 @@ impl App {
                     self.source_name = "Liked Songs".to_string();
                     self.status = "starting Liked Songs…".to_string();
                     // Honour the current shuffle toggle instead of a dedicated row.
-                    if let Err(e) = self.engine.play_tracks(uris, None, 0, self.shuffle) {
+                    if let Err(e) = self.svc.engine.play_tracks(uris, None, 0, self.shuffle) {
                         self.status = format!("couldn't play: {e:#}");
                     }
                 }
@@ -762,7 +769,8 @@ impl App {
                 self.source_name = d.title.clone();
                 self.status = format!("starting {}…", item.name);
                 if let Err(e) =
-                    self.engine
+                    self.svc
+                        .engine
                         .play_context_at(ctx, Some(item.uri.clone()), 0, self.shuffle)
                 {
                     self.status = format!("couldn't play: {e:#}");
@@ -784,9 +792,10 @@ impl App {
                 self.source = PlaySource::None;
                 self.source_name = self.section.label().to_string();
             }
-            if let Err(e) = self
-                .engine
-                .play_tracks(uris, Some(item.uri.clone()), 0, self.shuffle)
+            if let Err(e) =
+                self.svc
+                    .engine
+                    .play_tracks(uris, Some(item.uri.clone()), 0, self.shuffle)
             {
                 self.status = format!("couldn't play: {e:#}");
             }
@@ -941,14 +950,16 @@ async fn boot(
     }
 
     let app = App {
-        engine,
-        picker,
+        svc: Services {
+            engine,
+            picker,
+            webapi,
+        },
         media_controls,
         displayed: TOKYONIGHT,
         target: TOKYONIGHT,
         fade: None,
         now,
-        webapi,
         status: "loading library…".to_string(),
         library: Library::default(),
         section: Section::Home,
@@ -1052,7 +1063,11 @@ async fn run_ui(
         radio: radio_tx,
         libdone: libdone_tx,
     };
-    spawn_library_fetch(app.webapi.clone(), chans.lib.clone(), chans.libdone.clone());
+    spawn_library_fetch(
+        app.svc.webapi.clone(),
+        chans.lib.clone(),
+        chans.libdone.clone(),
+    );
 
     // Reclaim server-side playback: read live state + transfer it onto myx so the
     // full context + queue + position come back.
@@ -1061,8 +1076,8 @@ async fn run_ui(
     // drop the last one, and a disconnected receiver resolves `recv_async()`
     // instantly and forever — spinning the select loop below.
     spawn_restore(
-        app.webapi.clone(),
-        app.engine.device_id(),
+        app.svc.webapi.clone(),
+        app.svc.engine.device_id(),
         chans.pstate.clone(),
     );
 
@@ -1070,7 +1085,7 @@ async fn run_ui(
     if let Some(uri) = app.restore_uri.take() {
         if let Some(id) = track_id_from_uri(&uri) {
             app.pending_meta = Some(format!("spotify:track:{id}"));
-            let webapi = app.webapi.clone();
+            let webapi = app.svc.webapi.clone();
             let tx = chans.meta.clone();
             tokio::task::spawn_blocking(move || {
                 let _ = tx.send(fetch_track_meta(&webapi, &id));
@@ -1139,7 +1154,7 @@ async fn run_ui(
                     } else if lib_attempts < 2 {
                         lib_attempts += 1;
                         app.status = "retrying library…".to_string();
-                        spawn_library_fetch(app.webapi.clone(), chans.lib.clone(), chans.libdone.clone());
+                        spawn_library_fetch(app.svc.webapi.clone(), chans.lib.clone(), chans.libdone.clone());
                     } else {
                         app.status = "library failed — press r to reload".to_string();
                     }
@@ -1151,13 +1166,13 @@ async fn run_ui(
                     dirty = true;
                     match rad {
                         Ok(radio) if !radio.uris.is_empty() => {
-                            if let Err(e) = app.engine.play_tracks(radio.uris, None, radio.start_position_ms, false) {
+                            if let Err(e) = app.svc.engine.play_tracks(radio.uris, None, radio.start_position_ms, false) {
                                 app.status = format!("couldn't play radio: {e:#}");
                             }
                             app.playback_started = true;
                             app.status = "radio started".to_string();
                             // Grab the freshly-populated station queue shortly after.
-                            let webapi = app.webapi.clone();
+                            let webapi = app.svc.webapi.clone();
                             let tx = chans.queue.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -1179,7 +1194,7 @@ async fn run_ui(
                 let animating = app.fade.is_some()
                     || (app.view == RightView::Lyrics && app.lyrics_synced)
                     || (app.view == RightView::NowPlaying
-                        && app.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false));
+                        && app.svc.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false));
                 if app.art_repaint != ArtRepaint::Idle {
                     dirty = true;
                 }
@@ -1220,7 +1235,7 @@ async fn run_ui(
                     // Refresh the live queue while playing so the snapshot stays
                     // current, then persist it (survives reboot).
                     if app.playback_started || app.reclaimed {
-                        spawn_queue_fetch(app.webapi.clone(), chans.queue.clone());
+                        spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
                     }
                     save_state(&app);
                 }
@@ -1334,7 +1349,7 @@ async fn run_ui(
                     app.shuffle = state.shuffle;
                     app.repeat = state.repeat;
                     app.volume = state.volume.min(100);
-                    let _ = app.engine.set_volume(vol_u16(app.volume));
+                    let _ = app.svc.engine.set_volume(vol_u16(app.volume));
                     app.now = Some(NowPlaying {
                         uri: format!("spotify:track:{}", state.track_id),
                         title: String::new(),
@@ -1346,12 +1361,12 @@ async fn run_ui(
                         is_playing: false,
                         cover: None,
                     });
-                    let webapi = app.webapi.clone();
+                    let webapi = app.svc.webapi.clone();
                     let tx = chans.meta.clone();
                     let id = state.track_id.clone();
                     app.pending_meta = Some(format!("spotify:track:{id}"));
                     tokio::task::spawn_blocking(move || { let _ = tx.send(fetch_track_meta(&webapi, &id)); });
-                    spawn_queue_fetch(app.webapi.clone(), chans.queue.clone());
+                    spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
                 }
                 true
             }
@@ -1373,12 +1388,12 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
 
     match app.source.clone() {
         PlaySource::Context(ctx) => {
-            if let Err(e) = app.engine.play_context_at(ctx, track, pos, app.shuffle) {
+            if let Err(e) = app.svc.engine.play_context_at(ctx, track, pos, app.shuffle) {
                 app.status = format!("couldn't play: {e:#}");
             }
         }
         PlaySource::Radio(seed) => {
-            let session = app.engine.session();
+            let session = app.svc.engine.session();
             let tx = radio_tx.clone();
             app.status = "resuming radio…".to_string();
             tokio::spawn(async move {
@@ -1400,7 +1415,7 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
         }
         PlaySource::Liked if !app.library.liked.is_empty() => {
             let uris: Vec<String> = app.library.liked.iter().map(|i| i.uri.clone()).collect();
-            if let Err(e) = app.engine.play_tracks(uris, track, pos, app.shuffle) {
+            if let Err(e) = app.svc.engine.play_tracks(uris, track, pos, app.shuffle) {
                 app.status = format!("couldn't play: {e:#}");
             }
         }
@@ -1413,18 +1428,18 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
                     uris.push(u.clone());
                 }
                 uris.extend(app.queue_uris.iter().cloned());
-                if let Err(e) = app.engine.play_tracks(uris, track, pos, app.shuffle) {
+                if let Err(e) = app.svc.engine.play_tracks(uris, track, pos, app.shuffle) {
                     app.status = format!("couldn't play: {e:#}");
                 }
             } else {
                 match track {
                     Some(uri) => {
-                        if let Err(e) = app.engine.play_track_at(uri, pos) {
+                        if let Err(e) = app.svc.engine.play_track_at(uri, pos) {
                             app.status = format!("couldn't play: {e:#}");
                         }
                     }
                     None => {
-                        if let Err(e) = app.engine.play() {
+                        if let Err(e) = app.svc.engine.play() {
                             app.status = format!("couldn't play: {e:#}");
                         }
                     }
@@ -1505,7 +1520,7 @@ fn handle_mouse(
                     let offset = (m.column - vr.x) as u32;
                     let vol = (((offset + 1) * 100) / vr.width as u32).min(100) as u8;
                     app.volume = vol;
-                    let _ = app.engine.set_volume(vol_u16(app.volume));
+                    let _ = app.svc.engine.set_volume(vol_u16(app.volume));
                 }
             }
         }
@@ -1583,11 +1598,11 @@ fn handle_mouse(
         match m.kind {
             MouseEventKind::ScrollUp => {
                 app.volume = (app.volume + 5).min(100);
-                let _ = app.engine.set_volume(vol_u16(app.volume));
+                let _ = app.svc.engine.set_volume(vol_u16(app.volume));
             }
             MouseEventKind::ScrollDown => {
                 app.volume = app.volume.saturating_sub(5);
-                let _ = app.engine.set_volume(vol_u16(app.volume));
+                let _ = app.svc.engine.set_volume(vol_u16(app.volume));
             }
             _ => {}
         }
@@ -1629,7 +1644,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
                     app.searching = true;
                     app.selected = 0;
                     app.status = "searching…".to_string();
-                    spawn_search(app.webapi.clone(), q, chans.search.clone());
+                    spawn_search(app.svc.webapi.clone(), q, chans.search.clone());
                 }
             }
             KeyCode::Backspace => {
@@ -1665,10 +1680,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
         }
         KeyCode::Char(' ') | KeyCode::Char('p') | KeyCode::Media(MediaKeyCode::PlayPause) => {
             if app.playback_started {
-                let _ = app.engine.toggle();
+                let _ = app.svc.engine.toggle();
             } else if app.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
-                let _ = app.engine.play();
+                let _ = app.svc.engine.play();
                 app.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
@@ -1677,25 +1692,25 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
             }
         }
         KeyCode::Media(MediaKeyCode::Stop) => {
-            app.engine.stop();
+            app.svc.engine.stop();
         }
         KeyCode::Char('n') | KeyCode::Media(MediaKeyCode::TrackNext) => {
-            let _ = app.engine.next();
+            let _ = app.svc.engine.next();
         }
         KeyCode::Char('b') | KeyCode::Media(MediaKeyCode::TrackPrevious) => {
-            let _ = app.engine.prev();
+            let _ = app.svc.engine.prev();
         }
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Media(MediaKeyCode::RaiseVolume) => {
             app.volume = (app.volume + 5).min(100);
-            let _ = app.engine.set_volume(vol_u16(app.volume));
+            let _ = app.svc.engine.set_volume(vol_u16(app.volume));
         }
         KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Media(MediaKeyCode::LowerVolume) => {
             app.volume = app.volume.saturating_sub(5);
-            let _ = app.engine.set_volume(vol_u16(app.volume));
+            let _ = app.svc.engine.set_volume(vol_u16(app.volume));
         }
         KeyCode::Char('s') => {
             app.shuffle = !app.shuffle;
-            let _ = app.engine.shuffle(app.shuffle);
+            let _ = app.svc.engine.shuffle(app.shuffle);
         }
         // Play the highlighted playlist / album / artist outright. Enter still
         // opens; this is the direct route that used to require two Enters or
@@ -1706,16 +1721,20 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
             // while playback is shuffled, and `resume_source` would later
             // replay this context unshuffled.
             app.shuffle = true;
-            let _ = app.engine.shuffle(true);
+            let _ = app.svc.engine.shuffle(true);
             play_selected_context(app, true);
         }
         KeyCode::Char('R') => {
             app.repeat = !app.repeat;
-            let _ = app.engine.repeat(app.repeat);
+            let _ = app.svc.engine.repeat(app.repeat);
         }
         KeyCode::Char('r') => {
             app.status = "loading library…".to_string();
-            spawn_library_fetch(app.webapi.clone(), chans.lib.clone(), chans.libdone.clone());
+            spawn_library_fetch(
+                app.svc.webapi.clone(),
+                chans.lib.clone(),
+                chans.libdone.clone(),
+            );
         }
         KeyCode::Char('o') => {
             app.sort = app.sort.next();
@@ -1740,7 +1759,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
                 if !item.is_header && !item.is_play {
                     // Instant menu (no network), then enrich when the API returns.
                     app.actions = Some(build_action_menu(None, &item));
-                    spawn_action_menu(app.webapi.clone(), item, chans.menu.clone());
+                    spawn_action_menu(app.svc.webapi.clone(), item, chans.menu.clone());
                 }
             }
         }
@@ -1761,13 +1780,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
         KeyCode::Right => {
             app.view = app.view.shift(1);
             if app.view == RightView::Queue && (app.reclaimed || app.playback_started) {
-                spawn_queue_fetch(app.webapi.clone(), chans.queue.clone());
+                spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         KeyCode::Left => {
             app.view = app.view.shift(-1);
             if app.view == RightView::Queue && (app.reclaimed || app.playback_started) {
-                spawn_queue_fetch(app.webapi.clone(), chans.queue.clone());
+                spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         // The frame loop notices the layout change and wipes the art box.
@@ -1778,11 +1797,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
         KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) => play_selected_context(app, false),
         KeyCode::Enter => match app.activate() {
             Activated::Open(uri, name) => {
-                spawn_detail_fetch(app.webapi.clone(), uri, name, chans.detail.clone());
+                spawn_detail_fetch(app.svc.webapi.clone(), uri, name, chans.detail.clone());
             }
             Activated::Radio(uri) => {
                 app.status = "starting radio…".to_string();
-                let session = app.engine.session();
+                let session = app.svc.engine.session();
                 let tx = chans.radio.clone();
                 tokio::spawn(async move {
                     let res = match tokio::time::timeout(
@@ -1844,17 +1863,17 @@ fn handle_media_control_event(
 ) {
     match ev {
         MediaControlEvent::Next => {
-            let _ = app.engine.next();
+            let _ = app.svc.engine.next();
         }
         MediaControlEvent::Previous => {
-            let _ = app.engine.prev();
+            let _ = app.svc.engine.prev();
         }
         MediaControlEvent::Toggle => {
             if app.playback_started {
-                let _ = app.engine.toggle();
+                let _ = app.svc.engine.toggle();
             } else if app.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
-                let _ = app.engine.play();
+                let _ = app.svc.engine.play();
                 app.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
@@ -1864,10 +1883,10 @@ fn handle_media_control_event(
         }
         MediaControlEvent::Play => {
             if app.playback_started {
-                let _ = app.engine.play();
+                let _ = app.svc.engine.play();
             } else if app.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
-                let _ = app.engine.play();
+                let _ = app.svc.engine.play();
                 app.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
@@ -1876,10 +1895,10 @@ fn handle_media_control_event(
             }
         }
         MediaControlEvent::Pause => {
-            let _ = app.engine.pause();
+            let _ = app.svc.engine.pause();
         }
         MediaControlEvent::Stop => {
-            app.engine.stop();
+            app.svc.engine.stop();
         }
         MediaControlEvent::Seek(direction) => match direction {
             SeekDirection::Backward => app.seek_step(-5_000),
@@ -1969,7 +1988,7 @@ fn handle_action_key(
             app.actions = None;
         }
         ActionKind::Open { uri, name } => {
-            spawn_detail_fetch(app.webapi.clone(), uri, name, detail_tx.clone());
+            spawn_detail_fetch(app.svc.webapi.clone(), uri, name, detail_tx.clone());
             app.actions = None;
         }
         ActionKind::CopyLink { uri } => {
@@ -1981,7 +2000,7 @@ fn handle_action_key(
             app.actions = None;
         }
         other => {
-            spawn_action(app.webapi.clone(), other, astatus_tx.clone());
+            spawn_action(app.svc.webapi.clone(), other, astatus_tx.clone());
             app.actions = None;
         }
     }
@@ -2415,7 +2434,7 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
                 // Record what we're waiting for so an earlier track's reply,
                 // landing late, is discarded instead of overwriting this one.
                 app.pending_meta = Some(format!("spotify:track:{track_id}"));
-                let webapi = app.webapi.clone();
+                let webapi = app.svc.webapi.clone();
                 let tx = meta_tx.clone();
                 tokio::task::spawn_blocking(move || {
                     let _ = tx.send(fetch_track_meta(&webapi, &track_id));
@@ -2426,9 +2445,9 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
             if !app.playback_started {
                 app.playback_started = true;
                 // Reapply persisted modes + volume to the freshly-started playback.
-                let _ = app.engine.shuffle(app.shuffle);
-                let _ = app.engine.repeat(app.repeat);
-                let _ = app.engine.set_volume(vol_u16(app.volume));
+                let _ = app.svc.engine.shuffle(app.shuffle);
+                let _ = app.svc.engine.repeat(app.repeat);
+                let _ = app.svc.engine.set_volume(vol_u16(app.volume));
             }
             if let Some(n) = app.now.as_mut() {
                 n.is_playing = true;
@@ -2520,7 +2539,7 @@ fn apply_meta(
         .image
         .image
         .as_ref()
-        .map(|img| Cover::from_image(img.clone(), app.picker.clone()));
+        .map(|img| Cover::from_image(img.clone(), app.svc.picker.clone()));
     // A different cover encodes to a different symbol, so the diff emits it on
     // its own — no wipe, which would flash a blank box between the two covers.
     app.art_repaint = ArtRepaint::Draw;
@@ -3840,7 +3859,7 @@ fn render_nowplaying_view(f: &mut Frame, app: &App, theme: Theme, area: Rect, re
 
     // Derive the cover's cell footprint from the terminal's font aspect so a
     // square image renders square (and our centering math is exact).
-    let font = app.picker.font_size();
+    let font = app.svc.picker.font_size();
     let fw = font.width.max(1) as u32;
     let fh = font.height.max(1) as u32;
 
@@ -4060,6 +4079,7 @@ fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
 
 fn render_visualizer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let active = app
+        .svc
         .engine
         .bands
         .try_lock()
@@ -4068,7 +4088,7 @@ fn render_visualizer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     if !active {
         return;
     }
-    let Ok(guard) = app.engine.bands.try_lock() else {
+    let Ok(guard) = app.svc.engine.bands.try_lock() else {
         return;
     };
     let values: [f32; NUM_BANDS] = guard.values;
