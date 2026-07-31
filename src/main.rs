@@ -34,8 +34,10 @@ use myx::components::{gradient_line, gradient_progress, left_bar_block};
 use myx::cover::Cover;
 use myx::engine::{self, Engine, EngineEvent};
 use myx::gradient::{self};
+use myx::lyrics::parse::parse_lrc;
 use myx::reactive::derive_theme;
 use myx::theme::{Theme, TOKYONIGHT};
+use myx::util::{center_v, fmt_ms, track_id_from_uri, truncate, uri_to_url, urlencode, vol_u16};
 use myx::webapi::WebApi;
 use souvlaki::{
     MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
@@ -1944,15 +1946,6 @@ fn handle_action_key(
     }
 }
 
-/// Convert a `spotify:kind:id` URI to an open.spotify.com link.
-fn uri_to_url(uri: &str) -> String {
-    let mut p = uri.split(':');
-    p.next();
-    let kind = p.next().unwrap_or("");
-    let id = p.next().unwrap_or("");
-    format!("https://open.spotify.com/{kind}/{id}")
-}
-
 /// Copy text to the system clipboard via whatever tool is available.
 fn copy_to_clipboard(text: &str) -> bool {
     use std::io::Write;
@@ -3203,58 +3196,6 @@ fn fetch_lyrics_blocking(
     (Vec::new(), false)
 }
 
-/// Parse LRC `[mm:ss.xx] text` lines into sorted (ms, text) pairs.
-fn parse_lrc(lrc: &str) -> Vec<(u32, String)> {
-    let mut out: Vec<(u32, String)> = Vec::new();
-    for line in lrc.lines() {
-        // A line may carry multiple timestamps; collect them, then the trailing text.
-        let mut rest = line;
-        let mut stamps: Vec<u32> = Vec::new();
-        while rest.starts_with('[') {
-            let Some(end) = rest.find(']') else { break };
-            let tag = &rest[1..end];
-            if let Some(ms) = parse_lrc_stamp(tag) {
-                stamps.push(ms);
-            }
-            rest = rest[end + 1..].trim_start();
-            if stamps.is_empty() {
-                break; // not a timestamp tag (e.g. metadata) — bail
-            }
-        }
-        let text = rest.trim().to_string();
-        for ms in stamps {
-            out.push((ms, text.clone()));
-        }
-    }
-    out.sort_by_key(|(t, _)| *t);
-    out
-}
-
-fn parse_lrc_stamp(tag: &str) -> Option<u32> {
-    // mm:ss.xx or mm:ss
-    let (mm, rest) = tag.split_once(':')?;
-    let mm: u32 = mm.parse().ok()?;
-    let (ss, cs) = match rest.split_once('.') {
-        Some((s, c)) => (s.parse::<u32>().ok()?, c),
-        None => (rest.parse::<u32>().ok()?, "0"),
-    };
-    let cs: u32 = format!("{cs:0<3}")[..3].parse().unwrap_or(0);
-    Some((mm * 60 + ss) * 1000 + cs)
-}
-
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
 // --- Drill-in detail (artist / album / playlist) ---
 
 fn spawn_detail_fetch(
@@ -3499,14 +3440,6 @@ fn spawn_restore(webapi: Arc<Mutex<WebApi>>, device_id: String, tx: flume::Sende
 }
 
 // --- Live playback state (server-side) end ---
-
-fn track_id_from_uri(uri: &str) -> Option<String> {
-    let mut parts = uri.split(':');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some("spotify"), Some("track"), Some(id)) => Some(id.to_string()),
-        _ => None,
-    }
-}
 
 // ------------------------------------------------------------------ render
 
@@ -4012,17 +3945,6 @@ fn render_nowplaying_view(f: &mut Frame, app: &mut App, theme: Theme, area: Rect
     render_visualizer(f, app, theme, viz_area);
 }
 
-/// Vertically center a `height`-row rect inside `area`.
-fn center_v(area: Rect, height: u16) -> Rect {
-    let y = area.y + area.height.saturating_sub(height) / 2;
-    Rect {
-        x: area.x,
-        y,
-        width: area.width,
-        height: height.min(area.height),
-    }
-}
-
 /// Slim persistent bottom strip: play state + track, then the progress bar.
 fn render_now_strip(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
@@ -4080,11 +4002,6 @@ fn render_volume(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
         width: VLEV.len() as u16,
         height: 1,
     });
-}
-
-/// Convert a 0..=100 percentage to librespot's 0..=65535 volume range.
-fn vol_u16(pct: u8) -> u16 {
-    (pct as u32 * 65535 / 100) as u16
 }
 
 fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
@@ -4453,19 +4370,6 @@ fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         }
     }
     f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
-    } else {
-        s.to_string()
-    }
-}
-
-fn fmt_ms(ms: u32) -> String {
-    let s = ms / 1000;
-    format!("{}:{:02}", s / 60, s % 60)
 }
 
 /// A blocking HTTP client with a timeout so a stalled network can't wedge a
