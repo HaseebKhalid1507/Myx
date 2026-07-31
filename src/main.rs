@@ -606,6 +606,22 @@ struct ViewState {
     actions: Option<ActionMenu>,
 }
 
+/// Cross-cutting session bookkeeping: what we resumed into, which metadata
+/// fetch is still in flight, and the input timestamps that make Ctrl-C and
+/// double-click work.
+struct SessionState {
+    restore_uri: Option<String>,
+    // Track URI whose metadata was last requested. Fetches run on separate
+    // blocking tasks and can land out of order when skipping quickly, so a
+    // reply for any other track is stale and must be dropped.
+    pending_meta: Option<String>,
+    // Whether we reclaimed a live server-side session (vs. local fallback).
+    reclaimed: bool,
+    // Timestamp of last Ctrl-C — a second press within 1.5s quits.
+    last_ctrl_c: Option<Instant>,
+    last_click: Option<(u16, Instant)>,
+}
+
 struct App {
     svc: Services,
     theme: ThemeState,
@@ -618,18 +634,9 @@ struct App {
     transport: Transport,
     search: SearchState,
     view: ViewState,
-    restore_uri: Option<String>,
-    // Track URI whose metadata was last requested. Fetches run on separate
-    // blocking tasks and can land out of order when skipping quickly, so a
-    // reply for any other track is stale and must be dropped.
-    pending_meta: Option<String>,
+    session: SessionState,
     // What the album art box owes the next frame. See ArtRepaint.
     art_repaint: ArtRepaint,
-    // Whether we reclaimed a live server-side session (vs. local fallback).
-    reclaimed: bool,
-    // Timestamp of last Ctrl-C — a second press within 1.5s quits.
-    last_ctrl_c: Option<Instant>,
-    last_click: Option<(u16, Instant)>,
 }
 
 fn should_apply_engine_position(from_engine: bool, seek_target: Option<u32>) -> bool {
@@ -1066,12 +1073,14 @@ async fn boot(
             lyrics_synced: false,
             actions: None,
         },
-        restore_uri,
-        pending_meta: None,
+        session: SessionState {
+            restore_uri,
+            pending_meta: None,
+            reclaimed: false,
+            last_ctrl_c: None,
+            last_click: None,
+        },
         art_repaint: ArtRepaint::Idle,
-        reclaimed: false,
-        last_ctrl_c: None,
-        last_click: None,
     };
 
     run_ui(terminal, app, ev_rx).await
@@ -1158,9 +1167,9 @@ async fn run_ui(
     );
 
     // Re-enrich the restored last-played track (cover / theme / lyrics).
-    if let Some(uri) = app.restore_uri.take() {
+    if let Some(uri) = app.session.restore_uri.take() {
         if let Some(id) = track_id_from_uri(&uri) {
-            app.pending_meta = Some(format!("spotify:track:{id}"));
+            app.session.pending_meta = Some(format!("spotify:track:{id}"));
             let webapi = app.svc.webapi.clone();
             let tx = chans.meta.clone();
             tokio::task::spawn_blocking(move || {
@@ -1310,7 +1319,7 @@ async fn run_ui(
                     last_sync = Instant::now();
                     // Refresh the live queue while playing so the snapshot stays
                     // current, then persist it (survives reboot).
-                    if app.transport.playback_started || app.reclaimed {
+                    if app.transport.playback_started || app.session.reclaimed {
                         spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
                     }
                     save_state(&app);
@@ -1421,7 +1430,7 @@ async fn run_ui(
             }
             ps = pstate_rx.recv_async() => {
                 if let Ok(state) = ps {
-                    app.reclaimed = true;
+                    app.session.reclaimed = true;
                     app.transport.shuffle = state.shuffle;
                     app.transport.repeat = state.repeat;
                     app.transport.volume = state.volume.min(100);
@@ -1440,7 +1449,7 @@ async fn run_ui(
                     let webapi = app.svc.webapi.clone();
                     let tx = chans.meta.clone();
                     let id = state.track_id.clone();
-                    app.pending_meta = Some(format!("spotify:track:{id}"));
+                    app.session.pending_meta = Some(format!("spotify:track:{id}"));
                     tokio::task::spawn_blocking(move || { let _ = tx.send(fetch_track_meta(&webapi, &id)); });
                     spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
                 }
@@ -1671,20 +1680,21 @@ fn handle_mouse(
                         app.browse.selected = idx;
                         let now = Instant::now();
                         let dbl = app
+                            .session
                             .last_click
                             .map(|(r0, t0)| {
                                 r0 == m.row && now.duration_since(t0) < Duration::from_millis(400)
                             })
                             .unwrap_or(false);
                         if dbl {
-                            app.last_click = None;
+                            app.session.last_click = None;
                             let quit =
                                 handle_key(app, KeyCode::Enter, KeyModifiers::empty(), chans);
                             if quit {
                                 return true;
                             }
                         } else {
-                            app.last_click = Some((m.row, now));
+                            app.session.last_click = Some((m.row, now));
                         }
                     }
                 }
@@ -1718,13 +1728,14 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
     if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
         let now = Instant::now();
         if app
+            .session
             .last_ctrl_c
             .map(|t| now.duration_since(t) < Duration::from_millis(1500))
             .unwrap_or(false)
         {
             return true;
         }
-        app.last_ctrl_c = Some(now);
+        app.session.last_ctrl_c = Some(now);
         app.status = "press Ctrl-C again to quit".to_string();
         return false;
     }
@@ -1782,7 +1793,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
         KeyCode::Char(' ') | KeyCode::Char('p') | KeyCode::Media(MediaKeyCode::PlayPause) => {
             if app.transport.playback_started {
                 let _ = app.svc.engine.toggle();
-            } else if app.reclaimed {
+            } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
                 let _ = app.svc.engine.play();
                 app.transport.playback_started = true;
@@ -1886,7 +1897,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
         KeyCode::Right => {
             app.view.view = app.view.view.shift(1);
             if app.view.view == RightView::Queue
-                && (app.reclaimed || app.transport.playback_started)
+                && (app.session.reclaimed || app.transport.playback_started)
             {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
@@ -1894,7 +1905,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
         KeyCode::Left => {
             app.view.view = app.view.view.shift(-1);
             if app.view.view == RightView::Queue
-                && (app.reclaimed || app.transport.playback_started)
+                && (app.session.reclaimed || app.transport.playback_started)
             {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
@@ -1981,7 +1992,7 @@ fn handle_media_control_event(
         MediaControlEvent::Toggle => {
             if app.transport.playback_started {
                 let _ = app.svc.engine.toggle();
-            } else if app.reclaimed {
+            } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
                 let _ = app.svc.engine.play();
                 app.transport.playback_started = true;
@@ -1994,7 +2005,7 @@ fn handle_media_control_event(
         MediaControlEvent::Play => {
             if app.transport.playback_started {
                 let _ = app.svc.engine.play();
-            } else if app.reclaimed {
+            } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
                 let _ = app.svc.engine.play();
                 app.transport.playback_started = true;
@@ -2536,7 +2547,7 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
             if let Some(track_id) = track_id_from_uri(&uri) {
                 // Record what we're waiting for so an earlier track's reply,
                 // landing late, is discarded instead of overwriting this one.
-                app.pending_meta = Some(format!("spotify:track:{track_id}"));
+                app.session.pending_meta = Some(format!("spotify:track:{track_id}"));
                 let webapi = app.svc.webapi.clone();
                 let tx = meta_tx.clone();
                 tokio::task::spawn_blocking(move || {
@@ -2578,7 +2589,7 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
             app.transport.playback_started = false;
             // librespot cleared its context too, so only a fresh load can
             // resume from here — not a bare `play`.
-            app.reclaimed = false;
+            app.session.reclaimed = false;
 
             if let Some(controls) = app.media_controls.as_mut() {
                 let _ = controls.set_playback(MediaPlayback::Stopped);
@@ -2636,7 +2647,7 @@ fn apply_meta(
     // (n/b) can land an earlier track's reply after a later one. Applying it
     // would replace the whole NowPlaying — title, artist and cover — with the
     // wrong track's data.
-    if !meta_is_current(app.pending_meta.as_deref(), &meta.uri) {
+    if !meta_is_current(app.session.pending_meta.as_deref(), &meta.uri) {
         return;
     }
 
