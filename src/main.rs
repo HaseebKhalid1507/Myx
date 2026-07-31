@@ -982,6 +982,22 @@ struct Radio {
     uris: Vec<String>,
 }
 
+/// Every `Sender` the UI loop hands to input handlers and spawned fetches.
+/// Receivers stay local to `run_ui` because `select!` needs them there.
+struct UiChannels {
+    meta: flume::Sender<TrackMeta>,
+    lib: flume::Sender<(Section, Vec<LibItem>)>,
+    queue: flume::Sender<Vec<(String, String)>>,
+    search: flume::Sender<Vec<LibItem>>,
+    lyrics: flume::Sender<(Vec<(u32, String)>, bool)>,
+    detail: flume::Sender<(String, String, Vec<LibItem>)>,
+    menu: flume::Sender<ActionMenu>,
+    astatus: flume::Sender<String>,
+    pstate: flume::Sender<PlaybackState>,
+    radio: flume::Sender<Result<Radio, String>>,
+    libdone: flume::Sender<bool>,
+}
+
 async fn run_ui(
     terminal: &mut Term,
     mut app: App,
@@ -1010,7 +1026,20 @@ async fn run_ui(
     let (radio_tx, radio_rx) = flume::unbounded::<Result<Radio, String>>();
     let (libdone_tx, libdone_rx) = flume::unbounded::<bool>();
     let (souvlaki_tx, souvlaki_rx) = flume::unbounded::<MediaControlEvent>();
-    spawn_library_fetch(app.webapi.clone(), lib_tx.clone(), libdone_tx.clone());
+    let chans = UiChannels {
+        meta: meta_tx,
+        lib: lib_tx,
+        queue: queue_tx,
+        search: search_tx,
+        lyrics: lyrics_tx,
+        detail: detail_tx,
+        menu: menu_tx,
+        astatus: astatus_tx,
+        pstate: pstate_tx,
+        radio: radio_tx,
+        libdone: libdone_tx,
+    };
+    spawn_library_fetch(app.webapi.clone(), chans.lib.clone(), chans.libdone.clone());
 
     // Reclaim server-side playback: read live state + transfer it onto myx so the
     // full context + queue + position come back.
@@ -1021,7 +1050,7 @@ async fn run_ui(
     spawn_restore(
         app.webapi.clone(),
         app.engine.device_id(),
-        pstate_tx.clone(),
+        chans.pstate.clone(),
     );
 
     // Re-enrich the restored last-played track (cover / theme / lyrics).
@@ -1029,7 +1058,7 @@ async fn run_ui(
         if let Some(id) = track_id_from_uri(&uri) {
             app.pending_meta = Some(format!("spotify:track:{id}"));
             let webapi = app.webapi.clone();
-            let tx = meta_tx.clone();
+            let tx = chans.meta.clone();
             tokio::task::spawn_blocking(move || {
                 let _ = tx.send(fetch_track_meta(&webapi, &id));
             });
@@ -1093,7 +1122,7 @@ async fn run_ui(
                     } else if lib_attempts < 2 {
                         lib_attempts += 1;
                         app.status = "retrying library…".to_string();
-                        spawn_library_fetch(app.webapi.clone(), lib_tx.clone(), libdone_tx.clone());
+                        spawn_library_fetch(app.webapi.clone(), chans.lib.clone(), chans.libdone.clone());
                     } else {
                         app.status = "library failed — press r to reload".to_string();
                     }
@@ -1112,7 +1141,7 @@ async fn run_ui(
                             app.status = "radio started".to_string();
                             // Grab the freshly-populated station queue shortly after.
                             let webapi = app.webapi.clone();
-                            let tx = queue_tx.clone();
+                            let tx = chans.queue.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(Duration::from_millis(1500)).await;
                                 spawn_queue_fetch(webapi, tx);
@@ -1173,7 +1202,7 @@ async fn run_ui(
                     // Refresh the live queue while playing so the snapshot stays
                     // current, then persist it (survives reboot).
                     if app.playback_started || app.reclaimed {
-                        spawn_queue_fetch(app.webapi.clone(), queue_tx.clone());
+                        spawn_queue_fetch(app.webapi.clone(), chans.queue.clone());
                     }
                     save_state(&app);
                 }
@@ -1181,20 +1210,20 @@ async fn run_ui(
             }
             ev = ev_rx.recv_async() => {
                 let Ok(ev) = ev else { break };
-                handle_engine_event(&mut app, ev, &meta_tx);
+                handle_engine_event(&mut app, ev, &chans.meta);
                 true
             }
             ev = in_rx.recv_async() => {
                 match ev {
                     Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        let quit = handle_key(&mut app, key.code, key.modifiers, &lib_tx, &queue_tx, &search_tx, &detail_tx, &menu_tx, &astatus_tx, &radio_tx, &libdone_tx);
+                        let quit = handle_key(&mut app, key.code, key.modifiers, &chans);
                         if quit {
                             save_state(&app);
                             break;
                         }
                     }
                     Ok(Event::Mouse(m)) => {
-                        let quit = handle_mouse(&mut app, m, &lib_tx, &queue_tx, &search_tx, &detail_tx, &menu_tx, &astatus_tx, &radio_tx, &libdone_tx);
+                        let quit = handle_mouse(&mut app, m, &chans);
                         if quit {
                             save_state(&app);
                             break;
@@ -1214,7 +1243,7 @@ async fn run_ui(
             }
             ev = souvlaki_rx.recv_async(), if media_events_open => {
                 match consume_media_event(ev, &mut media_events_open) {
-                    Some(ev) => handle_media_control_event(&mut app, ev, &radio_tx),
+                    Some(ev) => handle_media_control_event(&mut app, ev, &chans.radio),
                     None => {
                         app.media_controls = None;
                         liblog("media controls event channel closed; native integration disabled");
@@ -1223,7 +1252,7 @@ async fn run_ui(
                 true
             }
             m = meta_rx.recv_async() => {
-                if let Ok(meta) = m { apply_meta(&mut app, meta, &lyrics_tx); }
+                if let Ok(meta) = m { apply_meta(&mut app, meta, &chans.lyrics); }
                 true
             }
             q = queue_rx.recv_async() => {
@@ -1300,11 +1329,11 @@ async fn run_ui(
                         cover: None,
                     });
                     let webapi = app.webapi.clone();
-                    let tx = meta_tx.clone();
+                    let tx = chans.meta.clone();
                     let id = state.track_id.clone();
                     app.pending_meta = Some(format!("spotify:track:{id}"));
                     tokio::task::spawn_blocking(move || { let _ = tx.send(fetch_track_meta(&webapi, &id)); });
-                    spawn_queue_fetch(app.webapi.clone(), queue_tx.clone());
+                    spawn_queue_fetch(app.webapi.clone(), chans.queue.clone());
                 }
                 true
             }
@@ -1419,19 +1448,7 @@ fn play_selected_context(app: &mut App, shuffle: bool) {
 }
 
 /// Mouse input. Mirrors `handle_key`: returns `true` when the app should quit.
-#[allow(clippy::too_many_arguments)]
-fn handle_mouse(
-    app: &mut App,
-    m: crossterm::event::MouseEvent,
-    lib_tx: &flume::Sender<(Section, Vec<LibItem>)>,
-    queue_tx: &flume::Sender<Vec<(String, String)>>,
-    search_tx: &flume::Sender<Vec<LibItem>>,
-    detail_tx: &flume::Sender<(String, String, Vec<LibItem>)>,
-    menu_tx: &flume::Sender<ActionMenu>,
-    astatus_tx: &flume::Sender<String>,
-    radio_tx: &flume::Sender<Result<Radio, String>>,
-    libdone_tx: &flume::Sender<bool>,
-) -> bool {
+fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent, chans: &UiChannels) -> bool {
     if matches!(
         m.kind,
         MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
@@ -1521,19 +1538,8 @@ fn handle_mouse(
                             .unwrap_or(false);
                         if dbl {
                             app.last_click = None;
-                            let quit = handle_key(
-                                app,
-                                KeyCode::Enter,
-                                KeyModifiers::empty(),
-                                lib_tx,
-                                queue_tx,
-                                search_tx,
-                                detail_tx,
-                                menu_tx,
-                                astatus_tx,
-                                radio_tx,
-                                libdone_tx,
-                            );
+                            let quit =
+                                handle_key(app, KeyCode::Enter, KeyModifiers::empty(), chans);
                             if quit {
                                 return true;
                             }
@@ -1566,20 +1572,7 @@ fn handle_mouse(
 }
 
 /// Returns true if the app should quit.
-#[allow(clippy::too_many_arguments)]
-fn handle_key(
-    app: &mut App,
-    code: KeyCode,
-    mods: KeyModifiers,
-    lib_tx: &flume::Sender<(Section, Vec<LibItem>)>,
-    queue_tx: &flume::Sender<Vec<(String, String)>>,
-    search_tx: &flume::Sender<Vec<LibItem>>,
-    detail_tx: &flume::Sender<(String, String, Vec<LibItem>)>,
-    menu_tx: &flume::Sender<ActionMenu>,
-    astatus_tx: &flume::Sender<String>,
-    radio_tx: &flume::Sender<Result<Radio, String>>,
-    libdone_tx: &flume::Sender<bool>,
-) -> bool {
+fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChannels) -> bool {
     // --- Actions menu captures input while open ---
     // Double-press Ctrl-C to quit (works from anywhere). Single press arms it.
     if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
@@ -1597,7 +1590,7 @@ fn handle_key(
     }
 
     if app.actions.is_some() {
-        handle_action_key(app, code, detail_tx, astatus_tx);
+        handle_action_key(app, code, &chans.detail, &chans.astatus);
         return false;
     }
 
@@ -1612,7 +1605,7 @@ fn handle_key(
                     app.searching = true;
                     app.selected = 0;
                     app.status = "searching…".to_string();
-                    spawn_search(app.webapi.clone(), q, search_tx.clone());
+                    spawn_search(app.webapi.clone(), q, chans.search.clone());
                 }
             }
             KeyCode::Backspace => {
@@ -1655,7 +1648,7 @@ fn handle_key(
                 app.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
-                resume_source(app, radio_tx);
+                resume_source(app, &chans.radio);
                 app.playback_started = true;
             }
         }
@@ -1698,7 +1691,7 @@ fn handle_key(
         }
         KeyCode::Char('r') => {
             app.status = "loading library…".to_string();
-            spawn_library_fetch(app.webapi.clone(), lib_tx.clone(), libdone_tx.clone());
+            spawn_library_fetch(app.webapi.clone(), chans.lib.clone(), chans.libdone.clone());
         }
         KeyCode::Char('o') => {
             app.sort = app.sort.next();
@@ -1723,7 +1716,7 @@ fn handle_key(
                 if !item.is_header && !item.is_play {
                     // Instant menu (no network), then enrich when the API returns.
                     app.actions = Some(build_action_menu(None, &item));
-                    spawn_action_menu(app.webapi.clone(), item, menu_tx.clone());
+                    spawn_action_menu(app.webapi.clone(), item, chans.menu.clone());
                 }
             }
         }
@@ -1744,13 +1737,13 @@ fn handle_key(
         KeyCode::Right => {
             app.view = app.view.shift(1);
             if app.view == RightView::Queue && (app.reclaimed || app.playback_started) {
-                spawn_queue_fetch(app.webapi.clone(), queue_tx.clone());
+                spawn_queue_fetch(app.webapi.clone(), chans.queue.clone());
             }
         }
         KeyCode::Left => {
             app.view = app.view.shift(-1);
             if app.view == RightView::Queue && (app.reclaimed || app.playback_started) {
-                spawn_queue_fetch(app.webapi.clone(), queue_tx.clone());
+                spawn_queue_fetch(app.webapi.clone(), chans.queue.clone());
             }
         }
         // The frame loop notices the layout change and wipes the art box.
@@ -1761,12 +1754,12 @@ fn handle_key(
         KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) => play_selected_context(app, false),
         KeyCode::Enter => match app.activate() {
             Activated::Open(uri, name) => {
-                spawn_detail_fetch(app.webapi.clone(), uri, name, detail_tx.clone());
+                spawn_detail_fetch(app.webapi.clone(), uri, name, chans.detail.clone());
             }
             Activated::Radio(uri) => {
                 app.status = "starting radio…".to_string();
                 let session = app.engine.session();
-                let tx = radio_tx.clone();
+                let tx = chans.radio.clone();
                 tokio::spawn(async move {
                     let res = match tokio::time::timeout(
                         Duration::from_secs(12),
