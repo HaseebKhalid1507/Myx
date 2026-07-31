@@ -11,13 +11,20 @@ use ratatui::Frame;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
+use std::cell::RefCell;
 use std::sync::OnceLock;
 
 pub struct Cover {
     img: DynamicImage,
     picker: Picker,
     /// (area it was encoded for, encoded protocol).
-    cached: Option<(Rect, Protocol)>,
+    ///
+    /// Behind a `RefCell` so rendering can take `&self`: the TUI is
+    /// single-threaded and `Cover::render` runs at most once per cover per
+    /// frame, so the borrow never overlaps another one — no reentrancy, no
+    /// aliasing. That guarantee is a runtime panic rather than a compile error,
+    /// so moving rendering off this thread would have to move the cache too.
+    cached: RefCell<Option<(Rect, Protocol)>>,
 }
 
 impl Cover {
@@ -85,7 +92,7 @@ impl Cover {
         Self {
             img,
             picker,
-            cached: None,
+            cached: RefCell::new(None),
         }
     }
 
@@ -93,24 +100,25 @@ impl Cover {
     /// Drop the cached encode so the next render re-encodes and ratatui
     /// sees a fresh cell, forcing retransmission.
     pub fn invalidate_cache(&mut self) {
-        self.cached = None;
+        *self.cached.borrow_mut() = None;
     }
 
     /// Whether drawing into `area` would have to re-encode, meaning the image
     /// must go to the terminal again.
     pub fn needs_send(&self, area: Rect) -> bool {
         self.cached
+            .borrow()
             .as_ref()
             .map(|(cached_area, _)| *cached_area != area)
             .unwrap_or(true)
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let needs_encode = self
-            .cached
+        let mut cached = self.cached.borrow_mut();
+        let needs_encode = cached
             .as_ref()
             .map(|(cached_area, _)| *cached_area != area)
             .unwrap_or(true);
@@ -121,12 +129,12 @@ impl Cover {
                 Size::new(area.width, area.height),
                 Resize::Fit(None),
             ) {
-                Ok(protocol) => self.cached = Some((area, protocol)),
+                Ok(protocol) => *cached = Some((area, protocol)),
                 Err(_) => return,
             }
         }
 
-        if let Some((_, protocol)) = &self.cached {
+        if let Some((_, protocol)) = &*cached {
             frame.render_widget(Image::new(protocol), area);
         }
     }

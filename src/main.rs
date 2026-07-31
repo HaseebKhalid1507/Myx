@@ -3841,7 +3841,7 @@ fn render_nowplaying_view(f: &mut Frame, app: &mut App, theme: Theme, area: Rect
     };
 
     let repaint = app.art_repaint;
-    match app.now.as_mut().and_then(|n| n.cover.as_mut()) {
+    match app.now.as_ref().and_then(|n| n.cover.as_ref()) {
         _ if repaint == ArtRepaint::Wipe => wipe_area(f, art_rect),
         // Writing the escape means transmitting the image, so only do it when
         // something actually asked for it. A theme fade repaints every glyph on
