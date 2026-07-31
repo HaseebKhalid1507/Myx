@@ -36,6 +36,30 @@ pub fn parse_lrc_stamp(tag: &str) -> Option<u32> {
         Some((s, c)) => (s.parse::<u32>().ok()?, c),
         None => (rest.parse::<u32>().ok()?, "0"),
     };
-    let cs: u32 = format!("{cs:0<3}")[..3].parse().unwrap_or(0);
-    Some((mm * 60 + ss) * 1000 + cs)
+    // Reject a non-numeric fraction outright. LRC text is fetched from lrclib,
+    // a community-editable database, so this is untrusted remote input.
+    //
+    // This guard closes two bugs at once:
+    //   1. The byte-slice below used to split multi-byte characters and panic.
+    //      `format!("{cs:0<3}")` pads by *chars* but `[..3]` indexes *bytes*, so
+    //      a fraction like "a日" produced "a日0" and slicing at byte 3 landed
+    //      inside '日'. With `panic = "abort"` that killed the whole player, and
+    //      because the payload rides on a track it reproduced on every replay.
+    //   2. Garbage such as ".xx" silently parsed as .000 instead of being
+    //      rejected, quietly desyncing a line by up to 999ms.
+    if !cs.is_empty() && !cs.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let cs: u32 = if cs.is_empty() {
+        0
+    } else {
+        // ASCII-only by the guard above, so this slice is char-boundary safe.
+        format!("{:0<3}", &cs[..cs.len().min(3)]).parse().ok()?
+    };
+    // Checked arithmetic: a hostile stamp like "[99999999:00]" overflowed u32,
+    // panicking in debug builds and silently wrapping in release.
+    mm.checked_mul(60)?
+        .checked_add(ss)?
+        .checked_mul(1000)?
+        .checked_add(cs)
 }

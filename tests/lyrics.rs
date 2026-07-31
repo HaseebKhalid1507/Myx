@@ -1,6 +1,7 @@
 //! Characterization tests for `myx::lyrics::parse`.
 //!
-//! These lock in TODAY's LRC parsing behavior, quirks included.
+//! These lock in TODAY's LRC parsing behavior, quirks included. Where a former
+//! quirk was a crash reachable from remote input, the test now locks the fix.
 
 use myx::lyrics::parse::{parse_lrc, parse_lrc_stamp};
 
@@ -62,11 +63,14 @@ fn stamp_rejects_garbage() {
 }
 
 #[test]
-fn stamp_non_numeric_fraction_becomes_zero_quirk() {
-    // QUIRK: the fraction is parsed with `unwrap_or(0)` — junk silently
-    // degrades to .000 instead of rejecting the stamp.
-    assert_eq!(parse_lrc_stamp("00:01.xx"), Some(1_000));
-    assert_eq!(parse_lrc_stamp("00:01.ab0"), Some(1_000));
+fn stamp_non_numeric_fraction_is_rejected() {
+    // Previously `unwrap_or(0)` degraded junk to .000, silently desyncing the
+    // line by up to 999ms. A fraction that is not all ASCII digits is not a
+    // timestamp, so the stamp is now rejected outright.
+    assert_eq!(parse_lrc_stamp("00:01.xx"), None);
+    assert_eq!(parse_lrc_stamp("00:01.ab0"), None);
+    assert_eq!(parse_lrc_stamp("00:01.5a"), None);
+    assert_eq!(parse_lrc_stamp("00:01.-1"), None);
 }
 
 #[test]
@@ -74,6 +78,17 @@ fn stamp_does_not_bound_minutes_or_seconds_quirk() {
     // QUIRK: no range checks — 99 seconds is accepted as 99 seconds.
     assert_eq!(parse_lrc_stamp("00:99"), Some(99_000));
     assert_eq!(parse_lrc_stamp("999:00"), Some(59_940_000));
+}
+
+#[test]
+fn stamp_absurd_minutes_do_not_overflow() {
+    // `(mm * 60 + ss) * 1000` was unchecked: "99999999:00" overflowed u32,
+    // panicking in debug builds and silently wrapping in release. Now `None`.
+    assert_eq!(parse_lrc_stamp("99999999:00"), None);
+    assert_eq!(parse_lrc_stamp("71582789:00"), None);
+    assert_eq!(parse_lrc_stamp("4294967295:00"), None);
+    // The largest stamp that still fits is unaffected.
+    assert_eq!(parse_lrc_stamp("71582:47.295"), Some(4_294_967_295));
 }
 
 #[test]
@@ -258,10 +273,27 @@ fn parse_lrc_realistic_file_with_header_block() {
 }
 
 #[test]
-#[should_panic]
-fn parse_lrc_stamp_multibyte_fraction_panics_quirk() {
-    // BUG (locked in, not fixed): the fraction is sliced with a BYTE range
-    // `[..3]` after a char-width pad, so a 3-char multibyte fraction slices
-    // through a UTF-8 boundary and panics.
-    let _ = parse_lrc_stamp("00:00.ab日");
+fn stamp_multibyte_fraction_is_rejected_not_panic() {
+    // REGRESSION: the fraction was sliced with a BYTE range `[..3]` after a
+    // char-width pad, so a multibyte fraction sliced through a UTF-8 boundary
+    // and panicked. With `panic = "abort"` that aborted the whole player, and
+    // since the payload rides on a track it reproduced on every replay.
+    assert_eq!(parse_lrc_stamp("00:00.ab\u{65e5}"), None);
+    assert_eq!(parse_lrc_stamp("00:00.a\u{65e5}"), None);
+    assert_eq!(parse_lrc_stamp("00:00.\u{65e5}\u{65e5}\u{65e5}"), None);
+    assert_eq!(parse_lrc_stamp("01:02.\u{1f600}"), None);
+}
+
+/// The crash had to be unreachable through the real entry point, not just the
+/// helper — `parse_lrc` is what the lyrics fetch actually calls.
+#[test]
+fn parse_lrc_survives_a_poisoned_multibyte_fraction() {
+    let out = parse_lrc("[00:00.a\u{65e5}]cursed\n[00:01.00]fine");
+    assert_eq!(out, vec![(1000, "fine".to_string())]);
+}
+
+#[test]
+fn parse_lrc_survives_an_overflowing_stamp() {
+    let out = parse_lrc("[99999999:00]nope\n[00:02.00]yes");
+    assert_eq!(out, vec![(2000, "yes".to_string())]);
 }
