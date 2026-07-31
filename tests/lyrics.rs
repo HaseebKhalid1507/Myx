@@ -177,12 +177,26 @@ fn parse_lrc_skips_metadata_only_lines() {
 }
 
 #[test]
-fn parse_lrc_metadata_before_a_stamp_swallows_the_whole_line_quirk() {
-    // QUIRK: once a leading tag fails to parse the loop bails, so a valid
-    // timestamp that follows a metadata tag on the SAME line is dropped.
+fn parse_lrc_metadata_before_a_stamp_no_longer_swallows_the_line() {
+    // Previously the loop bailed on the first tag that failed to parse, so a
+    // valid timestamp following a metadata tag on the SAME line was dropped.
     assert_eq!(
         parse_lrc("[ar:Artist][00:01.00]words"),
-        Vec::<(u32, String)>::new()
+        vec![(1000, "words".to_string())]
+    );
+}
+
+/// A malformed stamp must not take its valid siblings down with it — repeated
+/// timestamps on one line are the normal idiom for a repeated chorus.
+#[test]
+fn parse_lrc_bad_stamp_does_not_drop_sibling_stamps() {
+    assert_eq!(
+        parse_lrc("[00:01.xx][00:05.00]chorus"),
+        vec![(5000, "chorus".to_string())]
+    );
+    assert_eq!(
+        parse_lrc("[00:00.a\u{65e5}][00:09.00]cursed but salvageable"),
+        vec![(9000, "cursed but salvageable".to_string())]
     );
 }
 

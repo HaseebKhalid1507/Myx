@@ -13,10 +13,12 @@ pub fn parse_lrc(lrc: &str) -> Vec<(u32, String)> {
             if let Some(ms) = parse_lrc_stamp(tag) {
                 stamps.push(ms);
             }
+            // Keep consuming bracket groups even if this one was not a
+            // timestamp. Bailing here used to discard the rest of the line, so
+            // a metadata tag or a malformed stamp sitting in front of a valid
+            // one ("[ar:X][00:01.00]words") swallowed the whole lyric. Lines
+            // that yield no stamps at all are still dropped below.
             rest = rest[end + 1..].trim_start();
-            if stamps.is_empty() {
-                break; // not a timestamp tag (e.g. metadata) — bail
-            }
         }
         let text = rest.trim().to_string();
         for ms in stamps {
