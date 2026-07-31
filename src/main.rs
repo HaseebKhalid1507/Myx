@@ -542,6 +542,21 @@ impl ThemeState {
     }
 }
 
+/// Playback controls and the queue — everything the transport bar and the
+/// persisted `SavedState` care about. None of it touches the playhead.
+struct Transport {
+    shuffle: bool,
+    repeat: bool,
+    volume: u8, // 0..=100 (mirrors the 50% mixer default)
+    queue: Vec<String>,
+    queue_uris: Vec<String>,
+    // Whether real playback has started this session (gates resume-on-play).
+    playback_started: bool,
+    // What's playing (context/radio/liked), for faithful resume on reboot.
+    source: PlaySource,
+    source_name: String,
+}
+
 /// The playhead: what's playing plus the coalesced Shift+arrow scrub state.
 ///
 /// These live together because every scrub method touches both — `seek_step`
@@ -566,11 +581,7 @@ struct App {
     library: Library,
     section: Section,
     selected: usize,
-    shuffle: bool,
-    repeat: bool,
-    volume: u8, // 0..=100 (mirrors the 50% mixer default)
-    queue: Vec<String>,
-    queue_uris: Vec<String>,
+    transport: Transport,
     // Search
     input_mode: bool,
     query: String,
@@ -592,13 +603,8 @@ struct App {
     pending_meta: Option<String>,
     // What the album art box owes the next frame. See ArtRepaint.
     art_repaint: ArtRepaint,
-    // Whether real playback has started this session (gates resume-on-play).
-    playback_started: bool,
     // Whether we reclaimed a live server-side session (vs. local fallback).
     reclaimed: bool,
-    // What's playing (context/radio/liked), for faithful resume on reboot.
-    source: PlaySource,
-    source_name: String,
     sort: SortMode,
     // Timestamp of last Ctrl-C — a second press within 1.5s quits.
     last_ctrl_c: Option<Instant>,
@@ -739,8 +745,8 @@ impl App {
     /// because the drill-in stack is empty when playing straight from a list.
     fn play_context_row(&mut self, uri: String, name: String, shuffle: bool) {
         self.status = format!("starting {name}…");
-        self.source = PlaySource::Context(uri.clone());
-        self.source_name = name;
+        self.transport.source = PlaySource::Context(uri.clone());
+        self.transport.source_name = name;
         if let Err(e) = self.svc.engine.play_context(uri, shuffle) {
             self.status = format!("couldn't play: {e:#}");
         }
@@ -766,11 +772,15 @@ impl App {
                     .map(|i| i.uri.clone())
                     .collect();
                 if !uris.is_empty() {
-                    self.source = PlaySource::Liked;
-                    self.source_name = "Liked Songs".to_string();
+                    self.transport.source = PlaySource::Liked;
+                    self.transport.source_name = "Liked Songs".to_string();
                     self.status = "starting Liked Songs…".to_string();
                     // Honour the current shuffle toggle instead of a dedicated row.
-                    if let Err(e) = self.svc.engine.play_tracks(uris, None, 0, self.shuffle) {
+                    if let Err(e) =
+                        self.svc
+                            .engine
+                            .play_tracks(uris, None, 0, self.transport.shuffle)
+                    {
                         self.status = format!("couldn't play: {e:#}");
                     }
                 }
@@ -783,28 +793,29 @@ impl App {
                 .last()
                 .map(|d| d.title.clone())
                 .unwrap_or_else(|| item.name.clone());
-            let shuffle = self.shuffle;
+            let shuffle = self.transport.shuffle;
             self.play_context_row(item.uri, name, shuffle);
             return Activated::None;
         }
         if item.is_track {
             if self.searching {
                 // A search-result song starts that song's radio (seed + similar).
-                self.source = PlaySource::Radio(item.uri.clone());
-                self.source_name = format!("Radio · {}", item.name);
+                self.transport.source = PlaySource::Radio(item.uri.clone());
+                self.transport.source_name = format!("Radio · {}", item.name);
                 return Activated::Radio(item.uri);
             }
             // Inside a drill-in → play its context at this track (real queue).
             if let Some(d) = self.details.last() {
                 let ctx = d.context_uri.clone();
-                self.source = PlaySource::Context(ctx.clone());
-                self.source_name = d.title.clone();
+                self.transport.source = PlaySource::Context(ctx.clone());
+                self.transport.source_name = d.title.clone();
                 self.status = format!("starting {}…", item.name);
-                if let Err(e) =
-                    self.svc
-                        .engine
-                        .play_context_at(ctx, Some(item.uri.clone()), 0, self.shuffle)
-                {
+                if let Err(e) = self.svc.engine.play_context_at(
+                    ctx,
+                    Some(item.uri.clone()),
+                    0,
+                    self.transport.shuffle,
+                ) {
                     self.status = format!("couldn't play: {e:#}");
                 }
                 return Activated::None;
@@ -818,16 +829,16 @@ impl App {
                 .collect();
             self.status = format!("starting {}…", item.name);
             if self.section == Section::Liked {
-                self.source = PlaySource::Liked;
-                self.source_name = "Liked Songs".to_string();
+                self.transport.source = PlaySource::Liked;
+                self.transport.source_name = "Liked Songs".to_string();
             } else {
-                self.source = PlaySource::None;
-                self.source_name = self.section.label().to_string();
+                self.transport.source = PlaySource::None;
+                self.transport.source_name = self.section.label().to_string();
             }
             if let Err(e) =
                 self.svc
                     .engine
-                    .play_tracks(uris, Some(item.uri.clone()), 0, self.shuffle)
+                    .play_tracks(uris, Some(item.uri.clone()), 0, self.transport.shuffle)
             {
                 self.status = format!("couldn't play: {e:#}");
             }
@@ -1003,15 +1014,20 @@ async fn boot(
         library: Library::default(),
         section: Section::Home,
         selected: 0,
-        shuffle: saved.shuffle,
-        repeat: saved.repeat,
-        volume: if saved.volume == 0 {
-            80
-        } else {
-            saved.volume.min(100)
+        transport: Transport {
+            shuffle: saved.shuffle,
+            repeat: saved.repeat,
+            volume: if saved.volume == 0 {
+                80
+            } else {
+                saved.volume.min(100)
+            },
+            queue: saved.queue,
+            queue_uris: saved.queue_uris,
+            playback_started: false,
+            source: saved.source.clone(),
+            source_name: saved.source_name.clone(),
         },
-        queue: saved.queue,
-        queue_uris: saved.queue_uris,
         input_mode: false,
         query: String::new(),
         searching: false,
@@ -1024,10 +1040,7 @@ async fn boot(
         restore_uri,
         pending_meta: None,
         art_repaint: ArtRepaint::Idle,
-        playback_started: false,
         reclaimed: false,
-        source: saved.source.clone(),
-        source_name: saved.source_name.clone(),
         sort: SortMode::Added,
         last_ctrl_c: None,
         last_click: None,
@@ -1205,7 +1218,7 @@ async fn run_ui(
                             if let Err(e) = app.svc.engine.play_tracks(radio.uris, None, radio.start_position_ms, false) {
                                 app.status = format!("couldn't play radio: {e:#}");
                             }
-                            app.playback_started = true;
+                            app.transport.playback_started = true;
                             app.status = "radio started".to_string();
                             // Grab the freshly-populated station queue shortly after.
                             let webapi = app.svc.webapi.clone();
@@ -1270,7 +1283,7 @@ async fn run_ui(
                     last_sync = Instant::now();
                     // Refresh the live queue while playing so the snapshot stays
                     // current, then persist it (survives reboot).
-                    if app.playback_started || app.reclaimed {
+                    if app.transport.playback_started || app.reclaimed {
                         spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
                     }
                     save_state(&app);
@@ -1329,8 +1342,8 @@ async fn run_ui(
                 // the restored/last-known snapshot.
                 if let Ok(q) = q {
                     if !q.is_empty() {
-                        app.queue = q.iter().map(|(d, _)| d.clone()).collect();
-                        app.queue_uris = q.into_iter().map(|(_, u)| u).collect();
+                        app.transport.queue = q.iter().map(|(d, _)| d.clone()).collect();
+                        app.transport.queue_uris = q.into_iter().map(|(_, u)| u).collect();
                     }
                 }
                 true
@@ -1382,10 +1395,10 @@ async fn run_ui(
             ps = pstate_rx.recv_async() => {
                 if let Ok(state) = ps {
                     app.reclaimed = true;
-                    app.shuffle = state.shuffle;
-                    app.repeat = state.repeat;
-                    app.volume = state.volume.min(100);
-                    let _ = app.svc.engine.set_volume(vol_u16(app.volume));
+                    app.transport.shuffle = state.shuffle;
+                    app.transport.repeat = state.repeat;
+                    app.transport.volume = state.volume.min(100);
+                    let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
                     app.playback.now = Some(NowPlaying {
                         uri: format!("spotify:track:{}", state.track_id),
                         title: String::new(),
@@ -1428,9 +1441,13 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
         .map(|n| n.position_ms)
         .unwrap_or(0);
 
-    match app.source.clone() {
+    match app.transport.source.clone() {
         PlaySource::Context(ctx) => {
-            if let Err(e) = app.svc.engine.play_context_at(ctx, track, pos, app.shuffle) {
+            if let Err(e) = app
+                .svc
+                .engine
+                .play_context_at(ctx, track, pos, app.transport.shuffle)
+            {
                 app.status = format!("couldn't play: {e:#}");
             }
         }
@@ -1457,20 +1474,28 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
         }
         PlaySource::Liked if !app.library.liked.is_empty() => {
             let uris: Vec<String> = app.library.liked.iter().map(|i| i.uri.clone()).collect();
-            if let Err(e) = app.svc.engine.play_tracks(uris, track, pos, app.shuffle) {
+            if let Err(e) = app
+                .svc
+                .engine
+                .play_tracks(uris, track, pos, app.transport.shuffle)
+            {
                 app.status = format!("couldn't play: {e:#}");
             }
         }
         _ => {
             // No known context — resume the last track followed by the saved
             // queue so playback actually continues past the first song.
-            if !app.queue_uris.is_empty() {
-                let mut uris = Vec::with_capacity(app.queue_uris.len() + 1);
+            if !app.transport.queue_uris.is_empty() {
+                let mut uris = Vec::with_capacity(app.transport.queue_uris.len() + 1);
                 if let Some(u) = &track {
                     uris.push(u.clone());
                 }
-                uris.extend(app.queue_uris.iter().cloned());
-                if let Err(e) = app.svc.engine.play_tracks(uris, track, pos, app.shuffle) {
+                uris.extend(app.transport.queue_uris.iter().cloned());
+                if let Err(e) = app
+                    .svc
+                    .engine
+                    .play_tracks(uris, track, pos, app.transport.shuffle)
+                {
                     app.status = format!("couldn't play: {e:#}");
                 }
             } else {
@@ -1561,8 +1586,8 @@ fn handle_mouse(
                     consumed = true;
                     let offset = (m.column - vr.x) as u32;
                     let vol = (((offset + 1) * 100) / vr.width as u32).min(100) as u8;
-                    app.volume = vol;
-                    let _ = app.svc.engine.set_volume(vol_u16(app.volume));
+                    app.transport.volume = vol;
+                    let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
                 }
             }
         }
@@ -1640,12 +1665,12 @@ fn handle_mouse(
     ) {
         match m.kind {
             MouseEventKind::ScrollUp => {
-                app.volume = (app.volume + 5).min(100);
-                let _ = app.svc.engine.set_volume(vol_u16(app.volume));
+                app.transport.volume = (app.transport.volume + 5).min(100);
+                let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
             }
             MouseEventKind::ScrollDown => {
-                app.volume = app.volume.saturating_sub(5);
-                let _ = app.svc.engine.set_volume(vol_u16(app.volume));
+                app.transport.volume = app.transport.volume.saturating_sub(5);
+                let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
             }
             _ => {}
         }
@@ -1722,16 +1747,16 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
             // Nothing to back out of — Esc no longer quits (use q or Ctrl-C twice).
         }
         KeyCode::Char(' ') | KeyCode::Char('p') | KeyCode::Media(MediaKeyCode::PlayPause) => {
-            if app.playback_started {
+            if app.transport.playback_started {
                 let _ = app.svc.engine.toggle();
             } else if app.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
                 let _ = app.svc.engine.play();
-                app.playback_started = true;
+                app.transport.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
                 resume_source(app, &chans.radio);
-                app.playback_started = true;
+                app.transport.playback_started = true;
             }
         }
         KeyCode::Media(MediaKeyCode::Stop) => {
@@ -1744,16 +1769,16 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
             let _ = app.svc.engine.prev();
         }
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Media(MediaKeyCode::RaiseVolume) => {
-            app.volume = (app.volume + 5).min(100);
-            let _ = app.svc.engine.set_volume(vol_u16(app.volume));
+            app.transport.volume = (app.transport.volume + 5).min(100);
+            let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
         }
         KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Media(MediaKeyCode::LowerVolume) => {
-            app.volume = app.volume.saturating_sub(5);
-            let _ = app.svc.engine.set_volume(vol_u16(app.volume));
+            app.transport.volume = app.transport.volume.saturating_sub(5);
+            let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
         }
         KeyCode::Char('s') => {
-            app.shuffle = !app.shuffle;
-            let _ = app.svc.engine.shuffle(app.shuffle);
+            app.transport.shuffle = !app.transport.shuffle;
+            let _ = app.svc.engine.shuffle(app.transport.shuffle);
         }
         // Play the highlighted playlist / album / artist outright. Enter still
         // opens; this is the direct route that used to require two Enters or
@@ -1763,13 +1788,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
             // Flip the global toggle too, or the footer would show shuffle off
             // while playback is shuffled, and `resume_source` would later
             // replay this context unshuffled.
-            app.shuffle = true;
+            app.transport.shuffle = true;
             let _ = app.svc.engine.shuffle(true);
             play_selected_context(app, true);
         }
         KeyCode::Char('R') => {
-            app.repeat = !app.repeat;
-            let _ = app.svc.engine.repeat(app.repeat);
+            app.transport.repeat = !app.transport.repeat;
+            let _ = app.svc.engine.repeat(app.transport.repeat);
         }
         KeyCode::Char('r') => {
             app.status = "loading library…".to_string();
@@ -1827,13 +1852,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
         }
         KeyCode::Right => {
             app.view = app.view.shift(1);
-            if app.view == RightView::Queue && (app.reclaimed || app.playback_started) {
+            if app.view == RightView::Queue && (app.reclaimed || app.transport.playback_started) {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         KeyCode::Left => {
             app.view = app.view.shift(-1);
-            if app.view == RightView::Queue && (app.reclaimed || app.playback_started) {
+            if app.view == RightView::Queue && (app.reclaimed || app.transport.playback_started) {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
@@ -1917,29 +1942,29 @@ fn handle_media_control_event(
             let _ = app.svc.engine.prev();
         }
         MediaControlEvent::Toggle => {
-            if app.playback_started {
+            if app.transport.playback_started {
                 let _ = app.svc.engine.toggle();
             } else if app.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
                 let _ = app.svc.engine.play();
-                app.playback_started = true;
+                app.transport.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
                 resume_source(app, radio_tx);
-                app.playback_started = true;
+                app.transport.playback_started = true;
             }
         }
         MediaControlEvent::Play => {
-            if app.playback_started {
+            if app.transport.playback_started {
                 let _ = app.svc.engine.play();
             } else if app.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
                 let _ = app.svc.engine.play();
-                app.playback_started = true;
+                app.transport.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
                 resume_source(app, radio_tx);
-                app.playback_started = true;
+                app.transport.playback_started = true;
             }
         }
         MediaControlEvent::Pause => {
@@ -2032,7 +2057,7 @@ fn handle_action_key(
             // Previously called engine.play_context directly, leaving
             // source/source_name stale: PLAYING FROM showed the wrong context
             // and resume-on-launch replayed the previous one.
-            let shuffle = app.shuffle;
+            let shuffle = app.transport.shuffle;
             app.play_context_row(uri, name, shuffle);
             app.actions = None;
         }
@@ -2449,14 +2474,14 @@ fn save_state(app: &App) {
     });
 
     let s = SavedState {
-        volume: app.volume,
-        shuffle: app.shuffle,
-        repeat: app.repeat,
+        volume: app.transport.volume,
+        shuffle: app.transport.shuffle,
+        repeat: app.transport.repeat,
         last_played,
-        queue: app.queue.clone(),
-        queue_uris: app.queue_uris.clone(),
-        source: app.source.clone(),
-        source_name: app.source_name.clone(),
+        queue: app.transport.queue.clone(),
+        queue_uris: app.transport.queue_uris.clone(),
+        source: app.transport.source.clone(),
+        source_name: app.transport.source_name.clone(),
     };
     s.save();
 }
@@ -2481,12 +2506,12 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
             }
         }
         EngineEvent::Playing { position_ms, .. } => {
-            if !app.playback_started {
-                app.playback_started = true;
+            if !app.transport.playback_started {
+                app.transport.playback_started = true;
                 // Reapply persisted modes + volume to the freshly-started playback.
-                let _ = app.svc.engine.shuffle(app.shuffle);
-                let _ = app.svc.engine.repeat(app.repeat);
-                let _ = app.svc.engine.set_volume(vol_u16(app.volume));
+                let _ = app.svc.engine.shuffle(app.transport.shuffle);
+                let _ = app.svc.engine.repeat(app.transport.repeat);
+                let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
             }
             if let Some(n) = app.playback.now.as_mut() {
                 n.is_playing = true;
@@ -2511,7 +2536,7 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
         }
         EngineEvent::Stopped => {
             app.playback.now = None;
-            app.playback_started = false;
+            app.transport.playback_started = false;
             // librespot cleared its context too, so only a fresh load can
             // resume from here — not a bare `play`.
             app.reclaimed = false;
@@ -2544,7 +2569,7 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
             // The replacement Connect device starts idle, so whatever was
             // playing is not resumed; say so rather than leave a silent player
             // looking broken.
-            app.status = if app.playback_started {
+            app.status = if app.transport.playback_started {
                 "reconnected — press play to resume".to_string()
             } else {
                 "reconnected".to_string()
@@ -2620,7 +2645,7 @@ fn apply_meta(
             .now
             .as_ref()
             .map(|n| n.is_playing)
-            .unwrap_or(app.playback_started),
+            .unwrap_or(app.transport.playback_started),
         cover,
     });
 
@@ -4019,7 +4044,7 @@ fn render_now_strip(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, 
 /// Stashes the 8-bar region on `out` for click/drag control.
 fn render_volume(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, area: Rect) {
     const VLEV: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let filled = (app.volume as usize * VLEV.len() + 50) / 100;
+    let filled = (app.transport.volume as usize * VLEV.len() + 50) / 100;
     let mut vspans: Vec<Span> = Vec::with_capacity(VLEV.len() + 1);
     for (i, ch) in VLEV.iter().enumerate() {
         let color = if i < filled {
@@ -4032,7 +4057,10 @@ fn render_volume(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, are
             Style::default().fg(color.into()),
         ));
     }
-    vspans.push(Span::styled(format!(" {:>3}%", app.volume), theme.muted()));
+    vspans.push(Span::styled(
+        format!(" {:>3}%", app.transport.volume),
+        theme.muted(),
+    ));
     f.render_widget(
         Paragraph::new(Line::from(vspans)).alignment(Alignment::Right),
         area,
@@ -4283,7 +4311,7 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         (false, key("+/-"), lbl(" vol   ")),
         (
             false,
-            Span::styled("s", Style::default().fg(on(app.shuffle).into())),
+            Span::styled("s", Style::default().fg(on(app.transport.shuffle).into())),
             lbl(" shuffle   "),
         ),
         (false, key("a"), lbl(" actions   ")),
@@ -4362,11 +4390,11 @@ fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     // Context header — what's playing from.
-    if !app.source_name.is_empty() {
+    if !app.transport.source_name.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("PLAYING FROM  ", theme.muted()),
             Span::styled(
-                truncate(&app.source_name, max.saturating_sub(14)),
+                truncate(&app.transport.source_name, max.saturating_sub(14)),
                 Style::default()
                     .fg(theme.primary.into())
                     .add_modifier(Modifier::BOLD),
@@ -4395,10 +4423,11 @@ fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     lines.push(Line::raw(""));
 
     let used = lines.len();
-    if app.queue.is_empty() {
+    if app.transport.queue.is_empty() {
         lines.push(Line::from(Span::styled("queue is empty", theme.muted())));
     } else {
         for (i, q) in app
+            .transport
             .queue
             .iter()
             .take(inner.height.saturating_sub(used as u16) as usize)
