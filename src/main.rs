@@ -542,10 +542,23 @@ impl ThemeState {
     }
 }
 
+/// The playhead: what's playing plus the coalesced Shift+arrow scrub state.
+///
+/// These live together because every scrub method touches both — `seek_step`
+/// reads `now.duration_ms` and writes the `seek_*` fields, and
+/// `set_local_position` gates a write to `now` on `seek_target`.
+struct PlaybackState {
+    now: Option<NowPlaying>,
+    // Shift+arrow scrubbing, coalesced (see `seek_step`).
+    seek_target: Option<u32>,
+    seek_last_step: Instant,
+    seek_last_input: Instant,
+}
+
 struct App {
     svc: Services,
     theme: ThemeState,
-    now: Option<NowPlaying>,
+    playback: PlaybackState,
     // Best-effort OS integration. Headless/SSH sessions may not expose the
     // platform media service, but that must never prevent Myx from playing.
     media_controls: Option<MediaControls>,
@@ -592,35 +605,13 @@ struct App {
     last_click: Option<(u16, Instant)>,
     // Sidebar hidden, so the right view (and its cover) gets the whole width.
     zen: bool,
-    // Shift+arrow scrubbing, coalesced (see `seek_step`).
-    seek_target: Option<u32>,
-    seek_last_step: Instant,
-    seek_last_input: Instant,
 }
 
 fn should_apply_engine_position(from_engine: bool, seek_target: Option<u32>) -> bool {
     !(from_engine && seek_target.is_some())
 }
 
-impl App {
-    fn cur_items(&self) -> &[LibItem] {
-        if let Some(d) = self.details.last() {
-            &d.items
-        } else if self.searching {
-            &self.search_results
-        } else {
-            self.library.items(self.section)
-        }
-    }
-    fn cur_list_mut(&mut self) -> &mut Vec<LibItem> {
-        if let Some(d) = self.details.last_mut() {
-            &mut d.items
-        } else if self.searching {
-            &mut self.search_results
-        } else {
-            self.library.items_mut(self.section)
-        }
-    }
+impl PlaybackState {
     fn position_ms(&self) -> u32 {
         match &self.now {
             Some(n) if n.is_playing => {
@@ -643,12 +634,12 @@ impl App {
         }
     }
     /// Seek to an absolute position (clamped), updating the local display too.
-    fn seek_to(&mut self, position_ms: u32) {
+    fn seek_to(&mut self, engine: &Engine, position_ms: u32) {
         let Some(dur) = self.now.as_ref().map(|n| n.duration_ms) else {
             return;
         };
         let new = position_ms.min(dur);
-        let _ = self.svc.engine.seek(new);
+        let _ = engine.seek(new);
         self.set_local_position(new, false);
     }
     /// One Shift+arrow press, moving the playhead by `delta_ms`.
@@ -674,12 +665,33 @@ impl App {
         self.set_local_position(target, false);
     }
     /// Commit a finished scrub as a single engine seek, once the keys stop.
-    fn flush_seek(&mut self, now: Instant) {
+    fn flush_seek(&mut self, engine: &Engine, now: Instant) {
         if now.duration_since(self.seek_last_input) < SEEK_SETTLE {
             return;
         }
         if let Some(target) = self.seek_target.take() {
-            self.seek_to(target);
+            self.seek_to(engine, target);
+        }
+    }
+}
+
+impl App {
+    fn cur_items(&self) -> &[LibItem] {
+        if let Some(d) = self.details.last() {
+            &d.items
+        } else if self.searching {
+            &self.search_results
+        } else {
+            self.library.items(self.section)
+        }
+    }
+    fn cur_list_mut(&mut self) -> &mut Vec<LibItem> {
+        if let Some(d) = self.details.last_mut() {
+            &mut d.items
+        } else if self.searching {
+            &mut self.search_results
+        } else {
+            self.library.items_mut(self.section)
         }
     }
     /// First non-header index (where a fresh selection should land).
@@ -976,12 +988,17 @@ async fn boot(
             webapi,
         },
         media_controls,
+        playback: PlaybackState {
+            now,
+            seek_target: None,
+            seek_last_step: Instant::now(),
+            seek_last_input: Instant::now(),
+        },
         theme: ThemeState {
             displayed: TOKYONIGHT,
             target: TOKYONIGHT,
             fade: None,
         },
-        now,
         status: "loading library…".to_string(),
         library: Library::default(),
         section: Section::Home,
@@ -1015,9 +1032,6 @@ async fn boot(
         last_ctrl_c: None,
         last_click: None,
         zen: false,
-        seek_target: None,
-        seek_last_step: Instant::now(),
-        seek_last_input: Instant::now(),
     };
 
     run_ui(terminal, app, ev_rx).await
@@ -1039,7 +1053,7 @@ struct UiChannels {
     detail: flume::Sender<(String, String, Vec<LibItem>)>,
     menu: flume::Sender<ActionMenu>,
     astatus: flume::Sender<String>,
-    pstate: flume::Sender<PlaybackState>,
+    pstate: flume::Sender<RemotePlaybackState>,
     radio: flume::Sender<Result<Radio, String>>,
     libdone: flume::Sender<bool>,
 }
@@ -1068,7 +1082,7 @@ async fn run_ui(
     let (detail_tx, detail_rx) = flume::unbounded::<(String, String, Vec<LibItem>)>();
     let (menu_tx, menu_rx) = flume::unbounded::<ActionMenu>();
     let (astatus_tx, astatus_rx) = flume::unbounded::<String>();
-    let (pstate_tx, pstate_rx) = flume::unbounded::<PlaybackState>();
+    let (pstate_tx, pstate_rx) = flume::unbounded::<RemotePlaybackState>();
     let (radio_tx, radio_rx) = flume::unbounded::<Result<Radio, String>>();
     let (libdone_tx, libdone_rx) = flume::unbounded::<bool>();
     let (souvlaki_tx, souvlaki_rx) = flume::unbounded::<MediaControlEvent>();
@@ -1150,7 +1164,7 @@ async fn run_ui(
         let touched = tokio::select! {
             biased;
             _ = frame.tick() => {
-                app.flush_seek(Instant::now());
+                app.playback.flush_seek(&app.svc.engine, Instant::now());
                 // Drain library updates deterministically before rendering. Keeping
                 // this solely as a select arm could starve under a hot player-event
                 // stream / 60fps visualizer — which looked like a frozen library.
@@ -1372,7 +1386,7 @@ async fn run_ui(
                     app.repeat = state.repeat;
                     app.volume = state.volume.min(100);
                     let _ = app.svc.engine.set_volume(vol_u16(app.volume));
-                    app.now = Some(NowPlaying {
+                    app.playback.now = Some(NowPlaying {
                         uri: format!("spotify:track:{}", state.track_id),
                         title: String::new(),
                         artist: String::new(),
@@ -1402,11 +1416,17 @@ async fn run_ui(
 /// faithful reboot resume (real context ⇒ real queue continuation).
 fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>) {
     let track = app
+        .playback
         .now
         .as_ref()
         .map(|n| n.uri.clone())
         .filter(|u| !u.is_empty());
-    let pos = app.now.as_ref().map(|n| n.position_ms).unwrap_or(0);
+    let pos = app
+        .playback
+        .now
+        .as_ref()
+        .map(|n| n.position_ms)
+        .unwrap_or(0);
 
     match app.source.clone() {
         PlaySource::Context(ctx) => {
@@ -1554,9 +1574,10 @@ fn handle_mouse(
                     && m.column < bar.x + bar.width
                     && bar.width > 0
                 {
-                    if let Some(dur) = app.now.as_ref().map(|n| n.duration_ms) {
+                    if let Some(dur) = app.playback.now.as_ref().map(|n| n.duration_ms) {
                         let frac = (m.column - bar.x) as f32 / bar.width as f32;
-                        app.seek_to((frac * dur as f32) as u32);
+                        app.playback
+                            .seek_to(&app.svc.engine, (frac * dur as f32) as u32);
                     }
                 }
             }
@@ -1770,7 +1791,8 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
             // acting on a selection nobody can see is how it ends up offering
             // "remove from Liked" for the wrong track.
             let item = if app.zen {
-                app.now
+                app.playback
+                    .now
                     .as_ref()
                     .filter(|n| !n.uri.is_empty())
                     .map(|n| LibItem::track(n.title.clone(), n.artist.clone(), n.uri.clone()))
@@ -1797,8 +1819,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
             app.selected = app.first_selectable();
         }
         // Arrow keys rotate the right-pane view; Shift+arrows seek ±5s.
-        KeyCode::Right if mods.contains(KeyModifiers::SHIFT) => app.seek_step(SEEK_STEP_MS),
-        KeyCode::Left if mods.contains(KeyModifiers::SHIFT) => app.seek_step(-SEEK_STEP_MS),
+        KeyCode::Right if mods.contains(KeyModifiers::SHIFT) => {
+            app.playback.seek_step(SEEK_STEP_MS)
+        }
+        KeyCode::Left if mods.contains(KeyModifiers::SHIFT) => {
+            app.playback.seek_step(-SEEK_STEP_MS)
+        }
         KeyCode::Right => {
             app.view = app.view.shift(1);
             if app.view == RightView::Queue && (app.reclaimed || app.playback_started) {
@@ -1923,15 +1949,16 @@ fn handle_media_control_event(
             app.svc.engine.stop();
         }
         MediaControlEvent::Seek(direction) => match direction {
-            SeekDirection::Backward => app.seek_step(-5_000),
-            SeekDirection::Forward => app.seek_step(5_000),
+            SeekDirection::Backward => app.playback.seek_step(-5_000),
+            SeekDirection::Forward => app.playback.seek_step(5_000),
         },
         MediaControlEvent::SeekBy(direction, duration) => match direction {
-            SeekDirection::Backward => app.seek_step(-(duration.as_millis() as i64)),
-            SeekDirection::Forward => app.seek_step(duration.as_millis() as i64),
+            SeekDirection::Backward => app.playback.seek_step(-(duration.as_millis() as i64)),
+            SeekDirection::Forward => app.playback.seek_step(duration.as_millis() as i64),
         },
         MediaControlEvent::SetPosition(MediaPosition(duration)) => {
-            app.seek_to(duration.as_millis() as u32);
+            app.playback
+                .seek_to(&app.svc.engine, duration.as_millis() as u32);
         }
         _ => {}
     }
@@ -2412,13 +2439,13 @@ fn api_contains(token: &str, uri: &str) -> bool {
 
 /// Snapshot the current session to disk (volume, last track, position, queue).
 fn save_state(app: &App) {
-    let last_played = app.now.as_ref().map(|now| LastPlayed {
+    let last_played = app.playback.now.as_ref().map(|now| LastPlayed {
         uri: now.uri.clone(),
         title: now.title.clone(),
         artist: now.artist.clone(),
         album: now.album.clone(),
         duration_ms: now.duration_ms,
-        position_ms: app.position_ms(),
+        position_ms: app.playback.position_ms(),
     });
 
     let s = SavedState {
@@ -2461,10 +2488,10 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
                 let _ = app.svc.engine.repeat(app.repeat);
                 let _ = app.svc.engine.set_volume(vol_u16(app.volume));
             }
-            if let Some(n) = app.now.as_mut() {
+            if let Some(n) = app.playback.now.as_mut() {
                 n.is_playing = true;
             }
-            app.set_local_position(position_ms, true);
+            app.playback.set_local_position(position_ms, true);
             if let Some(controls) = app.media_controls.as_mut() {
                 let _ = controls.set_playback(MediaPlayback::Playing {
                     progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
@@ -2472,10 +2499,10 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
             }
         }
         EngineEvent::Paused { position_ms, .. } => {
-            if let Some(n) = app.now.as_mut() {
+            if let Some(n) = app.playback.now.as_mut() {
                 n.is_playing = false;
             }
-            app.set_local_position(position_ms, true);
+            app.playback.set_local_position(position_ms, true);
             if let Some(controls) = app.media_controls.as_mut() {
                 let _ = controls.set_playback(MediaPlayback::Paused {
                     progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
@@ -2483,7 +2510,7 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
             }
         }
         EngineEvent::Stopped => {
-            app.now = None;
+            app.playback.now = None;
             app.playback_started = false;
             // librespot cleared its context too, so only a fresh load can
             // resume from here — not a bare `play`.
@@ -2494,8 +2521,10 @@ fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<T
             }
         }
         EngineEvent::PositionCorrection { position_ms, .. } => {
-            app.set_local_position(position_ms, true);
-            if let (Some(n), Some(controls)) = (app.now.as_ref(), app.media_controls.as_mut()) {
+            app.playback.set_local_position(position_ms, true);
+            if let (Some(n), Some(controls)) =
+                (app.playback.now.as_ref(), app.media_controls.as_mut())
+            {
                 let playback = if n.is_playing {
                     MediaPlayback::Playing {
                         progress: Some(MediaPosition(Duration::from_millis(position_ms as u64))),
@@ -2573,15 +2602,21 @@ fn apply_meta(
         });
     }
 
-    app.now = Some(NowPlaying {
+    app.playback.now = Some(NowPlaying {
         uri: meta.uri,
         title: meta.title,
         artist: meta.artist,
         album: meta.album,
         duration_ms: meta.duration_ms,
-        position_ms: app.now.as_ref().map(|n| n.position_ms).unwrap_or(0),
+        position_ms: app
+            .playback
+            .now
+            .as_ref()
+            .map(|n| n.position_ms)
+            .unwrap_or(0),
         position_at: Instant::now(),
         is_playing: app
+            .playback
             .now
             .as_ref()
             .map(|n| n.is_playing)
@@ -2595,11 +2630,12 @@ fn apply_meta(
 
     if let Some(controls) = app.media_controls.as_mut() {
         let _ = controls.set_metadata(MediaMetadata {
-            title: app.now.as_ref().map(|n| n.title.as_str()),
-            artist: app.now.as_ref().map(|n| n.artist.as_str()),
-            album: app.now.as_ref().map(|n| n.album.as_str()),
+            title: app.playback.now.as_ref().map(|n| n.title.as_str()),
+            artist: app.playback.now.as_ref().map(|n| n.artist.as_str()),
+            album: app.playback.now.as_ref().map(|n| n.album.as_str()),
             cover_url: meta.image.url.as_deref(),
             duration: app
+                .playback
                 .now
                 .as_ref()
                 .map(|n| Duration::from_millis(n.duration_ms as u64)),
@@ -3359,7 +3395,7 @@ fn fetch_detail_blocking(token: &str, uri: &str, name: &str) -> (String, Vec<Lib
 // --- Live playback state (server-side) ---
 
 /// The current playback as Spotify remembers it (across devices).
-struct PlaybackState {
+struct RemotePlaybackState {
     track_id: String,
     progress_ms: u32,
     shuffle: bool,
@@ -3367,7 +3403,7 @@ struct PlaybackState {
     volume: u8,
 }
 
-fn fetch_playback_state(token: &str) -> Option<PlaybackState> {
+fn fetch_playback_state(token: &str) -> Option<RemotePlaybackState> {
     let client = http_client();
     let resp = client
         .get(format!("{API}/me/player"))
@@ -3379,7 +3415,7 @@ fn fetch_playback_state(token: &str) -> Option<PlaybackState> {
     }
     let v: serde_json::Value = resp.json().ok()?;
     let track_id = v["item"]["id"].as_str()?.to_string();
-    Some(PlaybackState {
+    Some(RemotePlaybackState {
         track_id,
         progress_ms: v["progress_ms"].as_u64().unwrap_or(0) as u32,
         shuffle: v["shuffle_state"].as_bool().unwrap_or(false),
@@ -3418,7 +3454,11 @@ fn transfer_playback(token: &str, device_id: &str, play: bool) -> Result<(), Str
 
 /// Boot restore: read the live playback state, transfer it onto myx (retrying
 /// while the device registers), and hand the state back to the UI.
-fn spawn_restore(webapi: Arc<Mutex<WebApi>>, device_id: String, tx: flume::Sender<PlaybackState>) {
+fn spawn_restore(
+    webapi: Arc<Mutex<WebApi>>,
+    device_id: String,
+    tx: flume::Sender<RemotePlaybackState>,
+) {
     tokio::task::spawn_blocking(move || {
         let Some(token) = token_of(&webapi) else {
             return;
@@ -3841,7 +3881,7 @@ fn render_library(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, ar
 
 /// View ①: album art with track details directly beneath — centered as a group.
 fn render_nowplaying_view(f: &mut Frame, app: &App, theme: Theme, area: Rect, repaint: ArtRepaint) {
-    if app.now.is_none() {
+    if app.playback.now.is_none() {
         f.render_widget(
             Paragraph::new("Nothing playing.\nBrowse ← and press Enter.")
                 .style(theme.muted())
@@ -3895,7 +3935,7 @@ fn render_nowplaying_view(f: &mut Frame, app: &App, theme: Theme, area: Rect, re
         height: art_h,
     };
 
-    match app.now.as_ref().and_then(|n| n.cover.as_ref()) {
+    match app.playback.now.as_ref().and_then(|n| n.cover.as_ref()) {
         _ if repaint == ArtRepaint::Wipe => wipe_area(f, art_rect),
         // Writing the escape means transmitting the image, so only do it when
         // something actually asked for it. A theme fade repaints every glyph on
@@ -3910,7 +3950,7 @@ fn render_nowplaying_view(f: &mut Frame, app: &App, theme: Theme, area: Rect, re
         None => wipe_area(f, art_rect),
     }
 
-    if let Some(n) = app.now.as_ref() {
+    if let Some(n) = app.playback.now.as_ref() {
         let text_rect = Rect {
             x: top.x,
             y: art_rect.y + art_h + 1,
@@ -3951,11 +3991,17 @@ fn render_now_strip(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, 
     render_volume(f, app, out, theme, rows[0]);
 
     // Seek/progress bar (bottom row). Record bar geometry for click-to-seek.
-    let pos = app.position_ms();
+    let pos = app.playback.position_ms();
     let left_len = format!("{} ", fmt_ms(pos)).chars().count() as u16;
     let right_len = format!(
         " {}",
-        fmt_ms(app.now.as_ref().map(|n| n.duration_ms).unwrap_or(0))
+        fmt_ms(
+            app.playback
+                .now
+                .as_ref()
+                .map(|n| n.duration_ms)
+                .unwrap_or(0)
+        )
     )
     .chars()
     .count() as u16;
@@ -4010,7 +4056,7 @@ fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
 
     // Header: current track title + "artist · album", above the lyrics.
     let mut lyrics_area = inner;
-    if let Some(n) = app.now.as_ref() {
+    if let Some(n) = app.playback.now.as_ref() {
         let head = Layout::vertical([
             Constraint::Length(1), // title
             Constraint::Length(1), // artist / album
@@ -4042,7 +4088,7 @@ fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     }
 
     if app.lyrics.is_empty() {
-        let msg = if app.now.is_some() {
+        let msg = if app.playback.now.is_some() {
             "♪︎  no lyrics for this track"
         } else {
             "♪︎  nothing playing"
@@ -4057,7 +4103,7 @@ fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     }
 
     let h = lyrics_area.height as usize;
-    let pos = app.position_ms();
+    let pos = app.playback.position_ms();
     let cur = if app.lyrics_synced {
         app.lyrics.iter().rposition(|(t, _)| *t <= pos).unwrap_or(0)
     } else {
@@ -4184,8 +4230,8 @@ fn render_visualizer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
 }
 
 fn render_progress(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
-    let (pos, dur) = match &app.now {
-        Some(n) => (app.position_ms(), n.duration_ms.max(1)),
+    let (pos, dur) = match &app.playback.now {
+        Some(n) => (app.playback.position_ms(), n.duration_ms.max(1)),
         None => (0, 1),
     };
     // Compute the bar width from the exact label lengths so the duration sits
@@ -4212,7 +4258,7 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let key = |k: &'static str| Span::styled(k, Style::default().fg(theme.primary.into()));
     let lbl = |t: &'static str| Span::styled(t, theme.muted());
     let enter_lbl = enter_label(app.cur_items().get(app.selected));
-    let play_lbl = if app.now.as_ref().is_some_and(|n| n.is_playing) {
+    let play_lbl = if app.playback.now.as_ref().is_some_and(|n| n.is_playing) {
         " pause   "
     } else {
         " play    "
@@ -4330,7 +4376,7 @@ fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     }
 
     // Now playing — the current track, above the up-next list.
-    if let Some(n) = app.now.as_ref() {
+    if let Some(n) = app.playback.now.as_ref() {
         lines.push(Line::from(Span::styled("NOW PLAYING", theme.heading())));
         lines.push(Line::from(vec![
             Span::styled("   ", theme.muted()),
