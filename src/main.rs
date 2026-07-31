@@ -1190,7 +1190,8 @@ async fn run_ui(
                     // touches every glyph on screen shows up half-applied.
                     // Terminals that don't know the mode ignore it.
                     let _ = execute!(io::stdout(), BeginSynchronizedUpdate);
-                    let drawn = terminal.draw(|f| render(f, &mut app));
+                    let repaint = app.art_repaint;
+                    let drawn = terminal.draw(|f| render(f, &mut app, repaint));
                     let _ = execute!(io::stdout(), EndSynchronizedUpdate);
                     drawn?;
                     app.art_repaint = app.art_repaint.advance();
@@ -3386,7 +3387,7 @@ fn spawn_restore(webapi: Arc<Mutex<WebApi>>, device_id: String, tx: flume::Sende
 
 // ------------------------------------------------------------------ render
 
-fn render(f: &mut Frame, app: &mut App) {
+fn render(f: &mut Frame, app: &mut App, repaint: ArtRepaint) {
     let theme = app.displayed;
     let area = f.area();
     f.render_widget(Block::default().style(theme.base()), area);
@@ -3465,7 +3466,7 @@ fn render(f: &mut Frame, app: &mut App) {
         body[1]
     };
     match app.view {
-        RightView::NowPlaying => render_nowplaying_view(f, app, theme, right),
+        RightView::NowPlaying => render_nowplaying_view(f, app, theme, right, repaint),
         RightView::Lyrics => render_lyrics(f, app, theme, right),
         RightView::Queue => render_queue_view(f, app, theme, right),
     }
@@ -3785,7 +3786,13 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
 }
 
 /// View ①: album art with track details directly beneath — centered as a group.
-fn render_nowplaying_view(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
+fn render_nowplaying_view(
+    f: &mut Frame,
+    app: &mut App,
+    theme: Theme,
+    area: Rect,
+    repaint: ArtRepaint,
+) {
     if app.now.is_none() {
         f.render_widget(
             Paragraph::new("Nothing playing.\nBrowse ← and press Enter.")
@@ -3840,7 +3847,6 @@ fn render_nowplaying_view(f: &mut Frame, app: &mut App, theme: Theme, area: Rect
         height: art_h,
     };
 
-    let repaint = app.art_repaint;
     match app.now.as_ref().and_then(|n| n.cover.as_ref()) {
         _ if repaint == ArtRepaint::Wipe => wipe_area(f, art_rect),
         // Writing the escape means transmitting the image, so only do it when
