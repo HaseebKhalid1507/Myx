@@ -68,7 +68,7 @@ fn truncate_counts_scalar_values_not_grapheme_clusters() {
     let decomposed = "e\u{0301}llo"; // 5 chars
     assert_eq!(truncate(decomposed, 5), decomposed);
     assert_eq!(truncate(decomposed, 2), "e…"); // the combining accent is dropped
-    // A ZWJ emoji family is many scalar values, not one.
+                                               // A ZWJ emoji family is many scalar values, not one.
     let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"; // 5 chars
     assert_eq!(truncate(family, 5), family);
     assert_eq!(truncate(family, 2), "\u{1F468}…");
@@ -246,7 +246,10 @@ fn uri_to_url_empty_and_malformed() {
     assert_eq!(uri_to_url(""), "https://open.spotify.com//");
     assert_eq!(uri_to_url("nonsense"), "https://open.spotify.com//");
     assert_eq!(uri_to_url("spotify"), "https://open.spotify.com//");
-    assert_eq!(uri_to_url("spotify:track"), "https://open.spotify.com/track/");
+    assert_eq!(
+        uri_to_url("spotify:track"),
+        "https://open.spotify.com/track/"
+    );
     assert_eq!(uri_to_url("::"), "https://open.spotify.com//");
 }
 
@@ -271,7 +274,10 @@ fn track_id_from_uri_rejects_other_kinds() {
 fn track_id_from_uri_rejects_non_spotify_uris() {
     assert_eq!(track_id_from_uri(""), None);
     assert_eq!(track_id_from_uri("track:abc"), None);
-    assert_eq!(track_id_from_uri("https://open.spotify.com/track/abc"), None);
+    assert_eq!(
+        track_id_from_uri("https://open.spotify.com/track/abc"),
+        None
+    );
     assert_eq!(track_id_from_uri("Spotify:track:abc"), None); // case sensitive
     assert_eq!(track_id_from_uri("spotify:track"), None); // missing id segment
 }
@@ -294,10 +300,7 @@ fn track_id_from_uri_accepts_empty_id_quirk() {
 
 #[test]
 fn urlencode_passes_unreserved_chars_through() {
-    assert_eq!(
-        urlencode("abcXYZ0189-_.~"),
-        "abcXYZ0189-_.~"
-    );
+    assert_eq!(urlencode("abcXYZ0189-_.~"), "abcXYZ0189-_.~");
 }
 
 #[test]

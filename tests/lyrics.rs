@@ -137,10 +137,7 @@ fn parse_lrc_equal_timestamps_keep_source_order() {
     let lrc = "[00:05.00]alpha\n[00:05.00]beta";
     assert_eq!(
         parse_lrc(lrc),
-        vec![
-            (5_000, "alpha".to_string()),
-            (5_000, "beta".to_string()),
-        ]
+        vec![(5_000, "alpha".to_string()), (5_000, "beta".to_string()),]
     );
 }
 
@@ -183,7 +180,10 @@ fn parse_lrc_skips_metadata_only_lines() {
 fn parse_lrc_metadata_before_a_stamp_swallows_the_whole_line_quirk() {
     // QUIRK: once a leading tag fails to parse the loop bails, so a valid
     // timestamp that follows a metadata tag on the SAME line is dropped.
-    assert_eq!(parse_lrc("[ar:Artist][00:01.00]words"), Vec::<(u32, String)>::new());
+    assert_eq!(
+        parse_lrc("[ar:Artist][00:01.00]words"),
+        Vec::<(u32, String)>::new()
+    );
 }
 
 #[test]
@@ -203,7 +203,10 @@ fn parse_lrc_lines_without_any_stamp_are_dropped() {
 
 #[test]
 fn parse_lrc_unterminated_bracket_is_dropped() {
-    assert_eq!(parse_lrc("[00:01.00 missing brace"), Vec::<(u32, String)>::new());
+    assert_eq!(
+        parse_lrc("[00:01.00 missing brace"),
+        Vec::<(u32, String)>::new()
+    );
     assert_eq!(parse_lrc("["), Vec::<(u32, String)>::new());
 }
 
@@ -269,7 +272,10 @@ fn parse_lrc_realistic_file_with_header_block() {
     assert_eq!(out.len(), 5);
     assert_eq!(out[0], (0, String::new()));
     assert_eq!(out[1], (22_100, "Everything".to_string()));
-    assert_eq!(out[4], (38_200, "Yesterday I woke up sucking a lemon".to_string()));
+    assert_eq!(
+        out[4],
+        (38_200, "Yesterday I woke up sucking a lemon".to_string())
+    );
 }
 
 #[test]
