@@ -17,6 +17,20 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  nix-build:
+    name: Nix build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      - name: Check flake
+        run: nix flake check --no-update-lock-file --print-build-logs
+
+      - name: Build with Nix
+        run: nix build --no-update-lock-file --print-build-logs
+
   test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
