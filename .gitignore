@@ -1,4 +1,5 @@
 /target
+/result
 
 # local runtime caches (auth tokens, saved state)
 .cache/
