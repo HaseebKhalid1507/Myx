@@ -582,6 +582,15 @@ struct BrowseState {
     details: Vec<Detail>,
 }
 
+/// The `/` search overlay: whether the prompt is capturing keys, the typed
+/// query, and the results that temporarily replace the library list.
+struct SearchState {
+    input_mode: bool,
+    query: String,
+    searching: bool,
+    search_results: Vec<LibItem>,
+}
+
 struct App {
     svc: Services,
     theme: ThemeState,
@@ -592,11 +601,7 @@ struct App {
     status: String,
     browse: BrowseState,
     transport: Transport,
-    // Search
-    input_mode: bool,
-    query: String,
-    searching: bool,
-    search_results: Vec<LibItem>,
+    search: SearchState,
     // Lyrics: (timestamp_ms, line). Synced when timestamps are non-zero.
     lyrics: Vec<(u32, String)>,
     lyrics_synced: bool,
@@ -692,8 +697,8 @@ impl App {
     fn cur_items(&self) -> &[LibItem] {
         if let Some(d) = self.browse.details.last() {
             &d.items
-        } else if self.searching {
-            &self.search_results
+        } else if self.search.searching {
+            &self.search.search_results
         } else {
             self.browse.library.items(self.browse.section)
         }
@@ -701,8 +706,8 @@ impl App {
     fn cur_list_mut(&mut self) -> &mut Vec<LibItem> {
         if let Some(d) = self.browse.details.last_mut() {
             &mut d.items
-        } else if self.searching {
-            &mut self.search_results
+        } else if self.search.searching {
+            &mut self.search.search_results
         } else {
             self.browse.library.items_mut(self.browse.section)
         }
@@ -807,7 +812,7 @@ impl App {
             return Activated::None;
         }
         if item.is_track {
-            if self.searching {
+            if self.search.searching {
                 // A search-result song starts that song's radio (seed + similar).
                 self.transport.source = PlaySource::Radio(item.uri.clone());
                 self.transport.source_name = format!("Radio · {}", item.name);
@@ -1041,10 +1046,12 @@ async fn boot(
             source: saved.source.clone(),
             source_name: saved.source_name.clone(),
         },
-        input_mode: false,
-        query: String::new(),
-        searching: false,
-        search_results: Vec::new(),
+        search: SearchState {
+            input_mode: false,
+            query: String::new(),
+            searching: false,
+            search_results: Vec::new(),
+        },
         lyrics: Vec::new(),
         lyrics_synced: false,
         view: RightView::NowPlaying,
@@ -1361,9 +1368,9 @@ async fn run_ui(
             }
             s = search_rx.recv_async() => {
                 if let Ok(results) = s {
-                    app.search_results = results;
+                    app.search.search_results = results;
                     app.browse.selected = app.first_selectable();
-                    app.status = if app.search_results.is_empty() {
+                    app.status = if app.search.search_results.is_empty() {
                         "no results".to_string()
                     } else {
                         String::new()
@@ -1719,23 +1726,23 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
     }
 
     // --- Search input mode captures everything ---
-    if app.input_mode {
+    if app.search.input_mode {
         match code {
-            KeyCode::Esc => app.input_mode = false,
+            KeyCode::Esc => app.search.input_mode = false,
             KeyCode::Enter => {
-                app.input_mode = false;
-                let q = app.query.trim().to_string();
+                app.search.input_mode = false;
+                let q = app.search.query.trim().to_string();
                 if !q.is_empty() {
-                    app.searching = true;
+                    app.search.searching = true;
                     app.browse.selected = 0;
                     app.status = "searching…".to_string();
                     spawn_search(app.svc.webapi.clone(), q, chans.search.clone());
                 }
             }
             KeyCode::Backspace => {
-                app.query.pop();
+                app.search.query.pop();
             }
-            KeyCode::Char(c) => app.query.push(c),
+            KeyCode::Char(c) => app.search.query.push(c),
             _ => {}
         }
         return false;
@@ -1750,15 +1757,15 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
 
     match code {
         KeyCode::Char('/') => {
-            app.input_mode = true;
-            app.query.clear();
+            app.search.input_mode = true;
+            app.search.query.clear();
         }
         KeyCode::Char('q') => return true,
         KeyCode::Esc => {
             if let Some(d) = app.browse.details.pop() {
                 app.browse.selected = d.parent_selected;
-            } else if app.searching {
-                app.searching = false;
+            } else if app.search.searching {
+                app.search.searching = false;
                 app.browse.selected = 0;
             }
             // Nothing to back out of — Esc no longer quits (use q or Ctrl-C twice).
@@ -1851,12 +1858,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
         }
         // Tab / Shift+Tab (and [ ]) rotate the library sections.
         KeyCode::Tab | KeyCode::Char(']') => {
-            app.searching = false;
+            app.search.searching = false;
             app.browse.section = app.browse.section.shift(1);
             app.browse.selected = app.first_selectable();
         }
         KeyCode::BackTab | KeyCode::Char('[') => {
-            app.searching = false;
+            app.search.searching = false;
             app.browse.section = app.browse.section.shift(-1);
             app.browse.selected = app.first_selectable();
         }
@@ -3714,18 +3721,21 @@ fn render_library(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, ar
             ),
             Span::styled("  Esc", theme.muted()),
         ])
-    } else if app.input_mode {
+    } else if app.search.input_mode {
         Line::from(vec![
             Span::styled("search: ", theme.heading()),
             Span::styled(
-                format!("{}▏", app.query),
+                format!("{}▏", app.search.query),
                 Style::default().fg(theme.text.into()),
             ),
         ])
-    } else if app.searching {
+    } else if app.search.searching {
         Line::from(vec![
             Span::styled("search: ", theme.heading()),
-            Span::styled(app.query.clone(), Style::default().fg(theme.text.into())),
+            Span::styled(
+                app.search.query.clone(),
+                Style::default().fg(theme.text.into()),
+            ),
             Span::styled("  (Esc)", theme.muted()),
         ])
     } else {
