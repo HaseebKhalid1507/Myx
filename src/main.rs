@@ -596,7 +596,7 @@ struct SearchState {
 /// overlay drawn on top of everything.
 struct ViewState {
     // Which view fills the right pane.
-    view: RightView,
+    mode: RightView,
     // Sidebar hidden, so the right view (and its cover) gets the whole width.
     zen: bool,
     // Lyrics: (timestamp_ms, line). Synced when timestamps are non-zero.
@@ -1067,7 +1067,7 @@ async fn boot(
             search_results: Vec::new(),
         },
         view: ViewState {
-            view: RightView::NowPlaying,
+            mode: RightView::NowPlaying,
             zen: false,
             lyrics: Vec::new(),
             lyrics_synced: false,
@@ -1202,7 +1202,7 @@ async fn run_ui(
     let mut last_sync = Instant::now();
     // Nothing is on screen yet, so the first tick must draw.
     let mut dirty = true;
-    let mut last_layout = (app.view.view, app.view.zen);
+    let mut last_layout = (app.view.mode, app.view.zen);
     let mut overlay_open = app.view.actions.is_some();
     // What the renderer writes. Lives across frames: the hit rects are what the
     // mouse handler reads between draws, and `lib_offset` is fed back into the
@@ -1277,14 +1277,14 @@ async fn run_ui(
                 // its frame rate buys nothing. Synced lyrics move too — at the
                 // idle rate the highlighted line lands half a second late.
                 let animating = app.theme.fade.is_some()
-                    || (app.view.view == RightView::Lyrics && app.view.lyrics_synced)
-                    || (app.view.view == RightView::NowPlaying
+                    || (app.view.mode == RightView::Lyrics && app.view.lyrics_synced)
+                    || (app.view.mode == RightView::NowPlaying
                         && app.svc.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false));
                 if app.art_repaint != ArtRepaint::Idle {
                     dirty = true;
                 }
-                if (app.view.view, app.view.zen) != last_layout {
-                    last_layout = (app.view.view, app.view.zen);
+                if (app.view.mode, app.view.zen) != last_layout {
+                    last_layout = (app.view.mode, app.view.zen);
                     app.art_repaint = ArtRepaint::Wipe;
                     dirty = true;
                 }
@@ -1658,7 +1658,7 @@ fn handle_mouse(
                 .find(|(_, r)| m.row == r.y && m.column >= r.x && m.column < r.x + r.width)
                 .map(|(v, _)| *v);
             if let Some(v) = hit {
-                app.view.view = v;
+                app.view.mode = v;
                 consumed = true;
             }
         }
@@ -1895,16 +1895,16 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
             app.playback.seek_step(-SEEK_STEP_MS)
         }
         KeyCode::Right => {
-            app.view.view = app.view.view.shift(1);
-            if app.view.view == RightView::Queue
+            app.view.mode = app.view.mode.shift(1);
+            if app.view.mode == RightView::Queue
                 && (app.session.reclaimed || app.transport.playback_started)
             {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         KeyCode::Left => {
-            app.view.view = app.view.view.shift(-1);
-            if app.view.view == RightView::Queue
+            app.view.mode = app.view.mode.shift(-1);
+            if app.view.mode == RightView::Queue
                 && (app.session.reclaimed || app.transport.playback_started)
             {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
@@ -3634,7 +3634,7 @@ fn render(f: &mut Frame, app: &App, out: &mut FrameOut, repaint: ArtRepaint) {
         render_library(f, app, out, theme, body[0]);
         body[1]
     };
-    match app.view.view {
+    match app.view.mode {
         RightView::NowPlaying => render_nowplaying_view(f, app, theme, right, repaint),
         RightView::Lyrics => render_lyrics(f, app, theme, right),
         RightView::Queue => render_queue_view(f, app, theme, right),
@@ -3700,7 +3700,7 @@ fn view_tabs<'a>(app: &App, theme: Theme) -> Vec<Span<'a>> {
         if i > 0 {
             spans.push(Span::styled(" · ", theme.muted()));
         }
-        let style = if *v == app.view.view {
+        let style = if *v == app.view.mode {
             Style::default()
                 .fg(theme.primary.into())
                 .add_modifier(Modifier::BOLD)
