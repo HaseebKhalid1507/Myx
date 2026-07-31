@@ -472,6 +472,37 @@ impl SavedState {
     }
 }
 
+/// Mouse hit rects, written by the renderer and read only by `handle_mouse`.
+///
+/// Pure output: every field is (re)set or cleared on each frame that draws the
+/// thing it belongs to, so nothing here is threaded frame-to-frame.
+#[derive(Default)]
+struct HitRects {
+    /// Last-rendered progress-bar rect (for click-to-seek).
+    bar: Option<Rect>,
+    /// Last-rendered sidebar scrollbar track + item count (drag-to-scroll).
+    scroll: Option<Rect>,
+    scroll_len: usize,
+    /// Last-rendered volume-meter bar region (click/drag to set volume).
+    vol: Option<Rect>,
+    /// View tabs in the header.
+    tabs: Vec<(RightView, Rect)>,
+    /// Library list viewport.
+    lib: Option<Rect>,
+}
+
+/// Everything the renderer writes, kept out of `App` so every render function
+/// can take `&App`.
+#[derive(Default)]
+struct FrameOut {
+    hits: HitRects,
+    /// Library viewport start row. Unlike `hits`, this is read-modify-write:
+    /// the renderer feeds the previous frame's value into `scroll_offset` and
+    /// stores the result back, which is what makes scrolling sticky. Owned by
+    /// `run_ui` so it survives across frames.
+    lib_offset: usize,
+}
+
 struct App {
     engine: Engine,
     picker: Picker,
@@ -521,19 +552,8 @@ struct App {
     source: PlaySource,
     source_name: String,
     sort: SortMode,
-    // Last-rendered progress-bar rect (for click-to-seek).
-    bar_rect: Option<Rect>,
-    // Last-rendered sidebar scrollbar track + item count (drag-to-scroll).
-    scroll_rect: Option<Rect>,
-    scroll_len: usize,
-    // Last-rendered volume-meter bar region (click/drag to set volume).
-    vol_rect: Option<Rect>,
     // Timestamp of last Ctrl-C — a second press within 1.5s quits.
     last_ctrl_c: Option<Instant>,
-    // Mouse hit rects: view tabs, library list viewport (+its offset), last click.
-    tab_rects: Vec<(RightView, Rect)>,
-    lib_rect: Option<Rect>,
-    lib_offset: usize,
     last_click: Option<(u16, Instant)>,
     // Sidebar hidden, so the right view (and its cover) gets the whole width.
     zen: bool,
@@ -959,14 +979,7 @@ async fn boot(
         source: saved.source.clone(),
         source_name: saved.source_name.clone(),
         sort: SortMode::Added,
-        bar_rect: None,
-        scroll_rect: None,
-        scroll_len: 0,
-        vol_rect: None,
         last_ctrl_c: None,
-        tab_rects: Vec::new(),
-        lib_rect: None,
-        lib_offset: 0,
         last_click: None,
         zen: false,
         seek_target: None,
@@ -1091,6 +1104,10 @@ async fn run_ui(
     let mut dirty = true;
     let mut last_layout = (app.view, app.zen);
     let mut overlay_open = app.actions.is_some();
+    // What the renderer writes. Lives across frames: the hit rects are what the
+    // mouse handler reads between draws, and `lib_offset` is fed back into the
+    // next frame's sticky-viewport calculation.
+    let mut out = FrameOut::default();
 
     loop {
         let touched = tokio::select! {
@@ -1191,7 +1208,7 @@ async fn run_ui(
                     // Terminals that don't know the mode ignore it.
                     let _ = execute!(io::stdout(), BeginSynchronizedUpdate);
                     let repaint = app.art_repaint;
-                    let drawn = terminal.draw(|f| render(f, &mut app, repaint));
+                    let drawn = terminal.draw(|f| render(f, &app, &mut out, repaint));
                     let _ = execute!(io::stdout(), EndSynchronizedUpdate);
                     drawn?;
                     app.art_repaint = app.art_repaint.advance();
@@ -1224,7 +1241,7 @@ async fn run_ui(
                         }
                     }
                     Ok(Event::Mouse(m)) => {
-                        let quit = handle_mouse(&mut app, m, &chans);
+                        let quit = handle_mouse(&mut app, &out, m, &chans);
                         if quit {
                             save_state(&app);
                             break;
@@ -1449,7 +1466,12 @@ fn play_selected_context(app: &mut App, shuffle: bool) {
 }
 
 /// Mouse input. Mirrors `handle_key`: returns `true` when the app should quit.
-fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent, chans: &UiChannels) -> bool {
+fn handle_mouse(
+    app: &mut App,
+    out: &FrameOut,
+    m: crossterm::event::MouseEvent,
+    chans: &UiChannels,
+) -> bool {
     if matches!(
         m.kind,
         MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
@@ -1457,7 +1479,7 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent, chans: &UiChanne
         let is_down = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
         let mut consumed = false;
         // Drag the sidebar scrollbar (2-col grab target) to scroll.
-        if let Some(sb) = app.scroll_rect {
+        if let Some(sb) = out.hits.scroll {
             if m.column + 1 >= sb.x
                 && m.column <= sb.x
                 && m.row >= sb.y
@@ -1465,7 +1487,7 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent, chans: &UiChanne
                 && sb.height > 0
             {
                 consumed = true;
-                let total = app.scroll_len;
+                let total = out.hits.scroll_len;
                 if total > 1 {
                     let denom = sb.height.saturating_sub(1).max(1) as f32;
                     let frac = (m.row - sb.y) as f32 / denom;
@@ -1477,7 +1499,7 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent, chans: &UiChanne
         }
         // Click/drag the volume meter bars to set volume.
         if !consumed {
-            if let Some(vr) = app.vol_rect {
+            if let Some(vr) = out.hits.vol {
                 if m.row == vr.y && m.column >= vr.x && m.column < vr.x + vr.width && vr.width > 0 {
                     consumed = true;
                     let offset = (m.column - vr.x) as u32;
@@ -1489,7 +1511,7 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent, chans: &UiChanne
         }
         // Otherwise an initial click on the progress bar seeks.
         if !consumed && is_down {
-            if let Some(bar) = app.bar_rect {
+            if let Some(bar) = out.hits.bar {
                 if m.row == bar.y
                     && m.column >= bar.x
                     && m.column < bar.x + bar.width
@@ -1504,8 +1526,9 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent, chans: &UiChanne
         }
         // View-tab click -> switch the right pane.
         if !consumed && is_down {
-            let hit = app
-                .tab_rects
+            let hit = out
+                .hits
+                .tabs
                 .iter()
                 .find(|(_, r)| m.row == r.y && m.column >= r.x && m.column < r.x + r.width)
                 .map(|(v, _)| *v);
@@ -1516,13 +1539,13 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent, chans: &UiChanne
         }
         // Library click -> select; double-click (same row <400ms) -> activate.
         if !consumed && is_down {
-            if let Some(lr) = app.lib_rect {
+            if let Some(lr) = out.hits.lib {
                 if m.column >= lr.x
                     && m.column < lr.x + lr.width
                     && m.row >= lr.y
                     && m.row < lr.y + lr.height
                 {
-                    let idx = app.lib_offset + (m.row - lr.y) as usize;
+                    let idx = out.lib_offset + (m.row - lr.y) as usize;
                     let selectable = app
                         .cur_items()
                         .get(idx)
@@ -3387,7 +3410,7 @@ fn spawn_restore(webapi: Arc<Mutex<WebApi>>, device_id: String, tx: flume::Sende
 
 // ------------------------------------------------------------------ render
 
-fn render(f: &mut Frame, app: &mut App, repaint: ArtRepaint) {
+fn render(f: &mut Frame, app: &App, out: &mut FrameOut, repaint: ArtRepaint) {
     let theme = app.displayed;
     let area = f.area();
     f.render_widget(Block::default().style(theme.base()), area);
@@ -3451,18 +3474,18 @@ fn render(f: &mut Frame, app: &mut App, repaint: ArtRepaint) {
         ));
         tx_x = tx_x.saturating_add(w);
     }
-    app.tab_rects = tabs;
+    out.hits.tabs = tabs;
 
     let right = if app.zen {
         // Hidden, not zero-width: a rendered sidebar still claims mouse rects.
-        app.lib_rect = None;
-        app.scroll_rect = None;
+        out.hits.lib = None;
+        out.hits.scroll = None;
         rows[2]
     } else {
         let body = Layout::horizontal([Constraint::Percentage(30), Constraint::Min(24)])
             .spacing(3)
             .split(rows[2]);
-        render_library(f, app, theme, body[0]);
+        render_library(f, app, out, theme, body[0]);
         body[1]
     };
     match app.view {
@@ -3471,7 +3494,7 @@ fn render(f: &mut Frame, app: &mut App, repaint: ArtRepaint) {
         RightView::Queue => render_queue_view(f, app, theme, right),
     }
 
-    render_now_strip(f, app, theme, rows[4]);
+    render_now_strip(f, app, out, theme, rows[4]);
     render_footer(f, app, theme, rows[5]);
 
     if app.actions.is_some() {
@@ -3560,7 +3583,7 @@ fn scroll_offset(offset: usize, selected: usize, cap: usize, total: usize, margi
         .min(total - cap)
 }
 
-fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
+fn render_library(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, area: Rect) {
     f.render_widget(Block::default().style(theme.panel()), area);
     let inner = area.inner(Margin::new(2, 1));
     if inner.height < 2 {
@@ -3632,8 +3655,8 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     let total_items = app.cur_items().len();
 
     if total_items == 0 {
-        app.scroll_rect = None;
-        app.lib_rect = None;
+        out.hits.scroll = None;
+        out.hits.lib = None;
         f.render_widget(
             Paragraph::new(Line::from(Span::styled("(empty)", theme.muted())))
                 .block(Block::default().style(theme.panel())),
@@ -3648,19 +3671,19 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     }
 
     let offset = scroll_offset(
-        app.lib_offset,
+        out.lib_offset,
         app.selected,
         cap,
         total_items,
         myx::config::get().scrolloff,
     );
-    app.lib_rect = Some(Rect {
+    out.hits.lib = Some(Rect {
         x: inner.x,
         y: list_top,
         width: inner.width,
         height: cap as u16,
     });
-    app.lib_offset = offset;
+    out.lib_offset = offset;
     let overflow = total_items > cap && inner.width > 2;
     // Reserve an extra gutter column for the scrollbar (+1 char of padding).
     let max = inner.width.saturating_sub(if overflow { 3 } else { 2 }) as usize;
@@ -3773,26 +3796,20 @@ fn render_library(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
                 },
             );
         }
-        app.scroll_rect = Some(Rect {
+        out.hits.scroll = Some(Rect {
             x: sb_x,
             y: list_top,
             width: 1,
             height: track_h as u16,
         });
-        app.scroll_len = total;
+        out.hits.scroll_len = total;
     } else {
-        app.scroll_rect = None;
+        out.hits.scroll = None;
     }
 }
 
 /// View ①: album art with track details directly beneath — centered as a group.
-fn render_nowplaying_view(
-    f: &mut Frame,
-    app: &mut App,
-    theme: Theme,
-    area: Rect,
-    repaint: ArtRepaint,
-) {
+fn render_nowplaying_view(f: &mut Frame, app: &App, theme: Theme, area: Rect, repaint: ArtRepaint) {
     if app.now.is_none() {
         f.render_widget(
             Paragraph::new("Nothing playing.\nBrowse ← and press Enter.")
@@ -3895,12 +3912,12 @@ fn render_nowplaying_view(
 }
 
 /// Slim persistent bottom strip: play state + track, then the progress bar.
-fn render_now_strip(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
+fn render_now_strip(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
 
     // Volume meter (top row, far right). Still honest in remote mode: +/- goes
     // to the remote device's volume.
-    render_volume(f, app, theme, rows[0]);
+    render_volume(f, app, out, theme, rows[0]);
 
     // Seek/progress bar (bottom row). Record bar geometry for click-to-seek.
     let pos = app.position_ms();
@@ -3912,7 +3929,7 @@ fn render_now_strip(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     .chars()
     .count() as u16;
     let bar_w = rows[1].width.saturating_sub(left_len + right_len);
-    app.bar_rect = Some(Rect {
+    out.hits.bar = Some(Rect {
         x: rows[1].x + left_len,
         y: rows[1].y,
         width: bar_w,
@@ -3922,8 +3939,8 @@ fn render_now_strip(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
 }
 
 /// The volume meter — a graduated ramp + percentage, right-aligned in `area`.
-/// Stashes the 8-bar region on `app` for click/drag control.
-fn render_volume(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
+/// Stashes the 8-bar region on `out` for click/drag control.
+fn render_volume(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, area: Rect) {
     const VLEV: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let filled = (app.volume as usize * VLEV.len() + 50) / 100;
     let mut vspans: Vec<Span> = Vec::with_capacity(VLEV.len() + 1);
@@ -3945,7 +3962,7 @@ fn render_volume(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
     );
     // 8-bar region for click/drag. Content is 13 cells (8 bars + " NNN%"),
     // right-aligned, so the bars start 13 cells in from the right edge.
-    app.vol_rect = Some(Rect {
+    out.hits.vol = Some(Rect {
         x: area.right().saturating_sub(13),
         y: area.y,
         width: VLEV.len() as u16,
