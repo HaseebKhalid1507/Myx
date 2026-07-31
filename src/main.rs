@@ -570,6 +570,18 @@ struct PlaybackState {
     seek_last_input: Instant,
 }
 
+/// The library browser: what's loaded, where the cursor is, and the drill-in
+/// stack. The viewport offset is not here — it lives in `FrameOut`, since the
+/// renderer owns it across frames.
+struct BrowseState {
+    library: Library,
+    section: Section,
+    selected: usize,
+    sort: SortMode,
+    // Drill-in stack (artist → album → …). Topmost is what's shown.
+    details: Vec<Detail>,
+}
+
 struct App {
     svc: Services,
     theme: ThemeState,
@@ -578,9 +590,7 @@ struct App {
     // platform media service, but that must never prevent Myx from playing.
     media_controls: Option<MediaControls>,
     status: String,
-    library: Library,
-    section: Section,
-    selected: usize,
+    browse: BrowseState,
     transport: Transport,
     // Search
     input_mode: bool,
@@ -592,8 +602,6 @@ struct App {
     lyrics_synced: bool,
     // Which view fills the right pane.
     view: RightView,
-    // Drill-in stack (artist → album → …). Topmost is what's shown.
-    details: Vec<Detail>,
     // Context actions menu overlay (opened with `a`).
     actions: Option<ActionMenu>,
     restore_uri: Option<String>,
@@ -605,7 +613,6 @@ struct App {
     art_repaint: ArtRepaint,
     // Whether we reclaimed a live server-side session (vs. local fallback).
     reclaimed: bool,
-    sort: SortMode,
     // Timestamp of last Ctrl-C — a second press within 1.5s quits.
     last_ctrl_c: Option<Instant>,
     last_click: Option<(u16, Instant)>,
@@ -683,21 +690,21 @@ impl PlaybackState {
 
 impl App {
     fn cur_items(&self) -> &[LibItem] {
-        if let Some(d) = self.details.last() {
+        if let Some(d) = self.browse.details.last() {
             &d.items
         } else if self.searching {
             &self.search_results
         } else {
-            self.library.items(self.section)
+            self.browse.library.items(self.browse.section)
         }
     }
     fn cur_list_mut(&mut self) -> &mut Vec<LibItem> {
-        if let Some(d) = self.details.last_mut() {
+        if let Some(d) = self.browse.details.last_mut() {
             &mut d.items
         } else if self.searching {
             &mut self.search_results
         } else {
-            self.library.items_mut(self.section)
+            self.browse.library.items_mut(self.browse.section)
         }
     }
     /// First non-header index (where a fresh selection should land).
@@ -714,14 +721,14 @@ impl App {
         if n == 0 {
             return;
         }
-        let mut i = self.selected as isize;
+        let mut i = self.browse.selected as isize;
         loop {
             i += dir;
             if i < 0 || i >= n {
                 return;
             }
             if !items[i as usize].is_header {
-                self.selected = i as usize;
+                self.browse.selected = i as usize;
                 return;
             }
         }
@@ -730,10 +737,10 @@ impl App {
     fn normalize_selection(&mut self) {
         if self
             .cur_items()
-            .get(self.selected)
+            .get(self.browse.selected)
             .is_some_and(|i| i.is_header)
         {
-            self.selected = self.first_selectable();
+            self.browse.selected = self.first_selectable();
         }
     }
     /// The single entry point for "play this context URI".
@@ -755,7 +762,7 @@ impl App {
     /// Play whatever's selected (in the current section, or in search results).
     /// Act on the selected item. Returns what the caller should do next.
     fn activate(&mut self) -> Activated {
-        let Some(item) = self.cur_items().get(self.selected).cloned() else {
+        let Some(item) = self.cur_items().get(self.browse.selected).cloned() else {
             return Activated::None;
         };
         if item.is_header {
@@ -765,6 +772,7 @@ impl App {
             // Special synthetic rows: play the Liked list (optionally shuffled).
             if item.uri == "myx:action:liked-play" {
                 let uris: Vec<String> = self
+                    .browse
                     .library
                     .liked
                     .iter()
@@ -789,6 +797,7 @@ impl App {
             // Inside a drill-in the enclosing title is the better label
             // ("Chill Vibes"); standalone play rows fall back to their own.
             let name = self
+                .browse
                 .details
                 .last()
                 .map(|d| d.title.clone())
@@ -805,7 +814,7 @@ impl App {
                 return Activated::Radio(item.uri);
             }
             // Inside a drill-in → play its context at this track (real queue).
-            if let Some(d) = self.details.last() {
+            if let Some(d) = self.browse.details.last() {
                 let ctx = d.context_uri.clone();
                 self.transport.source = PlaySource::Context(ctx.clone());
                 self.transport.source_name = d.title.clone();
@@ -828,12 +837,12 @@ impl App {
                 .map(|i| i.uri.clone())
                 .collect();
             self.status = format!("starting {}…", item.name);
-            if self.section == Section::Liked {
+            if self.browse.section == Section::Liked {
                 self.transport.source = PlaySource::Liked;
                 self.transport.source_name = "Liked Songs".to_string();
             } else {
                 self.transport.source = PlaySource::None;
-                self.transport.source_name = self.section.label().to_string();
+                self.transport.source_name = self.browse.section.label().to_string();
             }
             if let Err(e) =
                 self.svc
@@ -1011,9 +1020,13 @@ async fn boot(
             fade: None,
         },
         status: "loading library…".to_string(),
-        library: Library::default(),
-        section: Section::Home,
-        selected: 0,
+        browse: BrowseState {
+            library: Library::default(),
+            section: Section::Home,
+            selected: 0,
+            sort: SortMode::Added,
+            details: Vec::new(),
+        },
         transport: Transport {
             shuffle: saved.shuffle,
             repeat: saved.repeat,
@@ -1035,13 +1048,11 @@ async fn boot(
         lyrics: Vec::new(),
         lyrics_synced: false,
         view: RightView::NowPlaying,
-        details: Vec::new(),
         actions: None,
         restore_uri,
         pending_meta: None,
         art_repaint: ArtRepaint::Idle,
         reclaimed: false,
-        sort: SortMode::Added,
         last_ctrl_c: None,
         last_click: None,
         zen: false,
@@ -1188,9 +1199,9 @@ async fn run_ui(
                     for (i, it) in items.iter_mut().enumerate() {
                         it.order = i as u32;
                     }
-                    app.library.set(section, items);
-                    sort_list(app.library.items_mut(section), app.sort);
-                    if section == app.section {
+                    app.browse.library.set(section, items);
+                    sort_list(app.browse.library.items_mut(section), app.browse.sort);
+                    if section == app.browse.section {
                         app.normalize_selection();
                     }
                     app.status = format!("loaded {}", section.label());
@@ -1351,7 +1362,7 @@ async fn run_ui(
             s = search_rx.recv_async() => {
                 if let Ok(results) = s {
                     app.search_results = results;
-                    app.selected = app.first_selectable();
+                    app.browse.selected = app.first_selectable();
                     app.status = if app.search_results.is_empty() {
                         "no results".to_string()
                     } else {
@@ -1369,8 +1380,8 @@ async fn run_ui(
             }
             d = detail_rx.recv_async() => {
                 if let Ok((context_uri, title, items)) = d {
-                    app.details.push(Detail { context_uri, title, items, parent_selected: app.selected });
-                    app.selected = app.first_selectable();
+                    app.browse.details.push(Detail { context_uri, title, items, parent_selected: app.browse.selected });
+                    app.browse.selected = app.first_selectable();
                     app.status.clear();
                 }
                 true
@@ -1472,8 +1483,14 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
                 }));
             });
         }
-        PlaySource::Liked if !app.library.liked.is_empty() => {
-            let uris: Vec<String> = app.library.liked.iter().map(|i| i.uri.clone()).collect();
+        PlaySource::Liked if !app.browse.library.liked.is_empty() => {
+            let uris: Vec<String> = app
+                .browse
+                .library
+                .liked
+                .iter()
+                .map(|i| i.uri.clone())
+                .collect();
             if let Err(e) = app
                 .svc
                 .engine
@@ -1538,7 +1555,7 @@ fn enter_label(item: Option<&LibItem>) -> &'static str {
 /// `P` / `S`: play the highlighted context from anywhere — library section,
 /// search results, or inside a drill-in (`cur_items` resolves all three).
 fn play_selected_context(app: &mut App, shuffle: bool) {
-    let Some(item) = app.cur_items().get(app.selected).cloned() else {
+    let Some(item) = app.cur_items().get(app.browse.selected).cloned() else {
         return;
     };
     match context_target(&item) {
@@ -1574,7 +1591,7 @@ fn handle_mouse(
                     let denom = sb.height.saturating_sub(1).max(1) as f32;
                     let frac = (m.row - sb.y) as f32 / denom;
                     let sel = (frac * (total - 1) as f32).round() as usize;
-                    app.selected = sel.min(total - 1);
+                    app.browse.selected = sel.min(total - 1);
                     app.normalize_selection();
                 }
             }
@@ -1635,7 +1652,7 @@ fn handle_mouse(
                         .map(|it| !it.is_header)
                         .unwrap_or(false);
                     if selectable {
-                        app.selected = idx;
+                        app.browse.selected = idx;
                         let now = Instant::now();
                         let dbl = app
                             .last_click
@@ -1710,7 +1727,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
                 let q = app.query.trim().to_string();
                 if !q.is_empty() {
                     app.searching = true;
-                    app.selected = 0;
+                    app.browse.selected = 0;
                     app.status = "searching…".to_string();
                     spawn_search(app.svc.webapi.clone(), q, chans.search.clone());
                 }
@@ -1738,11 +1755,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
         }
         KeyCode::Char('q') => return true,
         KeyCode::Esc => {
-            if let Some(d) = app.details.pop() {
-                app.selected = d.parent_selected;
+            if let Some(d) = app.browse.details.pop() {
+                app.browse.selected = d.parent_selected;
             } else if app.searching {
                 app.searching = false;
-                app.selected = 0;
+                app.browse.selected = 0;
             }
             // Nothing to back out of — Esc no longer quits (use q or Ctrl-C twice).
         }
@@ -1805,10 +1822,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
             );
         }
         KeyCode::Char('o') => {
-            app.sort = app.sort.next();
-            let m = app.sort;
+            app.browse.sort = app.browse.sort.next();
+            let m = app.browse.sort;
             sort_list(app.cur_list_mut(), m);
-            app.selected = app.first_selectable();
+            app.browse.selected = app.first_selectable();
             app.status = format!("sorted by {}", m.label());
         }
         KeyCode::Char('a') => {
@@ -1822,7 +1839,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
                     .filter(|n| !n.uri.is_empty())
                     .map(|n| LibItem::track(n.title.clone(), n.artist.clone(), n.uri.clone()))
             } else {
-                app.cur_items().get(app.selected).cloned()
+                app.cur_items().get(app.browse.selected).cloned()
             };
             if let Some(item) = item {
                 if !item.is_header && !item.is_play {
@@ -1835,13 +1852,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
         // Tab / Shift+Tab (and [ ]) rotate the library sections.
         KeyCode::Tab | KeyCode::Char(']') => {
             app.searching = false;
-            app.section = app.section.shift(1);
-            app.selected = app.first_selectable();
+            app.browse.section = app.browse.section.shift(1);
+            app.browse.selected = app.first_selectable();
         }
         KeyCode::BackTab | KeyCode::Char('[') => {
             app.searching = false;
-            app.section = app.section.shift(-1);
-            app.selected = app.first_selectable();
+            app.browse.section = app.browse.section.shift(-1);
+            app.browse.selected = app.first_selectable();
         }
         // Arrow keys rotate the right-pane view; Shift+arrows seek ±5s.
         KeyCode::Right if mods.contains(KeyModifiers::SHIFT) => {
@@ -2028,6 +2045,7 @@ fn handle_action_key(
     match kind {
         ActionKind::AddToPlaylistMenu { track_uri } => {
             let items: Vec<ActionItem> = app
+                .browse
                 .library
                 .playlists
                 .iter()
@@ -3687,7 +3705,7 @@ fn render_library(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, ar
     }
 
     // Header line: drill-in title, search input/results, or section indicator.
-    let head: Line = if let Some(d) = app.details.last() {
+    let head: Line = if let Some(d) = app.browse.details.last() {
         Line::from(vec![
             Span::styled("‹ ", Style::default().fg(theme.primary.into())),
             Span::styled(
@@ -3713,21 +3731,21 @@ fn render_library(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, ar
     } else {
         let mut spans = vec![
             Span::styled("‹ ", theme.muted()),
-            Span::styled(app.section.label(), theme.heading()),
+            Span::styled(app.browse.section.label(), theme.heading()),
             Span::styled(" ›", theme.muted()),
             Span::styled(
                 format!(
                     "  {}/{} · {}",
-                    app.section.index() + 1,
+                    app.browse.section.index() + 1,
                     Section::ALL.len(),
                     app.cur_items().len()
                 ),
                 theme.muted(),
             ),
         ];
-        if app.sort != SortMode::Added {
+        if app.browse.sort != SortMode::Added {
             spans.push(Span::styled(
-                format!("  ⇅{}", app.sort.label()),
+                format!("  ⇅{}", app.browse.sort.label()),
                 Style::default().fg(theme.accent.into()),
             ));
         }
@@ -3768,7 +3786,7 @@ fn render_library(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, ar
 
     let offset = scroll_offset(
         out.lib_offset,
-        app.selected,
+        app.browse.selected,
         cap,
         total_items,
         myx::config::get().scrolloff,
@@ -3810,7 +3828,7 @@ fn render_library(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, ar
             continue;
         }
 
-        let selected = idx == app.selected;
+        let selected = idx == app.browse.selected;
         let bg = if selected {
             theme.background_element.into()
         } else {
@@ -4285,7 +4303,7 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let on = |b: bool| if b { theme.success } else { theme.text_muted };
     let key = |k: &'static str| Span::styled(k, Style::default().fg(theme.primary.into()));
     let lbl = |t: &'static str| Span::styled(t, theme.muted());
-    let enter_lbl = enter_label(app.cur_items().get(app.selected));
+    let enter_lbl = enter_label(app.cur_items().get(app.browse.selected));
     let play_lbl = if app.playback.now.as_ref().is_some_and(|n| n.is_playing) {
         " pause   "
     } else {
