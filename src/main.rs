@@ -512,11 +512,39 @@ struct Services {
     webapi: Arc<Mutex<WebApi>>,
 }
 
-struct App {
-    svc: Services,
+/// The palette currently on screen, plus the cross-fade walking it towards
+/// the incoming track's palette. `displayed` is what every widget reads;
+/// `target` is only used to snap exactly on completion.
+struct ThemeState {
     displayed: Theme,
     target: Theme,
     fade: Option<ThemeFade>,
+}
+
+impl ThemeState {
+    fn start_fade(&mut self, to: Theme) {
+        self.fade = Some(ThemeFade::new(
+            self.displayed,
+            to,
+            Duration::from_millis(FADE_MS),
+        ));
+        self.target = to;
+    }
+
+    fn advance(&mut self) {
+        if let Some(fade) = &self.fade {
+            self.displayed = fade.current();
+            if fade.is_done() {
+                self.displayed = self.target;
+                self.fade = None;
+            }
+        }
+    }
+}
+
+struct App {
+    svc: Services,
+    theme: ThemeState,
     now: Option<NowPlaying>,
     // Best-effort OS integration. Headless/SSH sessions may not expose the
     // platform media service, but that must never prevent Myx from playing.
@@ -575,14 +603,6 @@ fn should_apply_engine_position(from_engine: bool, seek_target: Option<u32>) -> 
 }
 
 impl App {
-    fn start_fade(&mut self, to: Theme) {
-        self.fade = Some(ThemeFade::new(
-            self.displayed,
-            to,
-            Duration::from_millis(FADE_MS),
-        ));
-        self.target = to;
-    }
     fn cur_items(&self) -> &[LibItem] {
         if let Some(d) = self.details.last() {
             &d.items
@@ -956,9 +976,11 @@ async fn boot(
             webapi,
         },
         media_controls,
-        displayed: TOKYONIGHT,
-        target: TOKYONIGHT,
-        fade: None,
+        theme: ThemeState {
+            displayed: TOKYONIGHT,
+            target: TOKYONIGHT,
+            fade: None,
+        },
         now,
         status: "loading library…".to_string(),
         library: Library::default(),
@@ -1191,7 +1213,7 @@ async fn run_ui(
                 // The visualizer only animates while it is on screen; on Queue
                 // its frame rate buys nothing. Synced lyrics move too — at the
                 // idle rate the highlighted line lands half a second late.
-                let animating = app.fade.is_some()
+                let animating = app.theme.fade.is_some()
                     || (app.view == RightView::Lyrics && app.lyrics_synced)
                     || (app.view == RightView::NowPlaying
                         && app.svc.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false));
@@ -1216,7 +1238,7 @@ async fn run_ui(
                     dirty = true;
                 }
                 if should_draw(dirty, animating, last_draw.elapsed()) {
-                    advance_fade(&mut app);
+                    app.theme.advance();
                     // Present the frame atomically. Without this the terminal
                     // renders whatever has arrived so far, and a recolour that
                     // touches every glyph on screen shows up half-applied.
@@ -2412,16 +2434,6 @@ fn save_state(app: &App) {
     s.save();
 }
 
-fn advance_fade(app: &mut App) {
-    if let Some(fade) = &app.fade {
-        app.displayed = fade.current();
-        if fade.is_done() {
-            app.displayed = app.target;
-            app.fade = None;
-        }
-    }
-}
-
 fn handle_engine_event(app: &mut App, ev: EngineEvent, meta_tx: &flume::Sender<TrackMeta>) {
     // Position ticks would bury everything else in the log.
     if !matches!(ev, EngineEvent::PositionCorrection { .. }) {
@@ -2578,7 +2590,7 @@ fn apply_meta(
     });
 
     if let Some(theme) = meta.theme {
-        app.start_fade(theme);
+        app.theme.start_fade(theme);
     }
 
     if let Some(controls) = app.media_controls.as_mut() {
@@ -3430,7 +3442,7 @@ fn spawn_restore(webapi: Arc<Mutex<WebApi>>, device_id: String, tx: flume::Sende
 // ------------------------------------------------------------------ render
 
 fn render(f: &mut Frame, app: &App, out: &mut FrameOut, repaint: ArtRepaint) {
-    let theme = app.displayed;
+    let theme = app.theme.displayed;
     let area = f.area();
     f.render_widget(Block::default().style(theme.base()), area);
     let area = area.inner(Margin::new(2, 1));
