@@ -591,6 +591,21 @@ struct SearchState {
     search_results: Vec<LibItem>,
 }
 
+/// What the user is looking at: the right pane's mode, the zen (sidebar
+/// hidden) toggle, the lyrics backing the Lyrics view, and the actions
+/// overlay drawn on top of everything.
+struct ViewState {
+    // Which view fills the right pane.
+    view: RightView,
+    // Sidebar hidden, so the right view (and its cover) gets the whole width.
+    zen: bool,
+    // Lyrics: (timestamp_ms, line). Synced when timestamps are non-zero.
+    lyrics: Vec<(u32, String)>,
+    lyrics_synced: bool,
+    // Context actions menu overlay (opened with `a`).
+    actions: Option<ActionMenu>,
+}
+
 struct App {
     svc: Services,
     theme: ThemeState,
@@ -602,13 +617,7 @@ struct App {
     browse: BrowseState,
     transport: Transport,
     search: SearchState,
-    // Lyrics: (timestamp_ms, line). Synced when timestamps are non-zero.
-    lyrics: Vec<(u32, String)>,
-    lyrics_synced: bool,
-    // Which view fills the right pane.
-    view: RightView,
-    // Context actions menu overlay (opened with `a`).
-    actions: Option<ActionMenu>,
+    view: ViewState,
     restore_uri: Option<String>,
     // Track URI whose metadata was last requested. Fetches run on separate
     // blocking tasks and can land out of order when skipping quickly, so a
@@ -621,8 +630,6 @@ struct App {
     // Timestamp of last Ctrl-C — a second press within 1.5s quits.
     last_ctrl_c: Option<Instant>,
     last_click: Option<(u16, Instant)>,
-    // Sidebar hidden, so the right view (and its cover) gets the whole width.
-    zen: bool,
 }
 
 fn should_apply_engine_position(from_engine: bool, seek_target: Option<u32>) -> bool {
@@ -1052,17 +1059,19 @@ async fn boot(
             searching: false,
             search_results: Vec::new(),
         },
-        lyrics: Vec::new(),
-        lyrics_synced: false,
-        view: RightView::NowPlaying,
-        actions: None,
+        view: ViewState {
+            view: RightView::NowPlaying,
+            zen: false,
+            lyrics: Vec::new(),
+            lyrics_synced: false,
+            actions: None,
+        },
         restore_uri,
         pending_meta: None,
         art_repaint: ArtRepaint::Idle,
         reclaimed: false,
         last_ctrl_c: None,
         last_click: None,
-        zen: false,
     };
 
     run_ui(terminal, app, ev_rx).await
@@ -1184,8 +1193,8 @@ async fn run_ui(
     let mut last_sync = Instant::now();
     // Nothing is on screen yet, so the first tick must draw.
     let mut dirty = true;
-    let mut last_layout = (app.view, app.zen);
-    let mut overlay_open = app.actions.is_some();
+    let mut last_layout = (app.view.view, app.view.zen);
+    let mut overlay_open = app.view.actions.is_some();
     // What the renderer writes. Lives across frames: the hit rects are what the
     // mouse handler reads between draws, and `lib_offset` is fed back into the
     // next frame's sticky-viewport calculation.
@@ -1259,14 +1268,14 @@ async fn run_ui(
                 // its frame rate buys nothing. Synced lyrics move too — at the
                 // idle rate the highlighted line lands half a second late.
                 let animating = app.theme.fade.is_some()
-                    || (app.view == RightView::Lyrics && app.lyrics_synced)
-                    || (app.view == RightView::NowPlaying
+                    || (app.view.view == RightView::Lyrics && app.view.lyrics_synced)
+                    || (app.view.view == RightView::NowPlaying
                         && app.svc.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false));
                 if app.art_repaint != ArtRepaint::Idle {
                     dirty = true;
                 }
-                if (app.view, app.zen) != last_layout {
-                    last_layout = (app.view, app.zen);
+                if (app.view.view, app.view.zen) != last_layout {
+                    last_layout = (app.view.view, app.view.zen);
                     app.art_repaint = ArtRepaint::Wipe;
                     dirty = true;
                 }
@@ -1274,7 +1283,7 @@ async fn run_ui(
                 // pixels, so the cover has to be sent again once it closes.
                 // Opening one must not wipe: the image would be redrawn a frame
                 // later, back on top of the popup.
-                let overlay = app.actions.is_some();
+                let overlay = app.view.actions.is_some();
                 if overlay != overlay_open {
                     overlay_open = overlay;
                     if !overlay {
@@ -1380,8 +1389,8 @@ async fn run_ui(
             }
             ly = lyrics_rx.recv_async() => {
                 if let Ok((lines, synced)) = ly {
-                    app.lyrics = lines;
-                    app.lyrics_synced = synced;
+                    app.view.lyrics = lines;
+                    app.view.lyrics_synced = synced;
                 }
                 true
             }
@@ -1397,11 +1406,11 @@ async fn run_ui(
                 if let Ok(mut menu) = menu {
                     // Enrich only an already-open menu (don't reopen a closed one),
                     // preserving the user's current selection across the swap.
-                    if app.actions.is_some() && !menu.items.is_empty() {
-                        if let Some(open) = app.actions.as_ref() {
+                    if app.view.actions.is_some() && !menu.items.is_empty() {
+                        if let Some(open) = app.view.actions.as_ref() {
                             menu.selected = open.selected.min(menu.items.len() - 1);
                         }
-                        app.actions = Some(menu);
+                        app.view.actions = Some(menu);
                     }
                 }
                 true
@@ -1640,7 +1649,7 @@ fn handle_mouse(
                 .find(|(_, r)| m.row == r.y && m.column >= r.x && m.column < r.x + r.width)
                 .map(|(v, _)| *v);
             if let Some(v) = hit {
-                app.view = v;
+                app.view.view = v;
                 consumed = true;
             }
         }
@@ -1720,7 +1729,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
         return false;
     }
 
-    if app.actions.is_some() {
+    if app.view.actions.is_some() {
         handle_action_key(app, code, &chans.detail, &chans.astatus);
         return false;
     }
@@ -1751,7 +1760,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
     // Zen hides the library, so the keys that drive one do nothing rather than
     // moving a selection nobody can see. Placed after the overlays above, which
     // stay usable if one was already open when zen came on.
-    if app.zen && drives_library(code) {
+    if app.view.zen && drives_library(code) {
         return false;
     }
 
@@ -1839,7 +1848,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
             // Zen hides the library, so the menu belongs to what is playing —
             // acting on a selection nobody can see is how it ends up offering
             // "remove from Liked" for the wrong track.
-            let item = if app.zen {
+            let item = if app.view.zen {
                 app.playback
                     .now
                     .as_ref()
@@ -1851,7 +1860,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
             if let Some(item) = item {
                 if !item.is_header && !item.is_play {
                     // Instant menu (no network), then enrich when the API returns.
-                    app.actions = Some(build_action_menu(None, &item));
+                    app.view.actions = Some(build_action_menu(None, &item));
                     spawn_action_menu(app.svc.webapi.clone(), item, chans.menu.clone());
                 }
             }
@@ -1875,19 +1884,23 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers, chans: &UiChanne
             app.playback.seek_step(-SEEK_STEP_MS)
         }
         KeyCode::Right => {
-            app.view = app.view.shift(1);
-            if app.view == RightView::Queue && (app.reclaimed || app.transport.playback_started) {
+            app.view.view = app.view.view.shift(1);
+            if app.view.view == RightView::Queue
+                && (app.reclaimed || app.transport.playback_started)
+            {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         KeyCode::Left => {
-            app.view = app.view.shift(-1);
-            if app.view == RightView::Queue && (app.reclaimed || app.transport.playback_started) {
+            app.view.view = app.view.view.shift(-1);
+            if app.view.view == RightView::Queue
+                && (app.reclaimed || app.transport.playback_started)
+            {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         // The frame loop notices the layout change and wipes the art box.
-        KeyCode::Char('z') => app.zen = !app.zen,
+        KeyCode::Char('z') => app.view.zen = !app.view.zen,
         KeyCode::Down | KeyCode::Char('j') => app.move_sel(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_sel(-1),
         // Needs a terminal that reports modified Enter (kitty, WezTerm, foot).
@@ -2022,18 +2035,18 @@ fn handle_action_key(
 ) {
     match code {
         KeyCode::Esc | KeyCode::Char('a') => {
-            app.actions = None;
+            app.view.actions = None;
             app.status.clear();
             return;
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            if let Some(m) = app.actions.as_mut() {
+            if let Some(m) = app.view.actions.as_mut() {
                 m.selected = m.selected.saturating_sub(1);
             }
             return;
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            if let Some(m) = app.actions.as_mut() {
+            if let Some(m) = app.view.actions.as_mut() {
                 m.selected = (m.selected + 1).min(m.items.len().saturating_sub(1));
             }
             return;
@@ -2044,6 +2057,7 @@ fn handle_action_key(
 
     // Enter: act on the selected entry.
     let kind = app
+        .view
         .actions
         .as_ref()
         .and_then(|m| m.items.get(m.selected))
@@ -2069,9 +2083,9 @@ fn handle_action_key(
                 .collect();
             if items.is_empty() {
                 app.status = "no playlists to add to".to_string();
-                app.actions = None;
+                app.view.actions = None;
             } else {
-                app.actions = Some(ActionMenu {
+                app.view.actions = Some(ActionMenu {
                     title: "Add to playlist".to_string(),
                     items,
                     selected: 0,
@@ -2084,11 +2098,11 @@ fn handle_action_key(
             // and resume-on-launch replayed the previous one.
             let shuffle = app.transport.shuffle;
             app.play_context_row(uri, name, shuffle);
-            app.actions = None;
+            app.view.actions = None;
         }
         ActionKind::Open { uri, name } => {
             spawn_detail_fetch(app.svc.webapi.clone(), uri, name, detail_tx.clone());
-            app.actions = None;
+            app.view.actions = None;
         }
         ActionKind::CopyLink { uri } => {
             app.status = if copy_to_clipboard(&uri_to_url(&uri)) {
@@ -2096,11 +2110,11 @@ fn handle_action_key(
             } else {
                 "clipboard unavailable".to_string()
             };
-            app.actions = None;
+            app.view.actions = None;
         }
         other => {
             spawn_action(app.svc.webapi.clone(), other, astatus_tx.clone());
-            app.actions = None;
+            app.view.actions = None;
         }
     }
 }
@@ -2635,8 +2649,8 @@ fn apply_meta(
     // its own — no wipe, which would flash a blank box between the two covers.
     app.art_repaint = ArtRepaint::Draw;
     app.status.clear();
-    app.lyrics.clear();
-    app.lyrics_synced = false;
+    app.view.lyrics.clear();
+    app.view.lyrics_synced = false;
 
     // Fetch synced lyrics from lrclib for the new track.
     if !meta.title.is_empty() {
@@ -3597,7 +3611,7 @@ fn render(f: &mut Frame, app: &App, out: &mut FrameOut, repaint: ArtRepaint) {
     }
     out.hits.tabs = tabs;
 
-    let right = if app.zen {
+    let right = if app.view.zen {
         // Hidden, not zero-width: a rendered sidebar still claims mouse rects.
         out.hits.lib = None;
         out.hits.scroll = None;
@@ -3609,7 +3623,7 @@ fn render(f: &mut Frame, app: &App, out: &mut FrameOut, repaint: ArtRepaint) {
         render_library(f, app, out, theme, body[0]);
         body[1]
     };
-    match app.view {
+    match app.view.view {
         RightView::NowPlaying => render_nowplaying_view(f, app, theme, right, repaint),
         RightView::Lyrics => render_lyrics(f, app, theme, right),
         RightView::Queue => render_queue_view(f, app, theme, right),
@@ -3618,7 +3632,7 @@ fn render(f: &mut Frame, app: &App, out: &mut FrameOut, repaint: ArtRepaint) {
     render_now_strip(f, app, out, theme, rows[4]);
     render_footer(f, app, theme, rows[5]);
 
-    if app.actions.is_some() {
+    if app.view.actions.is_some() {
         render_actions_overlay(f, app, theme, area);
     }
 }
@@ -3675,7 +3689,7 @@ fn view_tabs<'a>(app: &App, theme: Theme) -> Vec<Span<'a>> {
         if i > 0 {
             spans.push(Span::styled(" · ", theme.muted()));
         }
-        let style = if *v == app.view {
+        let style = if *v == app.view.view {
             Style::default()
                 .fg(theme.primary.into())
                 .add_modifier(Modifier::BOLD)
@@ -4143,7 +4157,7 @@ fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         lyrics_area = head[3];
     }
 
-    if app.lyrics.is_empty() {
+    if app.view.lyrics.is_empty() {
         let msg = if app.playback.now.is_some() {
             "♪︎  no lyrics for this track"
         } else {
@@ -4160,20 +4174,24 @@ fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
 
     let h = lyrics_area.height as usize;
     let pos = app.playback.position_ms();
-    let cur = if app.lyrics_synced {
-        app.lyrics.iter().rposition(|(t, _)| *t <= pos).unwrap_or(0)
+    let cur = if app.view.lyrics_synced {
+        app.view
+            .lyrics
+            .iter()
+            .rposition(|(t, _)| *t <= pos)
+            .unwrap_or(0)
     } else {
         0
     };
     let start = cur.saturating_sub(h / 2);
 
     let mut lines: Vec<Line> = Vec::with_capacity(h);
-    for (i, (_, text)) in app.lyrics.iter().enumerate().skip(start).take(h) {
-        let style = if app.lyrics_synced && i == cur {
+    for (i, (_, text)) in app.view.lyrics.iter().enumerate().skip(start).take(h) {
+        let style = if app.view.lyrics_synced && i == cur {
             Style::default()
                 .fg(theme.primary.into())
                 .add_modifier(Modifier::BOLD)
-        } else if app.lyrics_synced && i < cur {
+        } else if app.view.lyrics_synced && i < cur {
             Style::default().fg(theme.border_subtle.into())
         } else {
             theme.muted()
@@ -4345,7 +4363,7 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
         (false, key("a"), lbl(" actions   ")),
         (
             false,
-            Span::styled("z", Style::default().fg(on(app.zen).into())),
+            Span::styled("z", Style::default().fg(on(app.view.zen).into())),
             lbl(" zen   "),
         ),
         (false, key("q"), lbl(" quit")),
@@ -4353,7 +4371,7 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
     let line = Line::from(
         hints
             .into_iter()
-            .filter(|(needs_library, ..)| !needs_library || !app.zen)
+            .filter(|(needs_library, ..)| !needs_library || !app.view.zen)
             .flat_map(|(_, k, label)| [k, label])
             .collect::<Vec<_>>(),
     );
@@ -4362,7 +4380,9 @@ fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
 
 /// Context actions menu — a centered overlay list.
 fn render_actions_overlay(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
-    let Some(menu) = &app.actions else { return };
+    let Some(menu) = &app.view.actions else {
+        return;
+    };
     let w = (area.width * 5 / 10).clamp(28, 52);
     let h = (menu.items.len() as u16 + 4).clamp(6, area.height.saturating_sub(2));
     let x = area.x + area.width.saturating_sub(w) / 2;
