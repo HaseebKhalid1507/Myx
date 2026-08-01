@@ -42,8 +42,7 @@ pub(crate) fn handle_mouse(
                     consumed = true;
                     let offset = (m.column - vr.x) as u32;
                     let vol = (((offset + 1) * 100) / vr.width as u32).min(100) as u8;
-                    app.transport.volume = vol;
-                    let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+                    app.apply_volume(vol);
                 }
             }
         }
@@ -57,8 +56,18 @@ pub(crate) fn handle_mouse(
                 {
                     if let Some(dur) = app.playback.now.as_ref().map(|n| n.duration_ms) {
                         let frac = (m.column - bar.x) as f32 / bar.width as f32;
+                        let room_mode = app.room_mode();
+                        let engine = &app.svc.engine;
+                        let room = &app.svc.room;
+                        let mut do_seek = |p: u32| {
+                            if room_mode {
+                                room.player.seek(p);
+                            } else if let Some(e) = engine.as_ref() {
+                                let _ = e.seek(p);
+                            }
+                        };
                         app.playback
-                            .seek_to(&app.svc.engine, (frac * dur as f32) as u32);
+                            .seek_to(&mut do_seek, (frac * dur as f32) as u32);
                     }
                 }
             }
@@ -122,12 +131,10 @@ pub(crate) fn handle_mouse(
     ) {
         match m.kind {
             MouseEventKind::ScrollUp => {
-                app.transport.volume = (app.transport.volume + 5).min(100);
-                let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+                app.bump_volume(5);
             }
             MouseEventKind::ScrollDown => {
-                app.transport.volume = app.transport.volume.saturating_sub(5);
-                let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+                app.bump_volume(-5);
             }
             _ => {}
         }

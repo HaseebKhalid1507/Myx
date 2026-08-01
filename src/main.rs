@@ -52,6 +52,7 @@ use myx::gradient::{self};
 use myx::liblog::{install_librespot_log, liblog};
 use myx::lyrics::parse::parse_lrc;
 use myx::reactive::derive_theme;
+use myx::room::{RoomEvent, RoomHandle};
 use myx::term::{acquire_single_instance_lock, init_terminal, restore_terminal, Term};
 use myx::theme::{Theme, TOKYONIGHT};
 use myx::util::{center_v, fmt_ms, track_id_from_uri, truncate, uri_to_url, urlencode, vol_u16};
@@ -81,15 +82,27 @@ fn main() -> Result<()> {
         saved.volume.min(100)
     };
 
+    let cli = Cli::parse();
+
     // OAuth may need to print a browser URL, including when a cached refresh
     // token has been revoked. Complete both auth flows before entering the
     // alternate screen so that recovery prompts can never be hidden by the TUI.
-    if engine::needs_authorization() || !WebApi::is_cached() {
+    if (!cli.guest && engine::needs_authorization()) || !WebApi::is_cached() {
         println!("myx: first run — authorizing with Spotify…");
+    }
+    if cli.guest {
+        println!("myx: guest mode — no streaming engine, audio comes from a room");
     }
     let ((creds, webapi), mut terminal) = auth_then_terminal(
         || {
-            let creds = engine::credentials()?;
+            // Guest mode skips librespot entirely. That is the whole point:
+            // `engine::credentials()` demands the Premium-only `streaming`
+            // scope, so without this a free account can never reach the UI.
+            let creds = if cli.guest {
+                None
+            } else {
+                Some(engine::credentials()?)
+            };
             let webapi = WebApi::init().context("authorize web api")?;
             Ok((creds, webapi))
         },
@@ -115,9 +128,43 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("start tokio runtime")?;
-    let res = runtime.block_on(boot(&mut terminal, saved, init_vol, creds, webapi, picker));
+    let res = runtime.block_on(boot(
+        &mut terminal,
+        saved,
+        init_vol,
+        creds,
+        webapi,
+        picker,
+        cli.uri,
+    ));
     restore_terminal(&mut terminal)?;
     res
+}
+
+/// Command line: `myx [--guest] [spotify:...]`.
+struct Cli {
+    /// Start with no streaming engine. Everything plays through a room, so a
+    /// free account — or none at all — can still use Myx as a listener.
+    guest: bool,
+    /// A context URI to start playing on launch.
+    uri: Option<String>,
+}
+
+impl Cli {
+    fn parse() -> Self {
+        let mut cli = Self {
+            guest: std::env::var_os("MYX_GUEST").is_some(),
+            uri: None,
+        };
+        for arg in std::env::args().skip(1) {
+            match arg.as_str() {
+                "--guest" => cli.guest = true,
+                _ if cli.uri.is_none() && !arg.starts_with('-') => cli.uri = Some(arg),
+                _ => {}
+            }
+        }
+        cli
+    }
 }
 
 // Run every potentially-interactive authentication step before constructing the
@@ -143,22 +190,37 @@ async fn boot(
     terminal: &mut Term,
     saved: SavedState,
     init_vol: u8,
-    creds: librespot_core::authentication::Credentials,
+    creds: Option<librespot_core::authentication::Credentials>,
     webapi: WebApi,
     picker: Picker,
+    launch_uri: Option<String>,
 ) -> Result<()> {
     let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
-    let engine = with_loader(
-        terminal,
-        "connecting to Spotify",
-        engine::run(creds, ev_tx, init_vol),
-    )
-    .await?
-    .context("start engine")?;
+    // No credentials means `--guest`: skip the Connect device entirely. The
+    // room player provides transport, and `App::guest_only` keeps every
+    // engine-only path (radio, reclaim, hosting, visualizer) out of the way.
+    let engine = match creds {
+        Some(creds) => Some(Arc::new(
+            with_loader(
+                terminal,
+                "connecting to Spotify",
+                engine::run(creds, ev_tx, init_vol),
+            )
+            .await?
+            .context("start engine")?,
+        )),
+        None => None,
+    };
 
+    let guest_only = engine.is_none();
     let webapi = Arc::new(Mutex::new(webapi));
 
-    if let Some(uri) = std::env::args().nth(1) {
+    // The room service (host + guest player) starts idle; the Room view turns
+    // it on.
+    let (room_tx, room_rx) = flume::unbounded::<RoomEvent>();
+    let room = RoomHandle::new(room_tx);
+
+    if let (Some(uri), Some(engine)) = (launch_uri, engine.as_ref()) {
         let _ = engine.play_context(uri, false);
     }
 
@@ -210,6 +272,7 @@ async fn boot(
             engine,
             picker,
             webapi,
+            room,
         },
         media_controls,
         playback: PlaybackState {
@@ -252,7 +315,13 @@ async fn boot(
             search_results: Vec::new(),
         },
         view: ViewState {
-            mode: RightView::NowPlaying,
+            // A guest cannot play anything until it joins a room, so open on
+            // the view that lets it.
+            mode: if guest_only {
+                RightView::Room
+            } else {
+                RightView::NowPlaying
+            },
             zen: false,
             lyrics: Vec::new(),
             lyrics_synced: false,
@@ -265,10 +334,11 @@ async fn boot(
             last_ctrl_c: None,
             last_click: None,
         },
+        room: RoomState::default(),
         art_repaint: ArtRepaint::Idle,
     };
 
-    run_ui(terminal, app, ev_rx).await
+    run_ui(terminal, app, ev_rx, room_rx).await
 }
 
 struct Radio {
@@ -296,6 +366,7 @@ async fn run_ui(
     terminal: &mut Term,
     mut app: App,
     ev_rx: flume::Receiver<EngineEvent>,
+    room_rx: flume::Receiver<RoomEvent>,
 ) -> Result<()> {
     let (in_tx, in_rx) = flume::unbounded::<Event>();
     std::thread::spawn(move || loop {
@@ -345,11 +416,11 @@ async fn run_ui(
     // Clone: `spawn_restore` sends once and exits. Moving the sender in would
     // drop the last one, and a disconnected receiver resolves `recv_async()`
     // instantly and forever — spinning the select loop below.
-    spawn_restore(
-        app.svc.webapi.clone(),
-        app.svc.engine.device_id(),
-        chans.pstate.clone(),
-    );
+    // A guest has no Connect device to transfer playback onto, so there is
+    // nothing to reclaim.
+    if let Some(device_id) = app.svc.engine.as_ref().map(|e| e.device_id()) {
+        spawn_restore(app.svc.webapi.clone(), device_id, chans.pstate.clone());
+    }
 
     // Re-enrich the restored last-played track (cover / theme / lyrics).
     if let Some(uri) = app.session.restore_uri.take() {
@@ -398,7 +469,17 @@ async fn run_ui(
         let touched = tokio::select! {
             biased;
             _ = frame.tick() => {
-                app.playback.flush_seek(&app.svc.engine, Instant::now());
+                let room_mode = app.room_mode();
+                let engine = app.svc.engine.clone();
+                let room = &app.svc.room;
+                let mut do_seek = |p: u32| {
+                    if room_mode {
+                        room.player.seek(p);
+                    } else if let Some(e) = &engine {
+                        let _ = e.seek(p);
+                    }
+                };
+                app.playback.flush_seek(&mut do_seek, Instant::now());
                 // Drain library updates deterministically before rendering. Keeping
                 // this solely as a select arm could starve under a hot player-event
                 // stream / 60fps visualizer — which looked like a frozen library.
@@ -436,9 +517,8 @@ async fn run_ui(
                     dirty = true;
                     match rad {
                         Ok(radio) if !radio.uris.is_empty() => {
-                            if let Err(e) = app.svc.engine.play_tracks(radio.uris, None, radio.start_position_ms, false) {
-                                app.status = format!("couldn't play radio: {e:#}");
-                            }
+                            let (uris, pos) = (radio.uris, radio.start_position_ms);
+                            app.engine_play(|e| e.play_tracks(uris, None, pos, false));
                             app.transport.playback_started = true;
                             app.status = "radio started".to_string();
                             // Grab the freshly-populated station queue shortly after.
@@ -464,7 +544,9 @@ async fn run_ui(
                 let animating = app.theme.fade.is_some()
                     || (app.view.mode == RightView::Lyrics && app.view.lyrics_synced)
                     || (app.view.mode == RightView::NowPlaying
-                        && app.svc.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false));
+                        && app.svc.engine.as_ref().is_some_and(|e| {
+                            e.bands.try_lock().map(|g| g.is_active).unwrap_or(false)
+                        }));
                 if app.art_repaint != ArtRepaint::Idle {
                     dirty = true;
                 }
@@ -619,7 +701,8 @@ async fn run_ui(
                     app.transport.shuffle = state.shuffle;
                     app.transport.repeat = state.repeat;
                     app.transport.volume = state.volume.min(100);
-                    let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+                    let vol = app.transport.volume;
+                    app.engine_do(|e| { let _ = e.set_volume(vol_u16(vol)); });
                     app.playback.now = Some(NowPlaying {
                         uri: format!("spotify:track:{}", state.track_id),
                         title: String::new(),
@@ -640,6 +723,56 @@ async fn run_ui(
                 }
                 true
             }
+            ev = room_rx.recv_async() => {
+                let Ok(ev) = ev else { break };
+                match ev {
+                    RoomEvent::Joined { ok, message } => {
+                        // Hosting wins: the join round-trip is async, so the
+                        // user can have pressed `h` while it was in flight, and
+                        // a host must never also be a guest.
+                        if app.room.mode == RoomMode::Host {
+                            app.svc.room.player.leave();
+                            app.status = "room: already hosting — join ignored".to_string();
+                        } else {
+                            if ok {
+                                app.room.mode = RoomMode::Guest;
+                                // Silence our own Connect device. It stays
+                                // registered for browsing, but Spotify can
+                                // auto-resume it, and two audio sources sharing
+                                // the output device is nobody's idea of a room.
+                                app.engine_do(|e| e.stop());
+                            } else {
+                                app.room.mode = RoomMode::Idle;
+                                app.room.queue.clear();
+                            }
+                            app.status = message;
+                        }
+                    }
+                    // A resolve plus a ~10 MB download is not instant; say so
+                    // rather than leaving the strip on the previous track.
+                    RoomEvent::Loading { .. } => {
+                        app.status = "room: loading…".to_string();
+                    }
+                    // Room playback rides the same handlers as the engine, so
+                    // the now-playing strip, theme fade, cover and lyrics all work.
+                    RoomEvent::Playback(ev) => handle_engine_event(&mut app, ev, &chans.meta),
+                    RoomEvent::Ended { .. } => {
+                        if app.room.mode == RoomMode::Guest {
+                            let n = app.room.queue.len();
+                            if n > 0 && app.room.queue_index + 1 < n {
+                                app.room.queue_index += 1;
+                                let uri = app.room.queue[app.room.queue_index].clone();
+                                app.svc.room.player.play(uri, 0);
+                            } else {
+                                app.status = "room: queue finished".to_string();
+                                app.svc.room.player.stop();
+                            }
+                        }
+                    }
+                    RoomEvent::Error { message } => app.status = message,
+                }
+                true
+            }
         };
         dirty |= touched;
     }
@@ -649,6 +782,12 @@ async fn run_ui(
 /// Resume the persisted playback source at the last track/position — the
 /// faithful reboot resume (real context ⇒ real queue continuation).
 fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>) {
+    // Resuming a saved context is engine work. A guest has no session to resume
+    // onto — it plays one track at a time through the room.
+    let Some(engine) = app.svc.engine.clone() else {
+        app.status = "guest: join a room (J), then pick a track".to_string();
+        return;
+    };
     let track = app
         .playback
         .now
@@ -664,16 +803,12 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
 
     match app.transport.source.clone() {
         PlaySource::Context(ctx) => {
-            if let Err(e) = app
-                .svc
-                .engine
-                .play_context_at(ctx, track, pos, app.transport.shuffle)
-            {
+            if let Err(e) = engine.play_context_at(ctx, track, pos, app.transport.shuffle) {
                 app.status = format!("couldn't play: {e:#}");
             }
         }
         PlaySource::Radio(seed) => {
-            let session = app.svc.engine.session();
+            let session = engine.session();
             let tx = radio_tx.clone();
             app.status = "resuming radio…".to_string();
             tokio::spawn(async move {
@@ -701,11 +836,7 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
                 .iter()
                 .map(|i| i.uri.clone())
                 .collect();
-            if let Err(e) = app
-                .svc
-                .engine
-                .play_tracks(uris, track, pos, app.transport.shuffle)
-            {
+            if let Err(e) = engine.play_tracks(uris, track, pos, app.transport.shuffle) {
                 app.status = format!("couldn't play: {e:#}");
             }
         }
@@ -718,22 +849,18 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
                     uris.push(u.clone());
                 }
                 uris.extend(app.transport.queue_uris.iter().cloned());
-                if let Err(e) = app
-                    .svc
-                    .engine
-                    .play_tracks(uris, track, pos, app.transport.shuffle)
-                {
+                if let Err(e) = engine.play_tracks(uris, track, pos, app.transport.shuffle) {
                     app.status = format!("couldn't play: {e:#}");
                 }
             } else {
                 match track {
                     Some(uri) => {
-                        if let Err(e) = app.svc.engine.play_track_at(uri, pos) {
+                        if let Err(e) = engine.play_track_at(uri, pos) {
                             app.status = format!("couldn't play: {e:#}");
                         }
                     }
                     None => {
-                        if let Err(e) = app.svc.engine.play() {
+                        if let Err(e) = engine.play() {
                             app.status = format!("couldn't play: {e:#}");
                         }
                     }

@@ -6,9 +6,16 @@ use crate::*;
 /// (the `Arc<Mutex<_>>` is only ever cloned), so grouping them costs no
 /// borrow flexibility.
 pub(crate) struct Services {
-    pub(crate) engine: Engine,
+    /// The streaming engine — `None` when Myx booted with `--guest`.
+    ///
+    /// A guest has no Premium session, so there is no Connect device, no
+    /// visualizer and no engine transport; everything it plays comes from a
+    /// room. Keeping it optional is what lets the app start at all without
+    /// Spotify credentials.
+    pub(crate) engine: Option<Arc<Engine>>,
     pub(crate) picker: Picker,
     pub(crate) webapi: Arc<Mutex<WebApi>>,
+    pub(crate) room: Arc<RoomHandle>,
 }
 
 pub(crate) const FADE_MS: u64 = 1500;
@@ -108,4 +115,46 @@ pub(crate) struct SessionState {
     // Timestamp of last Ctrl-C — a second press within 1.5s quits.
     pub(crate) last_ctrl_c: Option<Instant>,
     pub(crate) last_click: Option<(u16, Instant)>,
+}
+
+/// The listening room: hosting, or the guest side (join form + queue).
+/// Hosting and joining are mutually exclusive — `mode` says which.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RoomMode {
+    #[default]
+    Idle,
+    Host,
+    Guest,
+}
+
+/// Which join-form field is capturing keys (the `j` prompt is two fields:
+/// host URL, then token).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomInput {
+    Url,
+    Token,
+}
+
+pub(crate) struct RoomState {
+    pub(crate) mode: RoomMode,
+    pub(crate) guest_url: String,
+    pub(crate) guest_token: String,
+    /// Set while the join form is capturing keys.
+    pub(crate) input: Option<RoomInput>,
+    /// The guest's playback queue (snapshot of the list being played).
+    pub(crate) queue: Vec<String>,
+    pub(crate) queue_index: usize,
+}
+
+impl Default for RoomState {
+    fn default() -> Self {
+        Self {
+            mode: RoomMode::Idle,
+            guest_url: String::new(),
+            guest_token: String::new(),
+            input: None,
+            queue: Vec::new(),
+            queue_index: 0,
+        }
+    }
 }

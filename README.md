@@ -13,8 +13,11 @@ synced lyrics.
   <img src="https://github.com/user-attachments/assets/08b3f505-5e48-4cd8-9b8d-0788d37f30c2" width="49%">
 </p>
 
-> Requires **Spotify Premium**. Works on Linux, macOS, and Windows. Album art is
-> crispest on kitty, WezTerm, or foot.
+> Requires **Spotify Premium** to stream. Works on Linux, macOS, and Windows.
+> Album art is crispest on kitty, WezTerm, or foot.
+>
+> `myx --guest` starts without the streaming engine: browsing works with any
+> account, and audio comes from a listening room you join. See [Guest mode](#guest-mode).
 
 ## Install
 
@@ -84,6 +87,31 @@ does the same everywhere.
 The album-art protocol is detected at startup and picked per terminal, including
 inside tmux. If your tmux has no sixel support, add `set -g focus-events on` to
 `~/.tmux.conf` so the art is re-sent when you switch back to myx's window.
+
+## Guest mode
+
+Streaming needs Premium, because it needs a librespot session. `--guest` starts
+myx without one:
+
+```bash
+myx --guest      # or MYX_GUEST=1 myx
+```
+
+There is no Connect device, no visualizer, no radio and no hosting — but the
+library, search and playback controls all work, and audio comes from a
+**listening room**. Open the Room view (`→` until `Room`), press `J`, and enter
+the host's `host:port` and token.
+
+On the other side, a Premium account presses `h` in the Room view to host. The
+host's session resolves tracks for its guests but never plays them, so its own
+single-stream limit is untouched.
+
+The room token is stored in the data directory and survives restarts, so you
+share it once. Press `T` while hosting to mint a new one — that immediately
+locks out everyone holding the old token.
+
+Without `--guest`, myx still needs Premium: it authorizes with the `streaming`
+scope before the UI starts, and a non-Premium account cannot get past it.
 
 ## Config
 

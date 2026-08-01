@@ -45,6 +45,7 @@ pub(crate) struct App {
     pub(crate) search: SearchState,
     pub(crate) view: ViewState,
     pub(crate) session: SessionState,
+    pub(crate) room: RoomState,
     // What the album art box owes the next frame. See ArtRepaint.
     pub(crate) art_repaint: ArtRepaint,
 }
@@ -112,12 +113,98 @@ impl App {
     /// `name` is a parameter rather than being derived from `details.last()`
     /// because the drill-in stack is empty when playing straight from a list.
     pub(crate) fn play_context_row(&mut self, uri: String, name: String, shuffle: bool) {
+        if self.room_mode() {
+            self.status = "room: play a track — albums and playlists need the host".to_string();
+            return;
+        }
         self.status = format!("starting {name}…");
         self.transport.source = PlaySource::Context(uri.clone());
         self.transport.source_name = name;
-        if let Err(e) = self.svc.engine.play_context(uri, shuffle) {
+        self.engine_play(|e| e.play_context(uri, shuffle));
+    }
+
+    /// True when this Myx booted without a streaming engine (`--guest`).
+    ///
+    /// There is no Premium session behind it, so it can never host and never
+    /// drive engine transport — the room is its only source of audio.
+    pub(crate) fn guest_only(&self) -> bool {
+        self.svc.engine.is_none()
+    }
+
+    /// True while this Myx is a room guest — every play command routes to the
+    /// room player instead of the engine. Always true in a `--guest` build,
+    /// which has no engine to route to.
+    pub(crate) fn room_mode(&self) -> bool {
+        self.room.mode == RoomMode::Guest || self.guest_only()
+    }
+
+    /// Run a fire-and-forget engine command, if there is an engine.
+    ///
+    /// A `--guest` build has none, and every such call is a deliberate no-op:
+    /// the room player owns transport there.
+    pub(crate) fn engine_do(&self, f: impl FnOnce(&Engine)) {
+        if let Some(engine) = &self.svc.engine {
+            f(engine);
+        }
+    }
+
+    /// Run an engine play command, surfacing whatever went wrong — or, with no
+    /// engine, saying so instead of silently doing nothing.
+    pub(crate) fn engine_play(&mut self, f: impl FnOnce(&Engine) -> anyhow::Result<()>) {
+        let Some(engine) = self.svc.engine.clone() else {
+            self.status = "guest: only single tracks play here — join a room (J) first".to_string();
+            return;
+        };
+        if let Err(e) = f(&engine) {
             self.status = format!("couldn't play: {e:#}");
         }
+    }
+
+    /// Set the volume on whichever transport is actually producing sound.
+    ///
+    /// Exclusive on purpose: driving both would move the playhead-less engine's
+    /// Connect device around for no reason, and a guest's engine is stopped.
+    pub(crate) fn apply_volume(&mut self, volume: u8) {
+        self.transport.volume = volume.min(100);
+        let vol = self.transport.volume;
+        if self.room_mode() {
+            self.svc.room.player.volume(vol as f32 / 100.0);
+        } else {
+            self.engine_do(|e| {
+                let _ = e.set_volume(vol_u16(vol));
+            });
+        }
+    }
+
+    /// Nudge the volume by `delta`, clamped to 0..=100.
+    pub(crate) fn bump_volume(&mut self, delta: i16) {
+        let next = (self.transport.volume as i16 + delta).clamp(0, 100) as u8;
+        self.apply_volume(next);
+    }
+
+    /// Play `uri` through the joined room, keeping `queue` as the skip-around
+    /// list (`index` is the slot `uri` sits in).
+    pub(crate) fn room_play(&mut self, uri: String, pos_ms: u32, queue: Vec<String>, index: usize) {
+        self.transport.source = PlaySource::None;
+        self.transport.source_name = "Room".to_string();
+        self.room.queue = queue;
+        self.room.queue_index = index;
+        self.svc.room.player.volume(self.transport.volume as f32 / 100.0);
+        self.svc.room.player.play(uri, pos_ms);
+        self.status = "room: starting…".to_string();
+    }
+
+    /// Skip within the room queue (`delta` ±1), wrapping at the ends.
+    pub(crate) fn room_skip(&mut self, delta: isize) {
+        if self.room.queue.is_empty() {
+            self.status = "room: nothing queued".to_string();
+            return;
+        }
+        let n = self.room.queue.len() as isize;
+        self.room.queue_index = (self.room.queue_index as isize + delta).rem_euclid(n) as usize;
+        let uri = self.room.queue[self.room.queue_index].clone();
+        self.svc.room.player.play(uri, 0);
+        self.status = "room: skipping…".to_string();
     }
 
     /// Play whatever's selected (in the current section, or in search results).
@@ -141,17 +228,17 @@ impl App {
                     .map(|i| i.uri.clone())
                     .collect();
                 if !uris.is_empty() {
+                    if self.room_mode() {
+                        // Room plays the list one track at a time.
+                        self.room_play(uris[0].clone(), 0, uris, 0);
+                        return Activated::None;
+                    }
                     self.transport.source = PlaySource::Liked;
                     self.transport.source_name = "Liked Songs".to_string();
                     self.status = "starting Liked Songs…".to_string();
                     // Honour the current shuffle toggle instead of a dedicated row.
-                    if let Err(e) =
-                        self.svc
-                            .engine
-                            .play_tracks(uris, None, 0, self.transport.shuffle)
-                    {
-                        self.status = format!("couldn't play: {e:#}");
-                    }
+                    let shuffle = self.transport.shuffle;
+                    self.engine_play(|e| e.play_tracks(uris, None, 0, shuffle));
                 }
                 return Activated::None;
             }
@@ -168,6 +255,19 @@ impl App {
             return Activated::None;
         }
         if item.is_track {
+            // A room guest plays every track through the host's session, with
+            // the surrounding list as the skip queue.
+            if self.room_mode() {
+                let queue: Vec<String> = self
+                    .cur_items()
+                    .iter()
+                    .filter(|i| i.is_track)
+                    .map(|i| i.uri.clone())
+                    .collect();
+                let index = queue.iter().position(|u| *u == item.uri).unwrap_or(0);
+                self.room_play(item.uri.clone(), 0, queue, index);
+                return Activated::None;
+            }
             if self.search.searching {
                 // A search-result song starts that song's radio (seed + similar).
                 self.transport.source = PlaySource::Radio(item.uri.clone());
@@ -180,14 +280,9 @@ impl App {
                 self.transport.source = PlaySource::Context(ctx.clone());
                 self.transport.source_name = d.title.clone();
                 self.status = format!("starting {}…", item.name);
-                if let Err(e) = self.svc.engine.play_context_at(
-                    ctx,
-                    Some(item.uri.clone()),
-                    0,
-                    self.transport.shuffle,
-                ) {
-                    self.status = format!("couldn't play: {e:#}");
-                }
+                let shuffle = self.transport.shuffle;
+                let at = Some(item.uri.clone());
+                self.engine_play(|e| e.play_context_at(ctx, at, 0, shuffle));
                 return Activated::None;
             }
             // Section track list.
@@ -205,13 +300,9 @@ impl App {
                 self.transport.source = PlaySource::None;
                 self.transport.source_name = self.browse.section.label().to_string();
             }
-            if let Err(e) =
-                self.svc
-                    .engine
-                    .play_tracks(uris, Some(item.uri.clone()), 0, self.transport.shuffle)
-            {
-                self.status = format!("couldn't play: {e:#}");
-            }
+            let shuffle = self.transport.shuffle;
+            let at = Some(item.uri.clone());
+            self.engine_play(|e| e.play_tracks(uris, at, 0, shuffle));
             return Activated::None;
         }
         // Otherwise it's a context (artist / album / playlist) — open it.

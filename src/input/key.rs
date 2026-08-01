@@ -54,6 +54,43 @@ pub(crate) fn handle_key(
         return false;
     }
 
+    // --- Room join form captures input ---
+    if let Some(stage) = app.room.input {
+        match code {
+            KeyCode::Esc => app.room.input = None,
+            KeyCode::Enter => match stage {
+                RoomInput::Url => {
+                    if app.room.guest_url.trim().is_empty() {
+                        app.status = "room: enter the host url (host:port) first".to_string();
+                    } else {
+                        app.room.input = Some(RoomInput::Token);
+                    }
+                }
+                RoomInput::Token => {
+                    app.room.input = None;
+                    let url = app.room.guest_url.trim().to_string();
+                    let token = app.room.guest_token.trim().to_string();
+                    app.status = "joining room…".to_string();
+                    app.svc.room.player.join(url, token);
+                }
+            },
+            KeyCode::Backspace => match stage {
+                RoomInput::Url => {
+                    app.room.guest_url.pop();
+                }
+                RoomInput::Token => {
+                    app.room.guest_token.pop();
+                }
+            },
+            KeyCode::Char(c) => match stage {
+                RoomInput::Url => app.room.guest_url.push(c),
+                RoomInput::Token => app.room.guest_token.push(c),
+            },
+            _ => {}
+        }
+        return false;
+    }
+
     // Zen hides the library, so the keys that drive one do nothing rather than
     // moving a selection nobody can see. Placed after the overlays above, which
     // stay usable if one was already open when zen came on.
@@ -77,11 +114,13 @@ pub(crate) fn handle_key(
             // Nothing to back out of — Esc no longer quits (use q or Ctrl-C twice).
         }
         KeyCode::Char(' ') | KeyCode::Char('p') | KeyCode::Media(MediaKeyCode::PlayPause) => {
-            if app.transport.playback_started {
-                let _ = app.svc.engine.toggle();
+            if app.room_mode() {
+                app.svc.room.player.toggle();
+            } else if app.transport.playback_started {
+                app.engine_do(|e| { let _ = e.toggle(); });
             } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
-                let _ = app.svc.engine.play();
+                app.engine_do(|e| { let _ = e.play(); });
                 app.transport.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
@@ -90,25 +129,36 @@ pub(crate) fn handle_key(
             }
         }
         KeyCode::Media(MediaKeyCode::Stop) => {
-            app.svc.engine.stop();
+            if app.room_mode() {
+                app.svc.room.player.stop();
+            } else {
+                app.engine_do(|e| e.stop());
+            }
         }
         KeyCode::Char('n') | KeyCode::Media(MediaKeyCode::TrackNext) => {
-            let _ = app.svc.engine.next();
+            if app.room_mode() {
+                app.room_skip(1);
+            } else {
+                app.engine_do(|e| { let _ = e.next(); });
+            }
         }
         KeyCode::Char('b') | KeyCode::Media(MediaKeyCode::TrackPrevious) => {
-            let _ = app.svc.engine.prev();
+            if app.room_mode() {
+                app.room_skip(-1);
+            } else {
+                app.engine_do(|e| { let _ = e.prev(); });
+            }
         }
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Media(MediaKeyCode::RaiseVolume) => {
-            app.transport.volume = (app.transport.volume + 5).min(100);
-            let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+            app.bump_volume(5);
         }
         KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Media(MediaKeyCode::LowerVolume) => {
-            app.transport.volume = app.transport.volume.saturating_sub(5);
-            let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+            app.bump_volume(-5);
         }
         KeyCode::Char('s') => {
             app.transport.shuffle = !app.transport.shuffle;
-            let _ = app.svc.engine.shuffle(app.transport.shuffle);
+            let shuffle = app.transport.shuffle;
+            app.engine_do(|e| { let _ = e.shuffle(shuffle); });
         }
         // Play the highlighted playlist / album / artist outright. Enter still
         // opens; this is the direct route that used to require two Enters or
@@ -119,12 +169,13 @@ pub(crate) fn handle_key(
             // while playback is shuffled, and `resume_source` would later
             // replay this context unshuffled.
             app.transport.shuffle = true;
-            let _ = app.svc.engine.shuffle(true);
+            app.engine_do(|e| { let _ = e.shuffle(true); });
             play_selected_context(app, true);
         }
         KeyCode::Char('R') => {
             app.transport.repeat = !app.transport.repeat;
-            let _ = app.svc.engine.repeat(app.transport.repeat);
+            let repeat = app.transport.repeat;
+            app.engine_do(|e| { let _ = e.repeat(repeat); });
         }
         KeyCode::Char('r') => {
             app.status = "loading library…".to_string();
@@ -207,8 +258,13 @@ pub(crate) fn handle_key(
                 spawn_detail_fetch(app.svc.webapi.clone(), uri, name, chans.detail.clone());
             }
             Activated::Radio(uri) => {
+                // Radio rides librespot's mercury endpoint, so it needs a live
+                // session — a guest has none.
+                let Some(session) = app.svc.engine.as_ref().map(|e| e.session()) else {
+                    app.status = "guest: radio needs a Premium session".to_string();
+                    return false;
+                };
                 app.status = "starting radio…".to_string();
-                let session = app.svc.engine.session();
                 let tx = chans.radio.clone();
                 tokio::spawn(async move {
                     let res = match tokio::time::timeout(
@@ -230,6 +286,60 @@ pub(crate) fn handle_key(
             }
             Activated::None => {}
         },
+        // --- Room: h host, J join, L leave (Room view only) ---
+        KeyCode::Char('h') if app.view.mode == RightView::Room => {
+            if app.room.mode == RoomMode::Host {
+                app.svc.room.stop_host();
+                app.room.mode = RoomMode::Idle;
+                app.status = "room stopped".to_string();
+            } else {
+                // Hosting resolves tracks through a Premium session; a guest
+                // build has none. Check before leaving any room we are in —
+                // otherwise the key would drop the guest's audio and then
+                // refuse to host, leaving it worse off than before.
+                let Some(engine) = app.svc.engine.clone() else {
+                    app.status =
+                        "guest: hosting needs a Premium session — you can only join".to_string();
+                    return false;
+                };
+                if app.room.mode == RoomMode::Guest {
+                    app.svc.room.player.leave();
+                    app.room.queue.clear();
+                }
+                match app.svc.room.start_host(engine, myx::room::ROOM_PORT) {
+                    Ok(info) => {
+                        app.room.mode = RoomMode::Host;
+                        app.status = format!("hosting on :{}", info.port);
+                    }
+                    Err(e) => app.status = format!("couldn't host: {e:#}"),
+                }
+            }
+        }
+        KeyCode::Char('J')
+            if app.view.mode == RightView::Room && app.room.mode != RoomMode::Host =>
+        {
+            app.room.guest_url.clear();
+            app.room.guest_token.clear();
+            app.room.input = Some(RoomInput::Url);
+        }
+        // The token now survives restarts, so revoking a leaked one has to be
+        // something you can actually do.
+        KeyCode::Char('T') if app.view.mode == RightView::Room => {
+            app.status = match app.svc.room.rotate_token() {
+                Some(token) => format!("room: new token {token} — old guests must rejoin"),
+                None => "room: not hosting".to_string(),
+            };
+        }
+        KeyCode::Char('L') if app.view.mode == RightView::Room => {
+            if app.room.mode == RoomMode::Host {
+                app.svc.room.stop_host();
+            } else if app.room.mode == RoomMode::Guest {
+                app.svc.room.player.leave();
+            }
+            app.room.mode = RoomMode::Idle;
+            app.room.queue.clear();
+            app.status = "room left".to_string();
+        }
         _ => {}
     }
     false

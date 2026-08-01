@@ -5,16 +5,22 @@ pub(crate) enum RightView {
     NowPlaying,
     Lyrics,
     Queue,
+    Room,
 }
 
 impl RightView {
-    pub(crate) const ALL: [RightView; 3] =
-        [RightView::NowPlaying, RightView::Lyrics, RightView::Queue];
+    pub(crate) const ALL: [RightView; 4] = [
+        RightView::NowPlaying,
+        RightView::Lyrics,
+        RightView::Queue,
+        RightView::Room,
+    ];
     pub(crate) fn label(self) -> &'static str {
         match self {
             RightView::NowPlaying => "Now Playing",
             RightView::Lyrics => "Lyrics",
             RightView::Queue => "Queue",
+            RightView::Room => "Room",
         }
     }
     pub(crate) fn shift(self, delta: isize) -> RightView {

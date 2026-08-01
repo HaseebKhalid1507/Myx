@@ -10,6 +10,7 @@ mod lyrics;
 mod nowplaying;
 mod overlay;
 mod queue;
+mod room;
 mod visualizer;
 
 pub(crate) use footer::*;
@@ -18,6 +19,7 @@ pub(crate) use lyrics::*;
 pub(crate) use nowplaying::*;
 pub(crate) use overlay::*;
 pub(crate) use queue::*;
+pub(crate) use room::*;
 pub(crate) use visualizer::*;
 
 use crate::*;
@@ -104,6 +106,7 @@ pub(crate) fn render(f: &mut Frame, app: &App, out: &mut FrameOut, repaint: ArtR
         RightView::NowPlaying => render_nowplaying_view(f, app, theme, right, repaint),
         RightView::Lyrics => render_lyrics(f, app, theme, right),
         RightView::Queue => render_queue_view(f, app, theme, right),
+        RightView::Room => render_room(f, app, theme, right),
     }
 
     render_now_strip(f, app, out, theme, rows[4]);
