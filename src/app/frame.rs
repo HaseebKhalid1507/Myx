@@ -4,8 +4,11 @@ use crate::*;
 
 /// Mouse hit rects, written by the renderer and read only by `handle_mouse`.
 ///
-/// Pure output: every field is (re)set or cleared on each frame that draws the
-/// thing it belongs to, so nothing here is threaded frame-to-frame.
+/// Output only: nothing here is threaded frame-to-frame, and every rect is
+/// (re)set or cleared on the frame that draws the thing it belongs to. The one
+/// exception is `scroll_len`, which is written with `scroll` but not cleared
+/// alongside it — reading it is only sound because `handle_mouse` checks
+/// `scroll` is `Some` first.
 #[derive(Default)]
 pub(crate) struct HitRects {
     /// Last-rendered progress-bar rect (for click-to-seek).

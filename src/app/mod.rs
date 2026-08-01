@@ -2,9 +2,17 @@
 //!
 //! `ui/` reads `&App` and writes `FrameOut`; `input/` mutates `App`; `api/`
 //! touches neither and talks HTTP over channels. This module is the state in
-//! the middle, and it depends on none of them. One module per part of the
-//! model, so the file to open is the one named after it; `App` itself lives
-//! here, since every one of those parts hangs off it.
+//! the middle. One module per part of the model, so the file to open is the one
+//! named after it; `App` itself lives here, since every one of those parts
+//! hangs off it.
+//!
+//! It would be tidier if this module depended on none of the others, and it
+//! nearly does — with two exceptions, both in `event.rs`, where handling an
+//! engine event spawns a fetch directly (`fetch_track_meta`, and the lyrics
+//! fetch). Those reach into `api/`. The intended shape is for `event.rs` to
+//! send a request over a channel and let `main.rs` — the wiring layer, which is
+//! allowed to know both sides — service it. Until that lands, this is a real
+//! edge in the graph, not an aspiration, so don't add more of them.
 
 mod action;
 mod event;

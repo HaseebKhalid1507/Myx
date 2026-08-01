@@ -10,7 +10,8 @@
 /// defined here.
 mod api;
 /// The application state. `ui` reads it, `input` writes it, `api` feeds it over
-/// channels; it depends on none of the three.
+/// channels. It depends on none of the three except in `app/event.rs`, which
+/// still calls two fetches in `api` directly — see that module's docs.
 /// Lives in the binary (not the library) because it is what this binary is.
 mod app;
 /// The input layer. Turns terminal and media-key events into `App` mutations

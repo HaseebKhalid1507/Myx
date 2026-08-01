@@ -64,15 +64,30 @@ The four binary modules point one way, and it's worth knowing before you start:
 
 ```
   input/  ──mutates──►  app/  ◄──reads──  ui/
-                         ▲
-                         │ plain data over channels
-                       api/
+                       │  ▲
+                       ┊  │ plain data over channels
+                       ┊ api/
+                       ┊     ┊ = app/event.rs spawns two fetches directly.
+                       └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌►  Known; see below.
 ```
 
-`app/` depends on none of them. `ui/` reads `&App` and never writes. `input/`
-writes `App` and never draws. `api/` touches neither — it speaks HTTP and hands
-results back over channels. What's left in `main.rs` is startup, wiring, and the
-event loop that owns them all.
+`ui/` reads `&App` and never writes. `input/` writes `App` and never draws.
+`api/` touches neither — it speaks HTTP and hands results back over channels.
+What's left in `main.rs` is startup, wiring, and the event loop that owns them
+all.
+
+`app/` is meant to depend on none of them, and depends only on `api/`, in
+exactly two places: `app/event.rs` spawns `fetch_track_meta` and the lyrics
+fetch inline when an engine event arrives. The intended shape is for `event.rs`
+to send a request over a channel and let `main.rs` service it, the way
+`meta_tx` is already threaded. **Don't add a third.**
+
+One caveat about verifying any of this: every `mod.rs` re-exports its
+submodules with a glob, and every leaf file does `use crate::*;`, so all four
+modules share one flat namespace. Nothing stops a file in `ui/` from calling
+into `api/`, and no import line would show it — the compiler is not enforcing
+the diagram above. Until that changes, the arrows hold by review, not by
+construction.
 
 ### The engine (streaming feature)
 
@@ -113,7 +128,7 @@ open is the one named after what you're looking at.
 ### The state
 
 `src/app/` is what the other three modules are all about. It depends on none of
-them.
+them, apart from the two direct `api/` calls in `app/event.rs` noted above.
 
 | Path | What lives here |
 | --- | --- |
