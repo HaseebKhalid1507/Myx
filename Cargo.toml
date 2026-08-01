@@ -53,7 +53,11 @@ winit = "0.30.13"
 vergen = "=9.0.6"
 
 [features]
-default = ["streaming"]
+default = ["streaming", "mxc"]
+
+# The Myx Color Protocol: pure data types + color math, usable without the
+# streaming backend so consumers can depend on the protocol half alone.
+mxc = ["dep:serde", "dep:serde_json"]
 streaming = [
     "dep:librespot-core",
     "dep:librespot-connect",
@@ -74,10 +78,14 @@ streaming = [
     "dep:toml",
 ]
 
-# The one, fully-wired binary.
+# The one, fully-wired binary. `required-features` states what was already
+# true — `main.rs` is unconditionally wired to the streaming engine — so that
+# a protocol-only build (`--no-default-features --features mxc`) skips the bin
+# instead of failing to compile it.
 [[bin]]
 name = "myx"
 path = "src/main.rs"
+required-features = ["streaming"]
 
 # Dev tools, kept as examples (cargo run --example theme_demo / probe).
 [[example]]
