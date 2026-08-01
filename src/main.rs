@@ -71,7 +71,7 @@ fn main() -> Result<()> {
     // here — before anything else in `main` runs — is what guarantees that,
     // and it also keeps `theme` from reaching the "first positional argument
     // is a Spotify URI" path in `boot`.
-    #[cfg(feature = "mxc")]
+    #[cfg(all(feature = "mxc", unix))]
     {
         let argv: Vec<String> = std::env::args().collect();
         if argv.get(1).is_some_and(|a| a == "theme") {
@@ -151,20 +151,20 @@ fn main() -> Result<()> {
 /// A type alias rather than `#[cfg]` on the signature: the non-MXC build then
 /// differs in exactly one place instead of in every function that carries the
 /// value through.
-#[cfg(feature = "mxc")]
+#[cfg(all(feature = "mxc", unix))]
 type MxcHandle = Option<myx::mxc::publish::Publisher>;
-#[cfg(not(feature = "mxc"))]
+#[cfg(not(all(feature = "mxc", unix)))]
 type MxcHandle = ();
 
 /// Send `bye` to every subscriber and close the socket.
-#[cfg(feature = "mxc")]
+#[cfg(all(feature = "mxc", unix))]
 fn shutdown_publisher(handle: MxcHandle) {
     if let Some(publisher) = handle {
         publisher.shutdown(myx::mxc::ByeReason::Shutdown);
     }
 }
 
-#[cfg(not(feature = "mxc"))]
+#[cfg(not(all(feature = "mxc", unix)))]
 fn shutdown_publisher(_handle: MxcHandle) {}
 
 /// Bind the MXC theme socket, or run without one.
@@ -178,7 +178,7 @@ fn shutdown_publisher(_handle: MxcHandle) {}
 /// first; losing colour publishing costs a subscriber a repaint, whereas
 /// refusing to start costs the user their music. Failures go to the librespot
 /// log, where the rest of the optional-integration diagnostics already live.
-#[cfg(feature = "mxc")]
+#[cfg(all(feature = "mxc", unix))]
 fn bind_publisher() -> MxcHandle {
     if std::env::var("MYX_NO_COLOR_SOCKET").is_ok_and(|v| !v.is_empty() && v != "0") {
         liblog("mxc: MYX_NO_COLOR_SOCKET set; colour publishing disabled");
@@ -295,7 +295,7 @@ async fn boot(
             webapi,
         },
         media_controls,
-        #[cfg(feature = "mxc")]
+        #[cfg(all(feature = "mxc", unix))]
         mxc: bind_publisher(),
         playback: PlaybackState {
             now,
@@ -731,11 +731,11 @@ async fn run_ui(
     // Hand the publisher back to `main` so the `bye` goes out on the same path
     // that restores the terminal, rather than relying on where `App` happens
     // to be dropped.
-    #[cfg(feature = "mxc")]
+    #[cfg(all(feature = "mxc", unix))]
     {
         Ok(app.mxc.take())
     }
-    #[cfg(not(feature = "mxc"))]
+    #[cfg(not(all(feature = "mxc", unix)))]
     {
         Ok(())
     }

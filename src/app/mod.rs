@@ -44,7 +44,7 @@ pub(crate) struct App {
     // are ordinary states, not errors: a player that refuses to play music
     // because a socket is unavailable would be a worse player. Every use site
     // is a `if let Some(..)`, so `None` is simply inert.
-    #[cfg(feature = "mxc")]
+    #[cfg(all(feature = "mxc", unix))]
     pub(crate) mxc: Option<myx::mxc::publish::Publisher>,
     pub(crate) status: String,
     pub(crate) browse: BrowseState,

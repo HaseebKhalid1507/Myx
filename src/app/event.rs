@@ -173,7 +173,7 @@ pub(crate) fn apply_meta(
         app.theme.start_fade(theme);
         // Same instant, same palette: whatever the UI is fading towards is
         // exactly what subscribers are told to fade towards.
-        #[cfg(feature = "mxc")]
+        #[cfg(all(feature = "mxc", unix))]
         publish_theme(app, &theme);
     }
 
@@ -208,7 +208,7 @@ pub(crate) fn apply_meta(
 ///
 /// `fade_ms` is [`FADE_MS`] itself — the same constant `start_fade` uses — so
 /// a consumer's cross-fade cannot drift out of sync with Myx's own.
-#[cfg(feature = "mxc")]
+#[cfg(all(feature = "mxc", unix))]
 fn publish_theme(app: &App, theme: &Theme) {
     use myx::mxc::{Origin, OriginKind};
 
