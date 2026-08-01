@@ -93,6 +93,11 @@ name = "theme_demo"
 path = "examples/theme_demo.rs"
 
 [[example]]
+name = "mxc_demo"
+path = "examples/mxc_demo.rs"
+required-features = ["mxc"]
+
+[[example]]
 name = "probe"
 path = "examples/probe.rs"
 required-features = ["streaming"]

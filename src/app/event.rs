@@ -171,6 +171,10 @@ pub(crate) fn apply_meta(
 
     if let Some(theme) = meta.theme {
         app.theme.start_fade(theme);
+        // Same instant, same palette: whatever the UI is fading towards is
+        // exactly what subscribers are told to fade towards.
+        #[cfg(feature = "mxc")]
+        publish_theme(app, &theme);
     }
 
     if let Some(controls) = app.media_controls.as_mut() {
@@ -186,6 +190,53 @@ pub(crate) fn apply_meta(
                 .map(|n| Duration::from_millis(n.duration_ms as u64)),
         });
     }
+}
+
+/// Broadcast the new palette over MXC, if a publisher is running.
+///
+/// Called from the one place a track's palette is adopted, so the `Origin` can
+/// carry the metadata that produced it — that provenance is what lets a
+/// subscriber show "now playing" text or ignore everything that is not album
+/// art. The fields are read back out of `app.playback.now`, which was assigned
+/// from this very `TrackMeta` a few lines above (the `meta` fields themselves
+/// have been moved into it by then); `apply_meta` has already returned early
+/// for a stale reply, so this is always the current track.
+///
+/// Empty strings are omitted rather than sent as `Some("")`: the wire contract
+/// says an absent field is unknown, and `""` would force every consumer to
+/// re-check what the publisher already knows.
+///
+/// `fade_ms` is [`FADE_MS`] itself — the same constant `start_fade` uses — so
+/// a consumer's cross-fade cannot drift out of sync with Myx's own.
+#[cfg(feature = "mxc")]
+fn publish_theme(app: &App, theme: &Theme) {
+    use myx::mxc::{Origin, OriginKind};
+
+    let Some(publisher) = app.mxc.as_ref() else {
+        return;
+    };
+    let now = app.playback.now.as_ref();
+    let field = |get: fn(&NowPlaying) -> &str| {
+        now.map(get)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
+
+    let track = field(|n| n.title.as_str());
+    publisher.publish(
+        Origin {
+            kind: OriginKind::AlbumArt,
+            // The title is the human-facing label; a track with no title (a
+            // local file, a podcast segment) still has a palette worth naming.
+            name: track.clone().unwrap_or_else(|| "album".to_string()),
+            track,
+            artist: field(|n| n.artist.as_str()),
+            album: field(|n| n.album.as_str()),
+            track_id: field(|n| n.uri.as_str()),
+        },
+        theme,
+        u32::try_from(FADE_MS).unwrap_or(u32::MAX),
+    );
 }
 
 /// Does this row carry a playable context URI, and under what name?

@@ -19,6 +19,8 @@
 //!
 //! - [`wire`] — the serde types that define the byte-level contract.
 //! - [`contrast`] — WCAG relative luminance and the `on_*` foreground picker.
+//! - [`cli`] — `myx theme get|watch`, the reference consumer, kept here so the
+//!   protocol and the tool that reads it cannot drift apart.
 //!
 //! ## Why the contrast math lives here
 //!
@@ -27,6 +29,7 @@
 //! *once, correctly* means no consumer has to. That is a protocol
 //! responsibility, not a consumer one.
 
+pub mod cli;
 pub mod contrast;
 pub mod publish;
 pub mod subscribe;
