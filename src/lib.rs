@@ -13,8 +13,11 @@ pub mod components;
 pub mod cover;
 pub mod gradient;
 pub mod httpcache;
+pub mod liblog;
+pub mod lyrics;
 pub mod reactive;
 pub mod theme;
+pub mod util;
 
 #[cfg(feature = "streaming")]
 pub mod audio;
@@ -22,6 +25,8 @@ pub mod audio;
 pub mod config;
 #[cfg(feature = "streaming")]
 pub mod engine;
+#[cfg(feature = "streaming")]
+pub mod term;
 #[cfg(feature = "streaming")]
 pub mod webapi;
 
