@@ -28,6 +28,8 @@
 //! responsibility, not a consumer one.
 
 pub mod contrast;
+pub mod publish;
+pub mod subscribe;
 pub mod wire;
 
 pub use contrast::Contrast;
