@@ -4,9 +4,10 @@ Hey — thanks for being here. Myx is a terminal Spotify player: librespot for
 streaming, ratatui for the surface, and album art that repaints the whole UI on
 every track change.
 
-The codebase used to be one 5000-line `main.rs`. It isn't anymore. This document
-is the map that refactor was for — read the **Architecture map** and the **App
-state model**, and you'll know where your change goes.
+The codebase used to be one 5000-line `main.rs`. It's now about 770, and the
+rest is four modules with one job each. This document is the map that refactor
+was for — read the **Architecture map** and the **App state model**, and you'll
+know where your change goes.
 
 ---
 
@@ -49,12 +50,29 @@ wrong.
 
 ## Architecture map
 
-One line per module. The rule of thumb: **if it's on screen, it's in `src/ui/`.
-If it's state or input, it's in `src/main.rs`. Everything else is a library
-module in `src/lib.rs`.**
+One line per module. The rule of thumb, in the order you should ask it:
+**if it's on screen it's in `src/ui/`; if it responds to you it's in
+`src/input/`; if it talks to Spotify over HTTP it's in `src/api/`; if it's
+state it's in `src/app/`. Everything else is a library module in `src/lib.rs`.**
 
-`main.rs` is the binary; everything else is the `myx` library crate, which means
-library modules are unit-testable without a terminal, a network, or a sound card.
+Those four are the binary's own modules, and they exist because they depend on
+`App`, which is the one thing the library can't own. Everything else is the
+`myx` library crate, which means library modules are unit-testable without a
+terminal, a network, or a sound card.
+
+The four binary modules point one way, and it's worth knowing before you start:
+
+```
+  input/  ──mutates──►  app/  ◄──reads──  ui/
+                         ▲
+                         │ plain data over channels
+                       api/
+```
+
+`app/` depends on none of them. `ui/` reads `&App` and never writes. `input/`
+writes `App` and never draws. `api/` touches neither — it speaks HTTP and hands
+results back over channels. What's left in `main.rs` is startup, wiring, and the
+event loop that owns them all.
 
 ### The engine (streaming feature)
 
@@ -92,12 +110,57 @@ open is the one named after what you're looking at.
 | `ui/overlay.rs` | Things drawn on top: the actions menu, the startup loading screen. |
 | `ui/footer.rs` | The one-line keybinding hint. |
 
+### The state
+
+`src/app/` is what the other three modules are all about. It depends on none of
+them.
+
+| Path | What lives here |
+| --- | --- |
+| `app/mod.rs` | `App` itself and `impl App` — the straddling methods that resolve across sub-structs. See the state model below. |
+| `app/library.rs` | What you can browse: `Section`, `LibItem`, `Library`, `SortMode`, `Detail`, `RightView`. |
+| `app/action.rs` | The actions menu model: `ActionKind`, `ActionItem`, `ActionMenu`. |
+| `app/playback.rs` | The playhead: `NowPlaying`, `TrackMeta`, `PlaySource`, `PlaybackState`, and the seek/scrub constants. |
+| `app/state.rs` | The remaining sub-structs: `Services`, `ThemeState`, `Transport`, `Browse`/`Search`/`View`/`Session` state. |
+| `app/persist.rs` | `SavedState` — the `~/.cache/myx/state.json` shape and the snapshot that writes it. **Changing a field here changes an on-disk format someone already has.** |
+| `app/frame.rs` | `FrameOut`, `HitRects`, `ArtRepaint`, and the redraw timing policy (`should_draw` and friends). |
+| `app/event.rs` | Engine events and track metadata applied to `App`. |
+
+### The input
+
+`src/input/` is the layer that mutates state. **One module per input source** —
+the file to open is the one named after where the event came from. It reads
+`FrameOut` only for the hit rects the renderer left behind.
+
+| Path | What lives here |
+| --- | --- |
+| `input/key.rs` | The main keymap. |
+| `input/mouse.rs` | Clicks, drags and wheel, resolved against the hit rects. |
+| `input/actions.rs` | Input while the actions overlay is open, plus copy-to-clipboard. |
+| `input/media.rs` | OS media keys (souvlaki). |
+
+### The network
+
+`src/api/` is the Spotify Web API layer. **One module per thing fetched.**
+Everything here runs off-thread and hands plain data back over channels — it
+touches neither `App` nor the render tree, which is why it's the easiest layer
+to work on in isolation.
+
+| Path | What lives here |
+| --- | --- |
+| `api/mod.rs` | The transport core every other file here is built on: client, token, `get_json`, the cached variant, cover fetch. |
+| `api/library.rs` | The library sections and their paging. |
+| `api/search.rs` / `api/detail.rs` | Search, and drill-in for artist / album / playlist. |
+| `api/queue.rs` / `api/track.rs` / `api/playback.rs` | The live queue, one track's metadata, and server-side playback state and transfer. |
+| `api/lyrics.rs` | Fetching from lrclib. Parsing is a separate pure module — see below. |
+| `api/actions.rs` | The **write** half: save, follow, playlist adds. Everything else in `api/` only reads. |
+
 ### The rest
 
 | Path | What lives here |
 | --- | --- |
-| `main.rs` | `App` state, the async event loop (`run_ui`), all input handling (`handle_key`, `handle_mouse`, media keys), and the Web API worker functions that fetch library/search/detail/lyrics off-thread. |
-| `lyrics/parse.rs` | LRC parsing. Pure, no I/O. (Network fetching still lives in `main.rs` — moving it out is a welcome PR.) |
+| `main.rs` | Startup, wiring and teardown: `main`, `boot`, the async event loop (`run_ui`), and the channel bundle it owns. |
+| `lyrics/parse.rs` | LRC parsing. Pure, no I/O — fetching lives in `api/lyrics.rs`. |
 | `util.rs` | Small pure helpers shared by UI and workers — `truncate`, `fmt_ms`, `center_v`, URI munging. Dependency-light on purpose so it unit-tests trivially. |
 | `config.rs` | `~/.config/myx/config.toml`. Missing, empty or malformed all fall back to defaults — a typo must never lock someone out. |
 | `term.rs` | Terminal setup/teardown and the single-instance lock. |
@@ -184,7 +247,7 @@ Tests live in three places, and which one you use depends on visibility:
 | Where | For |
 | --- | --- |
 | `tests/` | Integration tests against the public `myx` library API (`tests/util.rs`, `tests/lyrics.rs`). |
-| `src/main_tests/` | The binary's unit tests — kept in-crate because they exercise items private to `main.rs` (`nav.rs`, `playlist.rs`, `live.rs`). |
+| `src/main_tests/` | The binary's unit tests — kept in-crate because they exercise items that are `pub(crate)` at most, never public (`nav.rs`, `playlist.rs`, `live.rs`). |
 | Inline `#[cfg(test)]` | Module-local tests next to the code (`anim`, `color`, `config`, `cover`, `engine`, `gradient`, `httpcache`, `reactive`). |
 
 ### Characterization-test style
