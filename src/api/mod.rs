@@ -7,6 +7,7 @@
 //! This module holds the transport core — the client, the token, and the two
 //! `GET` helpers every other file in here is built on.
 
+mod actions;
 mod detail;
 mod library;
 mod lyrics;
@@ -15,6 +16,7 @@ mod queue;
 mod search;
 mod track;
 
+pub(crate) use actions::*;
 pub(crate) use detail::*;
 pub(crate) use library::*;
 pub(crate) use lyrics::*;
