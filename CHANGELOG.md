@@ -4,10 +4,15 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com);
 versions follow [semver](https://semver.org). Released sections are a record —
 they are added to, never rewritten.
 
-## [Unreleased]
+## [0.3.1] — 2026-08-01
 
 ### Added
 
+- Nix flake. `nix run github:HaseebKhalid1507/Myx` runs myx without installing
+  it, `nix build` produces the binary, and `nix develop` opens a shell with the
+  Rust toolchain and the ALSA and OpenSSL headers already in place. Covers
+  x86_64 and aarch64 on both Linux and macOS. This is not the same as being in
+  nixpkgs — that needs a separate PR against `NixOS/nixpkgs`.
 - `~/.config/myx/config.toml` is written on first run with every key commented
   out, so there is a file to edit instead of a path to guess.
 - `protocol` config key (`kitty`, `iterm2`, `sixel`, `halfblocks`) for when the
