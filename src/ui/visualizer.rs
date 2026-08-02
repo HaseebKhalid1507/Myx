@@ -3,17 +3,16 @@
 use crate::*;
 
 pub(crate) fn render_visualizer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
-    let active = app
-        .svc
-        .engine
-        .bands
-        .try_lock()
-        .map(|g| g.is_active)
-        .unwrap_or(false);
+    // The FFT is tee'd off whichever sink is producing audio — the engine's
+    // player, or an external source. With neither there are no bands to draw.
+    let Some(bands) = app.bands() else {
+        return;
+    };
+    let active = bands.try_lock().map(|g| g.is_active).unwrap_or(false);
     if !active {
         return;
     }
-    let Ok(guard) = app.svc.engine.bands.try_lock() else {
+    let Ok(guard) = bands.try_lock() else {
         return;
     };
     let values: [f32; NUM_BANDS] = guard.values;

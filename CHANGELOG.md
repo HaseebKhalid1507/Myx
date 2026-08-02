@@ -4,6 +4,34 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com);
 versions follow [semver](https://semver.org). Released sections are a record —
 they are added to, never rewritten.
 
+## [Unreleased]
+
+### Added
+
+- `--guest` (or `MYX_GUEST=1`) starts myx without a streaming engine, so a free
+  account can browse its library. Previously the Premium-only `streaming` OAuth
+  scope was requested before the terminal was even set up, and a free account
+  hung on a callback it could never satisfy — no UI, no message. Engine-only
+  actions now say why they cannot run instead of doing nothing.
+- Playback from an external source, so guest mode can make sound:
+  `--play <uri>` with `--source <program>` (or `MYX_SOURCE`) streams through a
+  helper program — by default [earshot](https://github.com/vishalmakwana111/earshot).
+  The integration is a byte pipe, not a library dependency: pause is a full
+  stdout pipe, seek is a respawn, stop is a kill. Audio goes through myx's
+  existing sink, so the visualizer works on this path too. Ogg Vorbis only —
+  symphonia ships no Opus decoder.
+- A missing helper explains how to install it, and is found on `PATH` by name
+  with no configuration.
+
+### Fixed
+
+- The external source no longer overwrites an in-progress seek. Holding
+  Shift+arrow accumulated a target that the helper's live position wiped every
+  frame, so six presses moved the playhead about three seconds.
+- The install hint no longer points at `cargo install earshot`; that name on
+  crates.io belongs to an unrelated voice-activity-detection crate, so the
+  advice installed someone else's software.
+
 ## [0.3.1] — 2026-08-01
 
 ### Added

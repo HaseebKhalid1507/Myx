@@ -26,7 +26,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MediaKeyCode, MouseButton, MouseEventKind,
 };
@@ -44,10 +44,11 @@ use api::*;
 use app::*;
 use input::*;
 use myx::anim::ThemeFade;
-use myx::audio::NUM_BANDS;
+use myx::audio::{VisBands, NUM_BANDS};
 use myx::components::{gradient_line, gradient_progress, left_bar_block};
 use myx::cover::Cover;
 use myx::engine::{self, Engine, EngineEvent};
+use myx::external::ExternalSource;
 use myx::gradient::{self};
 use myx::liblog::{install_librespot_log, liblog};
 use myx::lyrics::parse::parse_lrc;
@@ -81,15 +82,27 @@ fn main() -> Result<()> {
         saved.volume.min(100)
     };
 
+    let cli = Cli::parse()?;
+
     // OAuth may need to print a browser URL, including when a cached refresh
     // token has been revoked. Complete both auth flows before entering the
     // alternate screen so that recovery prompts can never be hidden by the TUI.
-    if engine::needs_authorization() || !WebApi::is_cached() {
+    if (!cli.guest && engine::needs_authorization()) || !WebApi::is_cached() {
         println!("myx: first run — authorizing with Spotify…");
+    }
+    if cli.guest {
+        println!("myx: guest mode — browsing only, streaming needs Premium");
     }
     let ((creds, webapi), mut terminal) = auth_then_terminal(
         || {
-            let creds = engine::credentials()?;
+            // Guest mode skips librespot entirely. That is the whole point:
+            // `engine::credentials()` demands the Premium-only `streaming`
+            // scope, so without this a free account can never reach the UI.
+            let creds = if cli.guest {
+                None
+            } else {
+                Some(engine::credentials()?)
+            };
             let webapi = WebApi::init().context("authorize web api")?;
             Ok((creds, webapi))
         },
@@ -115,9 +128,112 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("start tokio runtime")?;
-    let res = runtime.block_on(boot(&mut terminal, saved, init_vol, creds, webapi, picker));
+    let external = External {
+        enabled: cli.wants_external(),
+        program: cli.source_program().to_string(),
+        play: cli.play.clone(),
+    };
+    let res = runtime.block_on(boot(
+        &mut terminal,
+        saved,
+        init_vol,
+        creds,
+        webapi,
+        picker,
+        Launch {
+            context_uri: cli.uri,
+            external,
+        },
+    ));
     restore_terminal(&mut terminal)?;
     res
+}
+
+/// External-source configuration, resolved from the CLI.
+struct External {
+    enabled: bool,
+    program: String,
+    play: Option<String>,
+}
+
+/// What to start playing once the UI is up.
+///
+/// Grouped so `boot` keeps a readable signature. The two are unrelated: one is a
+/// Spotify context for the engine, the other a URI for the external helper.
+struct Launch {
+    context_uri: Option<String>,
+    external: External,
+}
+
+/// Command line: `myx [--guest] [--play URI] [--source PROGRAM] [spotify:...]`.
+struct Cli {
+    /// Start with no streaming engine, so a free account can browse its
+    /// library instead of being blocked at an OAuth prompt it cannot satisfy.
+    guest: bool,
+    /// A context URI to start playing on launch.
+    uri: Option<String>,
+    /// A URI handed to the external source helper on launch.
+    play: Option<String>,
+    /// The helper program for external playback. Implies an external source.
+    source: Option<String>,
+}
+
+impl Cli {
+    fn parse() -> Result<Self> {
+        let mut cli = Self {
+            guest: std::env::var_os("MYX_GUEST").is_some(),
+            uri: None,
+            play: None,
+            source: std::env::var("MYX_SOURCE").ok().filter(|s| !s.is_empty()),
+        };
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let mut index = 0;
+        while index < args.len() {
+            let arg = args[index].as_str();
+            let value = |name: &str| -> Result<String> {
+                args.get(index + 1)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("{name} needs a value"))
+            };
+            match arg {
+                "--guest" => index += 1,
+                "--play" => {
+                    cli.play = Some(value("--play")?);
+                    index += 2;
+                }
+                "--source" => {
+                    cli.source = Some(value("--source")?);
+                    index += 2;
+                }
+                // An unrecognised flag is an error, not something to skip: a
+                // silently dropped `--paly` would look like a broken feature.
+                _ if arg.starts_with('-') && arg.len() > 1 => {
+                    bail!("unknown option {arg:?}");
+                }
+                _ => {
+                    if cli.uri.is_none() {
+                        cli.uri = Some(arg.to_string());
+                    }
+                    index += 1;
+                }
+            }
+        }
+        // Re-scan for --guest so it works in any position.
+        cli.guest = cli.guest || args.iter().any(|a| a == "--guest");
+        Ok(cli)
+    }
+
+    /// Whether to bring up the external source at all.
+    fn wants_external(&self) -> bool {
+        self.play.is_some() || self.source.is_some()
+    }
+
+    /// Helper program to spawn.
+    fn source_program(&self) -> &str {
+        self.source
+            .as_deref()
+            .unwrap_or(myx::external::DEFAULT_PROGRAM)
+    }
 }
 
 // Run every potentially-interactive authentication step before constructing the
@@ -143,23 +259,60 @@ async fn boot(
     terminal: &mut Term,
     saved: SavedState,
     init_vol: u8,
-    creds: librespot_core::authentication::Credentials,
+    creds: Option<librespot_core::authentication::Credentials>,
     webapi: WebApi,
     picker: Picker,
+    launch: Launch,
 ) -> Result<()> {
+    let Launch {
+        context_uri,
+        external,
+    } = launch;
     let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
-    let engine = with_loader(
-        terminal,
-        "connecting to Spotify",
-        engine::run(creds, ev_tx, init_vol),
-    )
-    .await?
-    .context("start engine")?;
+    // Cloned because the engine consumes its sender and the external source
+    // needs one too; either may be absent.
+    let source_events = ev_tx.clone();
+    // No credentials means `--guest`: skip the Connect device entirely. The
+    // engine is an `Option` from here down, so `App::engine_do` / `engine_play`
+    // are the only ways to reach it and every engine-only path (radio, reclaim,
+    // playback transfer, visualizer) has to say what it does without one.
+    let engine = match creds {
+        Some(creds) => Some(Arc::new(
+            with_loader(
+                terminal,
+                "connecting to Spotify",
+                engine::run(creds, ev_tx, init_vol),
+            )
+            .await?
+            .context("start engine")?,
+        )),
+        None => None,
+    };
+
+    // An external helper plays into the same sink stack as the engine, so it
+    // shares the engine's FFT bands when there is one and gets its own otherwise.
+    let source = if external.enabled {
+        let bands = engine
+            .as_ref()
+            .map(|e| Arc::clone(&e.bands))
+            .unwrap_or_else(VisBands::shared);
+        Some(ExternalSource::new(
+            external.program.clone(),
+            bands,
+            source_events,
+            vol_u16(init_vol),
+        ))
+    } else {
+        None
+    };
 
     let webapi = Arc::new(Mutex::new(webapi));
 
-    if let Some(uri) = std::env::args().nth(1) {
+    if let (Some(uri), Some(engine)) = (context_uri, engine.as_ref()) {
         let _ = engine.play_context(uri, false);
+    }
+    if let (Some(uri), Some(source)) = (external.play.as_deref(), source.as_ref()) {
+        source.load(uri, 0);
     }
 
     // Rebuild the last now-playing (paused) for a seamless resume look.
@@ -208,6 +361,7 @@ async fn boot(
     let app = App {
         svc: Services {
             engine,
+            source,
             picker,
             webapi,
         },
@@ -345,11 +499,11 @@ async fn run_ui(
     // Clone: `spawn_restore` sends once and exits. Moving the sender in would
     // drop the last one, and a disconnected receiver resolves `recv_async()`
     // instantly and forever — spinning the select loop below.
-    spawn_restore(
-        app.svc.webapi.clone(),
-        app.svc.engine.device_id(),
-        chans.pstate.clone(),
-    );
+    // A guest has no Connect device to transfer playback onto, so there is
+    // nothing to reclaim.
+    if let Some(device_id) = app.svc.engine.as_ref().map(|e| e.device_id()) {
+        spawn_restore(app.svc.webapi.clone(), device_id, chans.pstate.clone());
+    }
 
     // Re-enrich the restored last-played track (cover / theme / lyrics).
     if let Some(uri) = app.session.restore_uri.take() {
@@ -398,7 +552,10 @@ async fn run_ui(
         let touched = tokio::select! {
             biased;
             _ = frame.tick() => {
-                app.playback.flush_seek(&app.svc.engine, Instant::now());
+                let mut do_seek = app.seek_sink();
+                app.playback.flush_seek(&mut do_seek, Instant::now());
+                // Mirror the external source into `playback.now` so the transport
+                // bar works without a Spotify metadata fetch behind it.
                 // Drain library updates deterministically before rendering. Keeping
                 // this solely as a select arm could starve under a hot player-event
                 // stream / 60fps visualizer — which looked like a frozen library.
@@ -416,6 +573,12 @@ async fn run_ui(
                     }
                     app.status = format!("loaded {}", section.label());
                 }
+
+                // After the library drain, not before: a source failure such as
+                // "helper is not on PATH" must not be overwritten by routine
+                // "loaded Playlists" progress in the same frame. It self-clears
+                // when a load succeeds.
+                app.sync_external_now();
                 while let Ok(got_any) = libdone_rx.try_recv() {
                     dirty = true;
                     if got_any {
@@ -436,9 +599,8 @@ async fn run_ui(
                     dirty = true;
                     match rad {
                         Ok(radio) if !radio.uris.is_empty() => {
-                            if let Err(e) = app.svc.engine.play_tracks(radio.uris, None, radio.start_position_ms, false) {
-                                app.status = format!("couldn't play radio: {e:#}");
-                            }
+                            let (uris, pos) = (radio.uris, radio.start_position_ms);
+                            app.engine_play(|e| e.play_tracks(uris, None, pos, false));
                             app.transport.playback_started = true;
                             app.status = "radio started".to_string();
                             // Grab the freshly-populated station queue shortly after.
@@ -464,7 +626,9 @@ async fn run_ui(
                 let animating = app.theme.fade.is_some()
                     || (app.view.mode == RightView::Lyrics && app.view.lyrics_synced)
                     || (app.view.mode == RightView::NowPlaying
-                        && app.svc.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false));
+                        && app.bands().is_some_and(|b| {
+                            b.try_lock().map(|g| g.is_active).unwrap_or(false)
+                        }));
                 if app.art_repaint != ArtRepaint::Idle {
                     dirty = true;
                 }
@@ -619,7 +783,8 @@ async fn run_ui(
                     app.transport.shuffle = state.shuffle;
                     app.transport.repeat = state.repeat;
                     app.transport.volume = state.volume.min(100);
-                    let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+                    let vol = app.transport.volume;
+                    app.engine_do(|e| { let _ = e.set_volume(vol_u16(vol)); });
                     app.playback.now = Some(NowPlaying {
                         uri: format!("spotify:track:{}", state.track_id),
                         title: String::new(),
@@ -649,6 +814,12 @@ async fn run_ui(
 /// Resume the persisted playback source at the last track/position — the
 /// faithful reboot resume (real context ⇒ real queue continuation).
 fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>) {
+    // Resuming a saved context is engine work, and a guest has no session to
+    // resume onto.
+    let Some(engine) = app.svc.engine.clone() else {
+        app.status = "guest mode: playback needs Spotify Premium".to_string();
+        return;
+    };
     let track = app
         .playback
         .now
@@ -664,16 +835,12 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
 
     match app.transport.source.clone() {
         PlaySource::Context(ctx) => {
-            if let Err(e) = app
-                .svc
-                .engine
-                .play_context_at(ctx, track, pos, app.transport.shuffle)
-            {
+            if let Err(e) = engine.play_context_at(ctx, track, pos, app.transport.shuffle) {
                 app.status = format!("couldn't play: {e:#}");
             }
         }
         PlaySource::Radio(seed) => {
-            let session = app.svc.engine.session();
+            let session = engine.session();
             let tx = radio_tx.clone();
             app.status = "resuming radio…".to_string();
             tokio::spawn(async move {
@@ -701,11 +868,7 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
                 .iter()
                 .map(|i| i.uri.clone())
                 .collect();
-            if let Err(e) = app
-                .svc
-                .engine
-                .play_tracks(uris, track, pos, app.transport.shuffle)
-            {
+            if let Err(e) = engine.play_tracks(uris, track, pos, app.transport.shuffle) {
                 app.status = format!("couldn't play: {e:#}");
             }
         }
@@ -718,22 +881,18 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
                     uris.push(u.clone());
                 }
                 uris.extend(app.transport.queue_uris.iter().cloned());
-                if let Err(e) = app
-                    .svc
-                    .engine
-                    .play_tracks(uris, track, pos, app.transport.shuffle)
-                {
+                if let Err(e) = engine.play_tracks(uris, track, pos, app.transport.shuffle) {
                     app.status = format!("couldn't play: {e:#}");
                 }
             } else {
                 match track {
                     Some(uri) => {
-                        if let Err(e) = app.svc.engine.play_track_at(uri, pos) {
+                        if let Err(e) = engine.play_track_at(uri, pos) {
                             app.status = format!("couldn't play: {e:#}");
                         }
                     }
                     None => {
-                        if let Err(e) = app.svc.engine.play() {
+                        if let Err(e) = engine.play() {
                             app.status = format!("couldn't play: {e:#}");
                         }
                     }

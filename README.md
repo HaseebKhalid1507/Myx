@@ -13,8 +13,11 @@ synced lyrics.
   <img src="https://github.com/user-attachments/assets/08b3f505-5e48-4cd8-9b8d-0788d37f30c2" width="49%">
 </p>
 
-> Requires **Spotify Premium**. Works on Linux, macOS, and Windows. Album art is
-> crispest on kitty, WezTerm, or foot.
+> Requires **Spotify Premium** to stream. Works on Linux, macOS, and Windows.
+> Album art is crispest on kitty, WezTerm, or foot.
+>
+> `myx --guest` starts without the streaming engine, so a free account can
+> browse its library instead of hanging. See [Guest mode](#guest-mode).
 
 ## Install
 
@@ -84,6 +87,63 @@ does the same everywhere.
 The album-art protocol is detected at startup and picked per terminal, including
 inside tmux. If your tmux has no sixel support, add `set -g focus-events on` to
 `~/.tmux.conf` so the art is re-sent when you switch back to myx's window.
+
+## Guest mode
+
+Streaming needs Premium, because it needs a librespot session. Without one, myx
+never reaches the UI at all — it asks for the Premium-only `streaming` scope
+before the terminal is even set up, and waits on an OAuth callback that a free
+account can never satisfy.
+
+`--guest` skips the engine entirely:
+
+```bash
+myx --guest      # or MYX_GUEST=1 myx
+```
+
+Browsing, search, the library, covers and lyrics all work on any account. There
+is no Connect device and no radio, and Spotify playback says so rather than
+failing silently.
+
+Without `--guest`, myx still needs Premium.
+
+## External source
+
+Guest mode can still play audio, from a helper program instead of librespot:
+
+```bash
+myx --guest --play track.ogg --source ./earshot   # or MYX_SOURCE=./earshot
+```
+
+The helper is [earshot](https://github.com/vishalmakwana111/earshot), whose
+contract is `earshot <uri> [--start-ms N]` → Ogg on stdout, one metadata line on
+stderr, meaningful exit codes. myx spawns it, decodes its stdout, and writes the
+samples into the same sink the librespot engine uses — so the external path shares
+the real output device and the FFT visualizer works exactly as it does for
+Spotify.
+
+Because the helper is stateless per invocation, the transport maps onto the
+process rather than onto an API:
+
+| action | what happens |
+|---|---|
+| pause | myx **stops reading stdout**; the pipe fills and the helper blocks in `write`. No signal, no state. |
+| seek | kill and respawn with a new `--start-ms`. |
+| stop / quit | kill. |
+
+Two details worth knowing:
+
+- **The playhead follows the helper, not the request.** A splice lands on a page
+  boundary and a decoder discards the head of a spliced stream, so asking for
+  90 000 ms may really begin at 89 020 ms. myx counts position from the
+  `actual_start_ms` the helper reports, which is why the progress bar stays honest.
+- **Ogg Vorbis only.** Decoding uses symphonia, which as of 0.5 ships no Opus
+  decoder, so Ogg Opus fails with an explicit message rather than silence. That
+  matches the use case: Spotify serves `OGG_VORBIS`.
+
+An external source is a different domain from the engine, not a fallback for it —
+it plays whatever its helper can resolve, which is not a Spotify context. Pressing
+play on a library row in guest mode still says so.
 
 ## Config
 

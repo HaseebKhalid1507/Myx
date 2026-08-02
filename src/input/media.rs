@@ -22,17 +22,21 @@ pub(crate) fn handle_media_control_event(
 ) {
     match ev {
         MediaControlEvent::Next => {
-            let _ = app.svc.engine.next();
+            app.engine_do(|e| {
+                let _ = e.next();
+            });
         }
         MediaControlEvent::Previous => {
-            let _ = app.svc.engine.prev();
+            app.engine_do(|e| {
+                let _ = e.prev();
+            });
         }
         MediaControlEvent::Toggle => {
             if app.transport.playback_started {
-                let _ = app.svc.engine.toggle();
+                app.transport_toggle();
             } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
-                let _ = app.svc.engine.play();
+                app.transport_play();
                 app.transport.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
@@ -42,10 +46,10 @@ pub(crate) fn handle_media_control_event(
         }
         MediaControlEvent::Play => {
             if app.transport.playback_started {
-                let _ = app.svc.engine.play();
+                app.transport_play();
             } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
-                let _ = app.svc.engine.play();
+                app.transport_play();
                 app.transport.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
@@ -54,10 +58,12 @@ pub(crate) fn handle_media_control_event(
             }
         }
         MediaControlEvent::Pause => {
-            let _ = app.svc.engine.pause();
+            app.engine_do(|e| {
+                let _ = e.pause();
+            });
         }
         MediaControlEvent::Stop => {
-            app.svc.engine.stop();
+            app.transport_stop();
         }
         MediaControlEvent::Seek(direction) => match direction {
             SeekDirection::Backward => app.playback.seek_step(-5_000),
@@ -68,8 +74,9 @@ pub(crate) fn handle_media_control_event(
             SeekDirection::Forward => app.playback.seek_step(duration.as_millis() as i64),
         },
         MediaControlEvent::SetPosition(MediaPosition(duration)) => {
+            let mut do_seek = app.seek_sink();
             app.playback
-                .seek_to(&app.svc.engine, duration.as_millis() as u32);
+                .seek_to(&mut do_seek, duration.as_millis() as u32);
         }
         _ => {}
     }

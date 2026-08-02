@@ -327,8 +327,7 @@ pub async fn radio_tracks(session: &Session, seed_uri: &str) -> Result<Vec<Strin
 
 /// Where librespot caches credentials + audio.
 fn build_cache() -> Result<Cache> {
-    let home = crate::home_dir().context("HOME/USERPROFILE not set")?;
-    let base = home.join(".cache/myx");
+    let base = crate::data_dir().context("HOME/USERPROFILE not set")?;
     let audio = base.join("audio");
     std::fs::create_dir_all(&audio).context("create cache dir")?;
     Cache::new(Some(base), None, Some(audio), None).context("open librespot cache")

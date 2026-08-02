@@ -115,9 +115,195 @@ impl App {
         self.status = format!("starting {name}…");
         self.transport.source = PlaySource::Context(uri.clone());
         self.transport.source_name = name;
-        if let Err(e) = self.svc.engine.play_context(uri, shuffle) {
+        self.engine_play(|e| e.play_context(uri, shuffle));
+    }
+
+    /// Live FFT bands from whichever backend is producing audio.
+    ///
+    /// The external source writes into the same [`VisualizationSink`] the engine
+    /// uses, so the visualizer needs no knowledge of which one is running.
+    pub(crate) fn bands(&self) -> Option<&Arc<Mutex<VisBands>>> {
+        if let Some(engine) = &self.svc.engine {
+            return Some(&engine.bands);
+        }
+        self.svc.source.as_ref().map(|s| s.bands())
+    }
+
+    /// Toggle play/pause on whichever backend is live.
+    ///
+    /// Returns false when there is nothing to toggle, so the caller can explain
+    /// itself rather than appearing to do nothing.
+    pub(crate) fn transport_toggle(&mut self) -> bool {
+        if let Some(engine) = &self.svc.engine {
+            let _ = engine.toggle();
+            return true;
+        }
+        if let Some(source) = &self.svc.source {
+            source.toggle();
+            let playing = source.is_playing();
+            if let Some(now) = self.playback.now.as_mut() {
+                now.is_playing = playing;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Resume whichever backend is live.
+    pub(crate) fn transport_play(&mut self) -> bool {
+        if let Some(engine) = &self.svc.engine {
+            let _ = engine.play();
+            return true;
+        }
+        if let Some(source) = &self.svc.source {
+            source.play();
+            if let Some(now) = self.playback.now.as_mut() {
+                now.is_playing = true;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Stop whichever backend is live.
+    pub(crate) fn transport_stop(&mut self) {
+        if let Some(engine) = &self.svc.engine {
+            engine.stop();
+            return;
+        }
+        if let Some(source) = &self.svc.source {
+            source.stop();
+            if let Some(now) = self.playback.now.as_mut() {
+                now.is_playing = false;
+            }
+        }
+    }
+
+    /// Mirror the external source's state into `playback.now`.
+    ///
+    /// The librespot path gets its now-playing from Spotify metadata; a local file
+    /// has none, so the transport bar, progress and position would all stay empty.
+    /// This synthesises the same shape from what the helper reported.
+    pub(crate) fn sync_external_now(&mut self) {
+        let Some(source) = self.svc.source.clone() else {
+            return;
+        };
+        let state = source.state();
+        if let Some(error) = state.error.as_deref() {
+            if self.status != error {
+                self.status = error.to_string();
+            }
+        }
+        let Some(uri) = state.uri.clone() else {
+            return;
+        };
+        let duration_ms = state.duration_ms.unwrap_or(0).min(u32::MAX as u64) as u32;
+        // While the user is scrubbing, the displayed position is theirs, not the
+        // source's. The engine path already routes through this rule; the
+        // external path must obey the same one or each frame would wipe the
+        // accumulated scrub before `flush_seek` ever committed it.
+        let apply_position = should_apply_engine_position(true, self.playback.seek_target);
+
+        match self.playback.now.as_mut() {
+            Some(now) if now.uri == uri => {
+                now.is_playing = state.playing;
+                now.duration_ms = duration_ms;
+                if apply_position {
+                    now.position_ms = state.position_ms;
+                    now.position_at = Instant::now();
+                }
+            }
+            _ => {
+                // Name it after the file; there is no catalogue to ask.
+                let title = uri
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(uri.as_str())
+                    .to_string();
+                let codec = state
+                    .meta
+                    .as_ref()
+                    .map(|m| m.codec.clone())
+                    .unwrap_or_default();
+                self.playback.now = Some(NowPlaying {
+                    uri,
+                    title,
+                    artist: source.program().to_string(),
+                    album: codec,
+                    duration_ms,
+                    position_ms: state.position_ms,
+                    position_at: Instant::now(),
+                    is_playing: state.playing,
+                    cover: None,
+                });
+                self.transport.playback_started = true;
+            }
+        }
+    }
+
+    /// A seek callback for [`PlaybackState::seek_to`] that hits whichever backend
+    /// is live.
+    ///
+    /// For the external source this respawns the helper — it is stateless per
+    /// invocation, so a seek *is* a new invocation.
+    pub(crate) fn seek_sink(&self) -> impl FnMut(u32) + use<> {
+        let engine = self.svc.engine.clone();
+        let source = self.svc.source.clone();
+        move |position_ms: u32| {
+            if let Some(engine) = &engine {
+                let _ = engine.seek(position_ms);
+            } else if let Some(source) = &source {
+                source.seek(position_ms);
+            }
+        }
+    }
+
+    /// Run a fire-and-forget engine command, if there is an engine.
+    ///
+    /// A `--guest` build has none, and every such call is a deliberate no-op.
+    pub(crate) fn engine_do(&self, f: impl FnOnce(&Engine)) {
+        if let Some(engine) = &self.svc.engine {
+            f(engine);
+        }
+    }
+
+    /// Run an engine play command, surfacing whatever went wrong — or, with no
+    /// engine, saying so instead of silently doing nothing.
+    pub(crate) fn engine_play(&mut self, f: impl FnOnce(&Engine) -> anyhow::Result<()>) {
+        let Some(engine) = self.svc.engine.clone() else {
+            // An external source is a different domain, not a fallback: it plays
+            // whatever its helper can resolve, which is not a Spotify context.
+            self.status = if self.svc.source.is_some() {
+                "external source can't play Spotify tracks — streaming needs Premium".to_string()
+            } else {
+                "guest mode: playback needs Spotify Premium".to_string()
+            };
+            return;
+        };
+        if let Err(e) = f(&engine) {
             self.status = format!("couldn't play: {e:#}");
         }
+    }
+
+    /// Set the volume on whichever transport is actually producing sound.
+    ///
+    /// Exclusive on purpose: driving both would move the playhead-less engine's
+    /// Connect device around for no reason, and a guest's engine is stopped.
+    pub(crate) fn apply_volume(&mut self, volume: u8) {
+        self.transport.volume = volume.min(100);
+        let vol = self.transport.volume;
+        self.engine_do(|e| {
+            let _ = e.set_volume(vol_u16(vol));
+        });
+        if let Some(source) = &self.svc.source {
+            source.set_volume(vol_u16(vol));
+        }
+    }
+
+    /// Nudge the volume by `delta`, clamped to 0..=100.
+    pub(crate) fn bump_volume(&mut self, delta: i16) {
+        let next = (self.transport.volume as i16 + delta).clamp(0, 100) as u8;
+        self.apply_volume(next);
     }
 
     /// Play whatever's selected (in the current section, or in search results).
@@ -145,13 +331,8 @@ impl App {
                     self.transport.source_name = "Liked Songs".to_string();
                     self.status = "starting Liked Songs…".to_string();
                     // Honour the current shuffle toggle instead of a dedicated row.
-                    if let Err(e) =
-                        self.svc
-                            .engine
-                            .play_tracks(uris, None, 0, self.transport.shuffle)
-                    {
-                        self.status = format!("couldn't play: {e:#}");
-                    }
+                    let shuffle = self.transport.shuffle;
+                    self.engine_play(|e| e.play_tracks(uris, None, 0, shuffle));
                 }
                 return Activated::None;
             }
@@ -180,14 +361,9 @@ impl App {
                 self.transport.source = PlaySource::Context(ctx.clone());
                 self.transport.source_name = d.title.clone();
                 self.status = format!("starting {}…", item.name);
-                if let Err(e) = self.svc.engine.play_context_at(
-                    ctx,
-                    Some(item.uri.clone()),
-                    0,
-                    self.transport.shuffle,
-                ) {
-                    self.status = format!("couldn't play: {e:#}");
-                }
+                let shuffle = self.transport.shuffle;
+                let at = Some(item.uri.clone());
+                self.engine_play(|e| e.play_context_at(ctx, at, 0, shuffle));
                 return Activated::None;
             }
             // Section track list.
@@ -205,13 +381,9 @@ impl App {
                 self.transport.source = PlaySource::None;
                 self.transport.source_name = self.browse.section.label().to_string();
             }
-            if let Err(e) =
-                self.svc
-                    .engine
-                    .play_tracks(uris, Some(item.uri.clone()), 0, self.transport.shuffle)
-            {
-                self.status = format!("couldn't play: {e:#}");
-            }
+            let shuffle = self.transport.shuffle;
+            let at = Some(item.uri.clone());
+            self.engine_play(|e| e.play_tracks(uris, at, 0, shuffle));
             return Activated::None;
         }
         // Otherwise it's a context (artist / album / playlist) — open it.

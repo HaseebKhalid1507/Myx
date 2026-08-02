@@ -38,6 +38,9 @@ open = { version = "5", optional = true }
 fs2 = { version = "0.4", optional = true }
 souvlaki = { version = "0.8.3", default-features = false, features = ["pollster", "zbus", "zvariant"] }
 toml = { version = "1", default-features = false, features = ["parse", "serde"], optional = true }
+# Decodes the Ogg an external source writes to stdout. Already in the tree via
+# librespot-playback; named here so `src/external` can use it directly.
+symphonia = { version = "0.5", default-features = false, features = ["ogg", "vorbis"], optional = true }
 log = { version = "0.4.33", features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -72,6 +75,7 @@ streaming = [
     "dep:open",
     "dep:fs2",
     "dep:toml",
+    "dep:symphonia",
 ]
 
 # The one, fully-wired binary.

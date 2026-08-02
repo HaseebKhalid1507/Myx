@@ -2820,6 +2820,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "souvlaki",
+ "symphonia",
  "tokio",
  "toml",
  "vergen",

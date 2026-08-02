@@ -25,6 +25,9 @@ pub mod audio;
 pub mod config;
 #[cfg(feature = "streaming")]
 pub mod engine;
+/// Playback from a helper program's stdout, for accounts that cannot stream.
+#[cfg(feature = "streaming")]
+pub mod external;
 #[cfg(feature = "streaming")]
 pub mod term;
 #[cfg(feature = "streaming")]
@@ -37,4 +40,13 @@ pub fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     let var = "USERPROFILE";
     std::env::var(var).ok().map(PathBuf::from)
+}
+
+/// Where myx keeps its state: `MYX_DATA_DIR` when set (for running a second
+/// instance alongside another), else `~/.cache/myx`.
+pub fn data_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("MYX_DATA_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    home_dir().map(|h| h.join(".cache/myx"))
 }

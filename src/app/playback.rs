@@ -92,12 +92,14 @@ impl PlaybackState {
         }
     }
     /// Seek to an absolute position (clamped), updating the local display too.
-    pub(crate) fn seek_to(&mut self, engine: &Engine, position_ms: u32) {
+    /// `do_seek` is what actually moves the playhead; it is a no-op when there
+    /// is no engine.
+    pub(crate) fn seek_to(&mut self, do_seek: &mut dyn FnMut(u32), position_ms: u32) {
         let Some(dur) = self.now.as_ref().map(|n| n.duration_ms) else {
             return;
         };
         let new = position_ms.min(dur);
-        let _ = engine.seek(new);
+        do_seek(new);
         self.set_local_position(new, false);
     }
     /// One Shift+arrow press, moving the playhead by `delta_ms`.
@@ -122,13 +124,13 @@ impl PlaybackState {
         self.seek_last_input = now;
         self.set_local_position(target, false);
     }
-    /// Commit a finished scrub as a single engine seek, once the keys stop.
-    pub(crate) fn flush_seek(&mut self, engine: &Engine, now: Instant) {
+    /// Commit a finished scrub as a single seek, once the keys stop.
+    pub(crate) fn flush_seek(&mut self, do_seek: &mut dyn FnMut(u32), now: Instant) {
         if now.duration_since(self.seek_last_input) < SEEK_SETTLE {
             return;
         }
         if let Some(target) = self.seek_target.take() {
-            self.seek_to(engine, target);
+            self.seek_to(do_seek, target);
         }
     }
 }
