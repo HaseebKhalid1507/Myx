@@ -88,14 +88,20 @@ pub type SinkBuilder = Arc<dyn Fn(u32) -> Box<dyn Sink> + Send + Sync>;
 ///
 /// The status line shares a narrow row with the view indicator, so a full
 /// `curl | sh` one-liner is truncated mid-URL there — which is worse than no
-/// hint, because it looks like advice and cannot be followed. `cargo install
-/// earshot` fits and is sufficient on its own; [`INSTALL_HINT_FULL`] adds the
-/// alternatives for anyone running with `MYX_LOG` set.
+/// hint, because it looks like advice and cannot be followed. A bare URL fits
+/// and is sufficient on its own; [`INSTALL_HINT_FULL`] spells out the commands
+/// for anyone running with `MYX_LOG` set.
+///
+/// Neither may say `cargo install earshot`: that name on crates.io belongs to an
+/// unrelated voice-activity-detection crate, so the advice would install someone
+/// else's software. Asserted in the tests below, for both constants — the first
+/// time this was fixed, only the status line was checked and the long form kept
+/// the wrong command for another commit.
 const INSTALL_HINT: &str = "install: github.com/vishalmakwana111/earshot#install";
 
 /// The complete install instructions. Only reaches the log, which is opt-in via
 /// `MYX_LOG`, so this supplements the status line rather than replacing it.
-const INSTALL_HINT_FULL: &str = "install the helper with one of:\n      cargo install earshot\n      curl --proto '=https' --tlsv1.2 -LsSf     https://github.com/vishalmakwana111/earshot/releases/latest/download/earshot-installer.sh | sh\n    or point myx at an existing binary with --source <path>";
+const INSTALL_HINT_FULL: &str = "install the helper with one of:\n      curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vishalmakwana111/earshot/releases/latest/download/earshot-installer.sh | sh\n      cargo install --git https://github.com/vishalmakwana111/earshot\n    or point myx at an existing binary with --source <path>";
 
 /// How long to wait for the helper's metadata line before giving up.
 const META_TIMEOUT: Duration = Duration::from_secs(10);
@@ -809,5 +815,32 @@ mod tests {
         assert_eq!(meta.actual_start_ms + elapsed, 90_020);
         // Had we trusted the request, we would report 91_000 — a second out.
         assert_ne!(meta.requested_start_ms + elapsed, 90_020);
+    }
+
+    /// Both install hints must avoid the crates.io name we do not own.
+    ///
+    /// Covers `INSTALL_HINT_FULL` as well as the status line: the integration
+    /// test only ever sees the short hint, which is how the long form kept
+    /// pointing at `cargo install earshot` after the commit that set out to
+    /// remove it.
+    #[test]
+    fn no_install_hint_points_at_someone_elses_crate() {
+        for hint in [INSTALL_HINT, INSTALL_HINT_FULL] {
+            assert!(
+                !hint.contains("cargo install earshot"),
+                "hint installs an unrelated crates.io package: {hint}",
+            );
+        }
+        // The long form should still offer a real way to build from source.
+        assert!(
+            INSTALL_HINT_FULL.contains("cargo install --git"),
+            "the long hint dropped the from-source option: {INSTALL_HINT_FULL}",
+        );
+        // And no accidental runs of whitespace, which read as broken output in
+        // a log and break a copy-pasted command.
+        assert!(
+            !INSTALL_HINT_FULL.contains("  https://"),
+            "stray whitespace inside a command: {INSTALL_HINT_FULL}",
+        );
     }
 }

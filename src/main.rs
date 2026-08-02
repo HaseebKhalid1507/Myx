@@ -272,9 +272,10 @@ async fn boot(
     // Cloned because the engine consumes its sender and the external source
     // needs one too; either may be absent.
     let source_events = ev_tx.clone();
-    // No credentials means `--guest`: skip the Connect device entirely.
-    // `App::guest_only` keeps every engine-only path (radio, reclaim,
-    // playback transfer, visualizer) out of the way.
+    // No credentials means `--guest`: skip the Connect device entirely. The
+    // engine is an `Option` from here down, so `App::engine_do` / `engine_play`
+    // are the only ways to reach it and every engine-only path (radio, reclaim,
+    // playback transfer, visualizer) has to say what it does without one.
     let engine = match creds {
         Some(creds) => Some(Arc::new(
             with_loader(
