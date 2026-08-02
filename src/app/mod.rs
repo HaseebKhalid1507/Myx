@@ -118,12 +118,137 @@ impl App {
         self.engine_play(|e| e.play_context(uri, shuffle));
     }
 
-    /// True when this Myx booted without a streaming engine (`--guest`).
+    /// Live FFT bands from whichever backend is producing audio.
     ///
-    /// There is no Premium session behind it, so it cannot stream — browsing,
-    /// search and the library all still work.
-    pub(crate) fn guest_only(&self) -> bool {
-        self.svc.engine.is_none()
+    /// The external source writes into the same [`VisualizationSink`] the engine
+    /// uses, so the visualizer needs no knowledge of which one is running.
+    pub(crate) fn bands(&self) -> Option<&Arc<Mutex<VisBands>>> {
+        if let Some(engine) = &self.svc.engine {
+            return Some(&engine.bands);
+        }
+        self.svc.source.as_ref().map(|s| s.bands())
+    }
+
+    /// Toggle play/pause on whichever backend is live.
+    ///
+    /// Returns false when there is nothing to toggle, so the caller can explain
+    /// itself rather than appearing to do nothing.
+    pub(crate) fn transport_toggle(&mut self) -> bool {
+        if let Some(engine) = &self.svc.engine {
+            let _ = engine.toggle();
+            return true;
+        }
+        if let Some(source) = &self.svc.source {
+            source.toggle();
+            let playing = source.is_playing();
+            if let Some(now) = self.playback.now.as_mut() {
+                now.is_playing = playing;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Resume whichever backend is live.
+    pub(crate) fn transport_play(&mut self) -> bool {
+        if let Some(engine) = &self.svc.engine {
+            let _ = engine.play();
+            return true;
+        }
+        if let Some(source) = &self.svc.source {
+            source.play();
+            if let Some(now) = self.playback.now.as_mut() {
+                now.is_playing = true;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Stop whichever backend is live.
+    pub(crate) fn transport_stop(&mut self) {
+        if let Some(engine) = &self.svc.engine {
+            engine.stop();
+            return;
+        }
+        if let Some(source) = &self.svc.source {
+            source.stop();
+            if let Some(now) = self.playback.now.as_mut() {
+                now.is_playing = false;
+            }
+        }
+    }
+
+    /// Mirror the external source's state into `playback.now`.
+    ///
+    /// The librespot path gets its now-playing from Spotify metadata; a local file
+    /// has none, so the transport bar, progress and position would all stay empty.
+    /// This synthesises the same shape from what the helper reported.
+    pub(crate) fn sync_external_now(&mut self) {
+        let Some(source) = self.svc.source.clone() else {
+            return;
+        };
+        let state = source.state();
+        if let Some(error) = state.error.as_deref() {
+            if self.status != error {
+                self.status = error.to_string();
+            }
+        }
+        let Some(uri) = state.uri.clone() else {
+            return;
+        };
+        let duration_ms = state.duration_ms.unwrap_or(0).min(u32::MAX as u64) as u32;
+
+        match self.playback.now.as_mut() {
+            Some(now) if now.uri == uri => {
+                now.is_playing = state.playing;
+                now.duration_ms = duration_ms;
+                now.position_ms = state.position_ms;
+                now.position_at = Instant::now();
+            }
+            _ => {
+                // Name it after the file; there is no catalogue to ask.
+                let title = uri
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(uri.as_str())
+                    .to_string();
+                let codec = state
+                    .meta
+                    .as_ref()
+                    .map(|m| m.codec.clone())
+                    .unwrap_or_default();
+                self.playback.now = Some(NowPlaying {
+                    uri,
+                    title,
+                    artist: source.program().to_string(),
+                    album: codec,
+                    duration_ms,
+                    position_ms: state.position_ms,
+                    position_at: Instant::now(),
+                    is_playing: state.playing,
+                    cover: None,
+                });
+                self.transport.playback_started = true;
+            }
+        }
+    }
+
+    /// A seek callback for [`PlaybackState::seek_to`] that hits whichever backend
+    /// is live.
+    ///
+    /// For the external source this respawns the helper — it is stateless per
+    /// invocation, so a seek *is* a new invocation.
+    pub(crate) fn seek_sink(&self) -> impl FnMut(u32) + use<> {
+        let engine = self.svc.engine.clone();
+        let source = self.svc.source.clone();
+        move |position_ms: u32| {
+            if let Some(engine) = &engine {
+                let _ = engine.seek(position_ms);
+            } else if let Some(source) = &source {
+                source.seek(position_ms);
+            }
+        }
     }
 
     /// Run a fire-and-forget engine command, if there is an engine.
@@ -138,11 +263,14 @@ impl App {
     /// Run an engine play command, surfacing whatever went wrong — or, with no
     /// engine, saying so instead of silently doing nothing.
     pub(crate) fn engine_play(&mut self, f: impl FnOnce(&Engine) -> anyhow::Result<()>) {
-        if self.guest_only() {
-            self.status = "guest mode: playback needs Spotify Premium".to_string();
-            return;
-        }
         let Some(engine) = self.svc.engine.clone() else {
+            // An external source is a different domain, not a fallback: it plays
+            // whatever its helper can resolve, which is not a Spotify context.
+            self.status = if self.svc.source.is_some() {
+                "external source can't play Spotify tracks — streaming needs Premium".to_string()
+            } else {
+                "guest mode: playback needs Spotify Premium".to_string()
+            };
             return;
         };
         if let Err(e) = f(&engine) {
@@ -160,6 +288,9 @@ impl App {
         self.engine_do(|e| {
             let _ = e.set_volume(vol_u16(vol));
         });
+        if let Some(source) = &self.svc.source {
+            source.set_volume(vol_u16(vol));
+        }
     }
 
     /// Nudge the volume by `delta`, clamped to 0..=100.

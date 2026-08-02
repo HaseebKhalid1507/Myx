@@ -78,10 +78,10 @@ pub(crate) fn handle_key(
         }
         KeyCode::Char(' ') | KeyCode::Char('p') | KeyCode::Media(MediaKeyCode::PlayPause) => {
             if app.transport.playback_started {
-                app.engine_do(|e| { let _ = e.toggle(); });
+                app.transport_toggle();
             } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
-                app.engine_do(|e| { let _ = e.play(); });
+                app.transport_play();
                 app.transport.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
@@ -90,7 +90,7 @@ pub(crate) fn handle_key(
             }
         }
         KeyCode::Media(MediaKeyCode::Stop) => {
-            app.engine_do(|e| e.stop());
+            app.transport_stop();
         }
         KeyCode::Char('n') | KeyCode::Media(MediaKeyCode::TrackNext) => {
             app.engine_do(|e| {
@@ -111,7 +111,9 @@ pub(crate) fn handle_key(
         KeyCode::Char('s') => {
             app.transport.shuffle = !app.transport.shuffle;
             let shuffle = app.transport.shuffle;
-            app.engine_do(|e| { let _ = e.shuffle(shuffle); });
+            app.engine_do(|e| {
+                let _ = e.shuffle(shuffle);
+            });
         }
         // Play the highlighted playlist / album / artist outright. Enter still
         // opens; this is the direct route that used to require two Enters or
@@ -122,13 +124,17 @@ pub(crate) fn handle_key(
             // while playback is shuffled, and `resume_source` would later
             // replay this context unshuffled.
             app.transport.shuffle = true;
-            app.engine_do(|e| { let _ = e.shuffle(true); });
+            app.engine_do(|e| {
+                let _ = e.shuffle(true);
+            });
             play_selected_context(app, true);
         }
         KeyCode::Char('R') => {
             app.transport.repeat = !app.transport.repeat;
             let repeat = app.transport.repeat;
-            app.engine_do(|e| { let _ = e.repeat(repeat); });
+            app.engine_do(|e| {
+                let _ = e.repeat(repeat);
+            });
         }
         KeyCode::Char('r') => {
             app.status = "loading library…".to_string();

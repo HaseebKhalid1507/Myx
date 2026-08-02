@@ -25,6 +25,9 @@ pub mod audio;
 pub mod config;
 #[cfg(feature = "streaming")]
 pub mod engine;
+/// Playback from a helper program's stdout, for accounts that cannot stream.
+#[cfg(feature = "streaming")]
+pub mod external;
 #[cfg(feature = "streaming")]
 pub mod term;
 #[cfg(feature = "streaming")]

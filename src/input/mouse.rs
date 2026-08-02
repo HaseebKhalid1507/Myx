@@ -56,12 +56,7 @@ pub(crate) fn handle_mouse(
                 {
                     if let Some(dur) = app.playback.now.as_ref().map(|n| n.duration_ms) {
                         let frac = (m.column - bar.x) as f32 / bar.width as f32;
-                        let engine = app.svc.engine.clone();
-                        let mut do_seek = |p: u32| {
-                            if let Some(e) = engine.as_ref() {
-                                let _ = e.seek(p);
-                            }
-                        };
+                        let mut do_seek = app.seek_sink();
                         app.playback
                             .seek_to(&mut do_seek, (frac * dur as f32) as u32);
                     }

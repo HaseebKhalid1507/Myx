@@ -12,6 +12,14 @@ pub(crate) struct Services {
     /// is what lets Myx start at all without a Premium session, instead of
     /// blocking forever on an OAuth prompt it can never satisfy.
     pub(crate) engine: Option<Arc<Engine>>,
+    /// An external helper program playing into our audio sink — `Some` when
+    /// `--play` or `--source` was given.
+    ///
+    /// Deliberately separate from `engine` rather than an enum: the two are not
+    /// interchangeable. The engine has a Connect device, a server-side queue and
+    /// radio; an external source has a byte pipe. Collapsing them would mean a
+    /// trait whose implementations disagree about half their methods.
+    pub(crate) source: Option<Arc<ExternalSource>>,
     pub(crate) picker: Picker,
     pub(crate) webapi: Arc<Mutex<WebApi>>,
 }

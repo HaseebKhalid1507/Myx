@@ -33,10 +33,10 @@ pub(crate) fn handle_media_control_event(
         }
         MediaControlEvent::Toggle => {
             if app.transport.playback_started {
-                app.engine_do(|e| { let _ = e.toggle(); });
+                app.transport_toggle();
             } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
-                app.engine_do(|e| { let _ = e.play(); });
+                app.transport_play();
                 app.transport.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
@@ -46,10 +46,10 @@ pub(crate) fn handle_media_control_event(
         }
         MediaControlEvent::Play => {
             if app.transport.playback_started {
-                app.engine_do(|e| { let _ = e.play(); });
+                app.transport_play();
             } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
-                app.engine_do(|e| { let _ = e.play(); });
+                app.transport_play();
                 app.transport.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
@@ -63,7 +63,7 @@ pub(crate) fn handle_media_control_event(
             });
         }
         MediaControlEvent::Stop => {
-            app.engine_do(|e| e.stop());
+            app.transport_stop();
         }
         MediaControlEvent::Seek(direction) => match direction {
             SeekDirection::Backward => app.playback.seek_step(-5_000),
@@ -74,12 +74,7 @@ pub(crate) fn handle_media_control_event(
             SeekDirection::Forward => app.playback.seek_step(duration.as_millis() as i64),
         },
         MediaControlEvent::SetPosition(MediaPosition(duration)) => {
-            let engine = app.svc.engine.clone();
-            let mut do_seek = |p: u32| {
-                if let Some(e) = engine.as_ref() {
-                    let _ = e.seek(p);
-                }
-            };
+            let mut do_seek = app.seek_sink();
             app.playback
                 .seek_to(&mut do_seek, duration.as_millis() as u32);
         }

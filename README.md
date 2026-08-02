@@ -102,10 +102,48 @@ myx --guest      # or MYX_GUEST=1 myx
 ```
 
 Browsing, search, the library, covers and lyrics all work on any account. There
-is no Connect device, no visualizer and no radio, and playback says so rather
-than failing silently.
+is no Connect device and no radio, and Spotify playback says so rather than
+failing silently.
 
 Without `--guest`, myx still needs Premium.
+
+## External source
+
+Guest mode can still play audio, from a helper program instead of librespot:
+
+```bash
+myx --guest --play track.ogg --source ./earshot   # or MYX_SOURCE=./earshot
+```
+
+The helper is [earshot](https://github.com/vishalmakwana111/earshot), whose
+contract is `earshot <uri> [--start-ms N]` → Ogg on stdout, one metadata line on
+stderr, meaningful exit codes. myx spawns it, decodes its stdout, and writes the
+samples into the same sink the librespot engine uses — so the external path shares
+the real output device and the FFT visualizer works exactly as it does for
+Spotify.
+
+Because the helper is stateless per invocation, the transport maps onto the
+process rather than onto an API:
+
+| action | what happens |
+|---|---|
+| pause | myx **stops reading stdout**; the pipe fills and the helper blocks in `write`. No signal, no state. |
+| seek | kill and respawn with a new `--start-ms`. |
+| stop / quit | kill. |
+
+Two details worth knowing:
+
+- **The playhead follows the helper, not the request.** A splice lands on a page
+  boundary and a decoder discards the head of a spliced stream, so asking for
+  90 000 ms may really begin at 89 020 ms. myx counts position from the
+  `actual_start_ms` the helper reports, which is why the progress bar stays honest.
+- **Ogg Vorbis only.** Decoding uses symphonia, which as of 0.5 ships no Opus
+  decoder, so Ogg Opus fails with an explicit message rather than silence. That
+  matches the use case: Spotify serves `OGG_VORBIS`.
+
+An external source is a different domain from the engine, not a fallback for it —
+it plays whatever its helper can resolve, which is not a Spotify context. Pressing
+play on a library row in guest mode still says so.
 
 ## Config
 

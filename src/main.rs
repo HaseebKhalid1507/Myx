@@ -26,7 +26,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MediaKeyCode, MouseButton, MouseEventKind,
 };
@@ -44,10 +44,11 @@ use api::*;
 use app::*;
 use input::*;
 use myx::anim::ThemeFade;
-use myx::audio::NUM_BANDS;
+use myx::audio::{VisBands, NUM_BANDS};
 use myx::components::{gradient_line, gradient_progress, left_bar_block};
 use myx::cover::Cover;
 use myx::engine::{self, Engine, EngineEvent};
+use myx::external::ExternalSource;
 use myx::gradient::{self};
 use myx::liblog::{install_librespot_log, liblog};
 use myx::lyrics::parse::parse_lrc;
@@ -81,7 +82,7 @@ fn main() -> Result<()> {
         saved.volume.min(100)
     };
 
-    let cli = Cli::parse();
+    let cli = Cli::parse()?;
 
     // OAuth may need to print a browser URL, including when a cached refresh
     // token has been revoked. Complete both auth flows before entering the
@@ -127,6 +128,11 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("start tokio runtime")?;
+    let external = External {
+        enabled: cli.wants_external(),
+        program: cli.source_program().to_string(),
+        play: cli.play.clone(),
+    };
     let res = runtime.block_on(boot(
         &mut terminal,
         saved,
@@ -134,35 +140,99 @@ fn main() -> Result<()> {
         creds,
         webapi,
         picker,
-        cli.uri,
+        Launch {
+            context_uri: cli.uri,
+            external,
+        },
     ));
     restore_terminal(&mut terminal)?;
     res
 }
 
-/// Command line: `myx [--guest] [spotify:...]`.
+/// External-source configuration, resolved from the CLI.
+struct External {
+    enabled: bool,
+    program: String,
+    play: Option<String>,
+}
+
+/// What to start playing once the UI is up.
+///
+/// Grouped so `boot` keeps a readable signature. The two are unrelated: one is a
+/// Spotify context for the engine, the other a URI for the external helper.
+struct Launch {
+    context_uri: Option<String>,
+    external: External,
+}
+
+/// Command line: `myx [--guest] [--play URI] [--source PROGRAM] [spotify:...]`.
 struct Cli {
     /// Start with no streaming engine, so a free account can browse its
     /// library instead of being blocked at an OAuth prompt it cannot satisfy.
     guest: bool,
     /// A context URI to start playing on launch.
     uri: Option<String>,
+    /// A URI handed to the external source helper on launch.
+    play: Option<String>,
+    /// The helper program for external playback. Implies an external source.
+    source: Option<String>,
 }
 
 impl Cli {
-    fn parse() -> Self {
+    fn parse() -> Result<Self> {
         let mut cli = Self {
             guest: std::env::var_os("MYX_GUEST").is_some(),
             uri: None,
+            play: None,
+            source: std::env::var("MYX_SOURCE").ok().filter(|s| !s.is_empty()),
         };
-        for arg in std::env::args().skip(1) {
-            match arg.as_str() {
-                "--guest" => cli.guest = true,
-                _ if cli.uri.is_none() && !arg.starts_with('-') => cli.uri = Some(arg),
-                _ => {}
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let mut index = 0;
+        while index < args.len() {
+            let arg = args[index].as_str();
+            let value = |name: &str| -> Result<String> {
+                args.get(index + 1)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("{name} needs a value"))
+            };
+            match arg {
+                "--guest" => index += 1,
+                "--play" => {
+                    cli.play = Some(value("--play")?);
+                    index += 2;
+                }
+                "--source" => {
+                    cli.source = Some(value("--source")?);
+                    index += 2;
+                }
+                // An unrecognised flag is an error, not something to skip: a
+                // silently dropped `--paly` would look like a broken feature.
+                _ if arg.starts_with('-') && arg.len() > 1 => {
+                    bail!("unknown option {arg:?}");
+                }
+                _ => {
+                    if cli.uri.is_none() {
+                        cli.uri = Some(arg.to_string());
+                    }
+                    index += 1;
+                }
             }
         }
-        cli
+        // Re-scan for --guest so it works in any position.
+        cli.guest = cli.guest || args.iter().any(|a| a == "--guest");
+        Ok(cli)
+    }
+
+    /// Whether to bring up the external source at all.
+    fn wants_external(&self) -> bool {
+        self.play.is_some() || self.source.is_some()
+    }
+
+    /// Helper program to spawn.
+    fn source_program(&self) -> &str {
+        self.source
+            .as_deref()
+            .unwrap_or(myx::external::DEFAULT_PROGRAM)
     }
 }
 
@@ -192,9 +262,16 @@ async fn boot(
     creds: Option<librespot_core::authentication::Credentials>,
     webapi: WebApi,
     picker: Picker,
-    launch_uri: Option<String>,
+    launch: Launch,
 ) -> Result<()> {
+    let Launch {
+        context_uri,
+        external,
+    } = launch;
     let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
+    // Cloned because the engine consumes its sender and the external source
+    // needs one too; either may be absent.
+    let source_events = ev_tx.clone();
     // No credentials means `--guest`: skip the Connect device entirely.
     // `App::guest_only` keeps every engine-only path (radio, reclaim,
     // playback transfer, visualizer) out of the way.
@@ -211,11 +288,30 @@ async fn boot(
         None => None,
     };
 
+    // An external helper plays into the same sink stack as the engine, so it
+    // shares the engine's FFT bands when there is one and gets its own otherwise.
+    let source = if external.enabled {
+        let bands = engine
+            .as_ref()
+            .map(|e| Arc::clone(&e.bands))
+            .unwrap_or_else(VisBands::shared);
+        Some(ExternalSource::new(
+            external.program.clone(),
+            bands,
+            source_events,
+            vol_u16(init_vol),
+        ))
+    } else {
+        None
+    };
+
     let webapi = Arc::new(Mutex::new(webapi));
 
-
-    if let (Some(uri), Some(engine)) = (launch_uri, engine.as_ref()) {
+    if let (Some(uri), Some(engine)) = (context_uri, engine.as_ref()) {
         let _ = engine.play_context(uri, false);
+    }
+    if let (Some(uri), Some(source)) = (external.play.as_deref(), source.as_ref()) {
+        source.load(uri, 0);
     }
 
     // Rebuild the last now-playing (paused) for a seamless resume look.
@@ -264,6 +360,7 @@ async fn boot(
     let app = App {
         svc: Services {
             engine,
+            source,
             picker,
             webapi,
         },
@@ -454,13 +551,11 @@ async fn run_ui(
         let touched = tokio::select! {
             biased;
             _ = frame.tick() => {
-                let engine = app.svc.engine.clone();
-                let mut do_seek = |p: u32| {
-                    if let Some(e) = &engine {
-                        let _ = e.seek(p);
-                    }
-                };
+                let mut do_seek = app.seek_sink();
                 app.playback.flush_seek(&mut do_seek, Instant::now());
+                // Mirror the external source into `playback.now` so the transport
+                // bar works without a Spotify metadata fetch behind it.
+                app.sync_external_now();
                 // Drain library updates deterministically before rendering. Keeping
                 // this solely as a select arm could starve under a hot player-event
                 // stream / 60fps visualizer — which looked like a frozen library.
@@ -525,8 +620,8 @@ async fn run_ui(
                 let animating = app.theme.fade.is_some()
                     || (app.view.mode == RightView::Lyrics && app.view.lyrics_synced)
                     || (app.view.mode == RightView::NowPlaying
-                        && app.svc.engine.as_ref().is_some_and(|e| {
-                            e.bands.try_lock().map(|g| g.is_active).unwrap_or(false)
+                        && app.bands().is_some_and(|b| {
+                            b.try_lock().map(|g| g.is_active).unwrap_or(false)
                         }));
                 if app.art_repaint != ArtRepaint::Idle {
                     dirty = true;
