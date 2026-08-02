@@ -38,3 +38,12 @@ pub fn home_dir() -> Option<PathBuf> {
     let var = "USERPROFILE";
     std::env::var(var).ok().map(PathBuf::from)
 }
+
+/// Where myx keeps its state: `MYX_DATA_DIR` when set (for running a second
+/// instance alongside another), else `~/.cache/myx`.
+pub fn data_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("MYX_DATA_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    home_dir().map(|h| h.join(".cache/myx"))
+}

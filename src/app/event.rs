@@ -29,9 +29,12 @@ pub(crate) fn handle_engine_event(
             if !app.transport.playback_started {
                 app.transport.playback_started = true;
                 // Reapply persisted modes + volume to the freshly-started playback.
-                let _ = app.svc.engine.shuffle(app.transport.shuffle);
-                let _ = app.svc.engine.repeat(app.transport.repeat);
-                let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+                let shuffle = app.transport.shuffle;
+                app.engine_do(|e| { let _ = e.shuffle(shuffle); });
+                let repeat = app.transport.repeat;
+                app.engine_do(|e| { let _ = e.repeat(repeat); });
+                let vol = app.transport.volume;
+                app.engine_do(|e| { let _ = e.set_volume(vol_u16(vol)); });
             }
             if let Some(n) = app.playback.now.as_mut() {
                 n.is_playing = true;

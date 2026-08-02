@@ -6,7 +6,12 @@ use crate::*;
 /// (the `Arc<Mutex<_>>` is only ever cloned), so grouping them costs no
 /// borrow flexibility.
 pub(crate) struct Services {
-    pub(crate) engine: Engine,
+    /// The streaming engine — `None` when Myx booted with `--guest`.
+    ///
+    /// Streaming needs Premium; browsing does not. Keeping the engine optional
+    /// is what lets Myx start at all without a Premium session, instead of
+    /// blocking forever on an OAuth prompt it can never satisfy.
+    pub(crate) engine: Option<Arc<Engine>>,
     pub(crate) picker: Picker,
     pub(crate) webapi: Arc<Mutex<WebApi>>,
 }

@@ -19,8 +19,8 @@ pub type Term = Terminal<CrosstermBackend<Stdout>>;
 /// (kept alive for the process lifetime; the OS releases it on exit, even a crash).
 pub fn acquire_single_instance_lock() -> std::fs::File {
     use fs2::FileExt;
-    let path = crate::home_dir()
-        .map(|h| h.join(".cache/myx/lock"))
+    let path = crate::data_dir()
+        .map(|d| d.join("lock"))
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/myx.lock"));
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);

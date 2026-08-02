@@ -78,10 +78,10 @@ pub(crate) fn handle_key(
         }
         KeyCode::Char(' ') | KeyCode::Char('p') | KeyCode::Media(MediaKeyCode::PlayPause) => {
             if app.transport.playback_started {
-                let _ = app.svc.engine.toggle();
+                app.engine_do(|e| { let _ = e.toggle(); });
             } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
-                let _ = app.svc.engine.play();
+                app.engine_do(|e| { let _ = e.play(); });
                 app.transport.playback_started = true;
             } else {
                 // No live session — resume the persisted source (context/radio/liked).
@@ -90,25 +90,28 @@ pub(crate) fn handle_key(
             }
         }
         KeyCode::Media(MediaKeyCode::Stop) => {
-            app.svc.engine.stop();
+            app.engine_do(|e| e.stop());
         }
         KeyCode::Char('n') | KeyCode::Media(MediaKeyCode::TrackNext) => {
-            let _ = app.svc.engine.next();
+            app.engine_do(|e| {
+                let _ = e.next();
+            });
         }
         KeyCode::Char('b') | KeyCode::Media(MediaKeyCode::TrackPrevious) => {
-            let _ = app.svc.engine.prev();
+            app.engine_do(|e| {
+                let _ = e.prev();
+            });
         }
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Media(MediaKeyCode::RaiseVolume) => {
-            app.transport.volume = (app.transport.volume + 5).min(100);
-            let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+            app.bump_volume(5);
         }
         KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Media(MediaKeyCode::LowerVolume) => {
-            app.transport.volume = app.transport.volume.saturating_sub(5);
-            let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+            app.bump_volume(-5);
         }
         KeyCode::Char('s') => {
             app.transport.shuffle = !app.transport.shuffle;
-            let _ = app.svc.engine.shuffle(app.transport.shuffle);
+            let shuffle = app.transport.shuffle;
+            app.engine_do(|e| { let _ = e.shuffle(shuffle); });
         }
         // Play the highlighted playlist / album / artist outright. Enter still
         // opens; this is the direct route that used to require two Enters or
@@ -119,12 +122,13 @@ pub(crate) fn handle_key(
             // while playback is shuffled, and `resume_source` would later
             // replay this context unshuffled.
             app.transport.shuffle = true;
-            let _ = app.svc.engine.shuffle(true);
+            app.engine_do(|e| { let _ = e.shuffle(true); });
             play_selected_context(app, true);
         }
         KeyCode::Char('R') => {
             app.transport.repeat = !app.transport.repeat;
-            let _ = app.svc.engine.repeat(app.transport.repeat);
+            let repeat = app.transport.repeat;
+            app.engine_do(|e| { let _ = e.repeat(repeat); });
         }
         KeyCode::Char('r') => {
             app.status = "loading library…".to_string();
@@ -207,8 +211,13 @@ pub(crate) fn handle_key(
                 spawn_detail_fetch(app.svc.webapi.clone(), uri, name, chans.detail.clone());
             }
             Activated::Radio(uri) => {
+                // Radio rides librespot's mercury endpoint, so it needs a live
+                // session — a guest has none.
+                let Some(session) = app.svc.engine.as_ref().map(|e| e.session()) else {
+                    app.status = "guest: radio needs a Premium session".to_string();
+                    return false;
+                };
                 app.status = "starting radio…".to_string();
-                let session = app.svc.engine.session();
                 let tx = chans.radio.clone();
                 tokio::spawn(async move {
                     let res = match tokio::time::timeout(

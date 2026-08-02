@@ -3,17 +3,16 @@
 use crate::*;
 
 pub(crate) fn render_visualizer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
-    let active = app
-        .svc
-        .engine
-        .bands
-        .try_lock()
-        .map(|g| g.is_active)
-        .unwrap_or(false);
+    // The FFT is tee'd off the engine's player. A `--guest` build has no
+    // engine, so there are no bands to draw.
+    let Some(engine) = app.svc.engine.as_ref() else {
+        return;
+    };
+    let active = engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false);
     if !active {
         return;
     }
-    let Ok(guard) = app.svc.engine.bands.try_lock() else {
+    let Ok(guard) = engine.bands.try_lock() else {
         return;
     };
     let values: [f32; NUM_BANDS] = guard.values;

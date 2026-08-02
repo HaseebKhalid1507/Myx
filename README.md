@@ -13,8 +13,11 @@ synced lyrics.
   <img src="https://github.com/user-attachments/assets/08b3f505-5e48-4cd8-9b8d-0788d37f30c2" width="49%">
 </p>
 
-> Requires **Spotify Premium**. Works on Linux, macOS, and Windows. Album art is
-> crispest on kitty, WezTerm, or foot.
+> Requires **Spotify Premium** to stream. Works on Linux, macOS, and Windows.
+> Album art is crispest on kitty, WezTerm, or foot.
+>
+> `myx --guest` starts without the streaming engine, so a free account can
+> browse its library instead of hanging. See [Guest mode](#guest-mode).
 
 ## Install
 
@@ -84,6 +87,25 @@ does the same everywhere.
 The album-art protocol is detected at startup and picked per terminal, including
 inside tmux. If your tmux has no sixel support, add `set -g focus-events on` to
 `~/.tmux.conf` so the art is re-sent when you switch back to myx's window.
+
+## Guest mode
+
+Streaming needs Premium, because it needs a librespot session. Without one, myx
+never reaches the UI at all — it asks for the Premium-only `streaming` scope
+before the terminal is even set up, and waits on an OAuth callback that a free
+account can never satisfy.
+
+`--guest` skips the engine entirely:
+
+```bash
+myx --guest      # or MYX_GUEST=1 myx
+```
+
+Browsing, search, the library, covers and lyrics all work on any account. There
+is no Connect device, no visualizer and no radio, and playback says so rather
+than failing silently.
+
+Without `--guest`, myx still needs Premium.
 
 ## Config
 

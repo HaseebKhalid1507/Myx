@@ -115,9 +115,57 @@ impl App {
         self.status = format!("starting {name}…");
         self.transport.source = PlaySource::Context(uri.clone());
         self.transport.source_name = name;
-        if let Err(e) = self.svc.engine.play_context(uri, shuffle) {
+        self.engine_play(|e| e.play_context(uri, shuffle));
+    }
+
+    /// True when this Myx booted without a streaming engine (`--guest`).
+    ///
+    /// There is no Premium session behind it, so it cannot stream — browsing,
+    /// search and the library all still work.
+    pub(crate) fn guest_only(&self) -> bool {
+        self.svc.engine.is_none()
+    }
+
+    /// Run a fire-and-forget engine command, if there is an engine.
+    ///
+    /// A `--guest` build has none, and every such call is a deliberate no-op.
+    pub(crate) fn engine_do(&self, f: impl FnOnce(&Engine)) {
+        if let Some(engine) = &self.svc.engine {
+            f(engine);
+        }
+    }
+
+    /// Run an engine play command, surfacing whatever went wrong — or, with no
+    /// engine, saying so instead of silently doing nothing.
+    pub(crate) fn engine_play(&mut self, f: impl FnOnce(&Engine) -> anyhow::Result<()>) {
+        if self.guest_only() {
+            self.status = "guest mode: playback needs Spotify Premium".to_string();
+            return;
+        }
+        let Some(engine) = self.svc.engine.clone() else {
+            return;
+        };
+        if let Err(e) = f(&engine) {
             self.status = format!("couldn't play: {e:#}");
         }
+    }
+
+    /// Set the volume on whichever transport is actually producing sound.
+    ///
+    /// Exclusive on purpose: driving both would move the playhead-less engine's
+    /// Connect device around for no reason, and a guest's engine is stopped.
+    pub(crate) fn apply_volume(&mut self, volume: u8) {
+        self.transport.volume = volume.min(100);
+        let vol = self.transport.volume;
+        self.engine_do(|e| {
+            let _ = e.set_volume(vol_u16(vol));
+        });
+    }
+
+    /// Nudge the volume by `delta`, clamped to 0..=100.
+    pub(crate) fn bump_volume(&mut self, delta: i16) {
+        let next = (self.transport.volume as i16 + delta).clamp(0, 100) as u8;
+        self.apply_volume(next);
     }
 
     /// Play whatever's selected (in the current section, or in search results).
@@ -145,13 +193,8 @@ impl App {
                     self.transport.source_name = "Liked Songs".to_string();
                     self.status = "starting Liked Songs…".to_string();
                     // Honour the current shuffle toggle instead of a dedicated row.
-                    if let Err(e) =
-                        self.svc
-                            .engine
-                            .play_tracks(uris, None, 0, self.transport.shuffle)
-                    {
-                        self.status = format!("couldn't play: {e:#}");
-                    }
+                    let shuffle = self.transport.shuffle;
+                    self.engine_play(|e| e.play_tracks(uris, None, 0, shuffle));
                 }
                 return Activated::None;
             }
@@ -180,14 +223,9 @@ impl App {
                 self.transport.source = PlaySource::Context(ctx.clone());
                 self.transport.source_name = d.title.clone();
                 self.status = format!("starting {}…", item.name);
-                if let Err(e) = self.svc.engine.play_context_at(
-                    ctx,
-                    Some(item.uri.clone()),
-                    0,
-                    self.transport.shuffle,
-                ) {
-                    self.status = format!("couldn't play: {e:#}");
-                }
+                let shuffle = self.transport.shuffle;
+                let at = Some(item.uri.clone());
+                self.engine_play(|e| e.play_context_at(ctx, at, 0, shuffle));
                 return Activated::None;
             }
             // Section track list.
@@ -205,13 +243,9 @@ impl App {
                 self.transport.source = PlaySource::None;
                 self.transport.source_name = self.browse.section.label().to_string();
             }
-            if let Err(e) =
-                self.svc
-                    .engine
-                    .play_tracks(uris, Some(item.uri.clone()), 0, self.transport.shuffle)
-            {
-                self.status = format!("couldn't play: {e:#}");
-            }
+            let shuffle = self.transport.shuffle;
+            let at = Some(item.uri.clone());
+            self.engine_play(|e| e.play_tracks(uris, at, 0, shuffle));
             return Activated::None;
         }
         // Otherwise it's a context (artist / album / playlist) — open it.
