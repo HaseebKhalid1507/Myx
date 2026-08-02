@@ -84,6 +84,19 @@ pub const DEFAULT_PROGRAM: &str = "earshot";
 /// testing it should not require an output device or make noise.
 pub type SinkBuilder = Arc<dyn Fn(u32) -> Box<dyn Sink> + Send + Sync>;
 
+/// Short enough for myx's one-line status slot, and still actionable.
+///
+/// The status line shares a narrow row with the view indicator, so a full
+/// `curl | sh` one-liner is truncated mid-URL there — which is worse than no
+/// hint, because it looks like advice and cannot be followed. `cargo install
+/// earshot` fits and is sufficient on its own; [`INSTALL_HINT_FULL`] adds the
+/// alternatives for anyone running with `MYX_LOG` set.
+const INSTALL_HINT: &str = "install: cargo install earshot";
+
+/// The complete install instructions. Only reaches the log, which is opt-in via
+/// `MYX_LOG`, so this supplements the status line rather than replacing it.
+const INSTALL_HINT_FULL: &str = "install the helper with one of:\n      cargo install earshot\n      curl --proto '=https' --tlsv1.2 -LsSf     https://github.com/vishalmakwana111/earshot/releases/latest/download/earshot-installer.sh | sh\n    or point myx at an existing binary with --source <path>";
+
 /// How long to wait for the helper's metadata line before giving up.
 const META_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -594,7 +607,7 @@ fn spawn_stream(
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .spawn()
-        .with_context(|| format!("spawn {program:?} (is it on PATH?)"))?;
+        .map_err(|e| spawn_error(program, e))?;
 
     let stdout = child
         .stdout
@@ -683,6 +696,31 @@ fn spawn_stream(
         last_report: Instant::now(),
         _stderr_drain: drain,
     })
+}
+
+/// Explain a failed spawn in terms the user can act on.
+///
+/// A bare program name was resolved through `PATH`, so "not found" means "not
+/// installed" and deserves the install line. A name containing a separator was
+/// given explicitly, so the useful thing to say is that *that path* is wrong —
+/// quoting an installer there would just be noise.
+fn spawn_error(program: &str, source: io::Error) -> anyhow::Error {
+    let looks_like_a_path = program.contains(std::path::MAIN_SEPARATOR) || program.contains('/');
+    match (source.kind(), looks_like_a_path) {
+        (io::ErrorKind::NotFound, false) => {
+            // The status line carries the short form, which stands alone; this
+            // adds the alternatives for anyone who has logging enabled.
+            log::warn!("{program} is not on PATH. {INSTALL_HINT_FULL}");
+            anyhow!("{program} is not on PATH — {INSTALL_HINT}")
+        }
+        (io::ErrorKind::NotFound, true) => {
+            anyhow!("no such source program: {program}")
+        }
+        (io::ErrorKind::PermissionDenied, _) => {
+            anyhow!("{program} is not executable: {source}")
+        }
+        _ => anyhow!("could not start {program}: {source}"),
+    }
 }
 
 /// The helper's stdout as a symphonia media source.

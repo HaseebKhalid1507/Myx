@@ -487,25 +487,110 @@ fn plays_through_the_real_device_and_fills_the_visualizer() {
     source.stop();
 }
 
-// ------------------------------------------------------------- failure paths
+// ----------------------------------------------------------- plug and play
 
-/// A missing helper must land in the error state, not panic and not hang.
+/// The install story, tested rather than assumed.
+///
+/// Nobody should have to clone and build a helper. The claim is: install
+/// `earshot` anywhere on `PATH` and myx finds it with no flags. This copies the
+/// binary into a scratch directory, puts that directory first on `PATH`, and
+/// resolves it by bare name — exactly what a user gets after running the
+/// installer.
 #[test]
-fn a_missing_helper_reports_an_error() {
-    let h = harness(Path::new("/definitely/not/a/real/program"));
+fn resolves_the_helper_from_path_with_no_flags() {
+    let program = require_earshot!();
+
+    let bin_dir = std::env::temp_dir().join(format!("myx-pnp-{}", std::process::id()));
+    std::fs::create_dir_all(&bin_dir).expect("scratch bin dir");
+    let installed = bin_dir.join(myx::external::DEFAULT_PROGRAM);
+    std::fs::copy(&program, &installed).expect("install helper");
+
+    // Make it executable, as an installer would.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&installed).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&installed, perms).expect("chmod");
+    }
+
+    let previous = std::env::var("PATH").unwrap_or_default();
+    // SAFETY-adjacent: tests in this file run as threads of one process, so a
+    // PATH mutation is process-wide. It is restored below, and no other test
+    // here reads PATH.
+    let combined = format!("{}:{previous}", bin_dir.display());
+    unsafe { std::env::set_var("PATH", &combined) };
+
+    let h = harness(Path::new(myx::external::DEFAULT_PROGRAM));
+    h.source
+        .load(fixture("vorbis_5s.ogg").to_string_lossy().to_string(), 0);
+
+    let played = wait_for(Duration::from_secs(15), || {
+        h.rec.frames.load(Ordering::Relaxed) > 10_000
+    });
+    let error = h.source.state().error;
+
+    unsafe { std::env::set_var("PATH", previous) };
+    let _ = std::fs::remove_file(&installed);
+
+    assert!(error.is_none(), "resolving from PATH failed: {error:?}");
+    assert!(played, "no audio after resolving the helper from PATH");
+}
+
+/// A missing helper must say how to install it. "not found" on its own makes an
+/// uninstalled dependency look like a broken feature.
+#[test]
+fn a_missing_helper_explains_how_to_install_it() {
+    let h = harness(Path::new("earshot-that-does-not-exist"));
     h.source.load("whatever.ogg", 0);
 
     assert!(
         wait_for(Duration::from_secs(5), || h.source.state().error.is_some()),
-        "no error recorded for a missing helper",
+        "no error recorded",
     );
-    assert!(!h.source.state().playing);
     let error = h.source.state().error.unwrap();
     assert!(
-        error.contains("spawn") || error.contains("No such file"),
-        "unhelpful error: {error}",
+        error.contains("not on PATH"),
+        "error does not name the problem: {error}",
+    );
+    assert!(
+        error.contains("cargo install"),
+        "error does not say how to fix it: {error}",
+    );
+    // It has to fit myx's one-line status slot, or it is truncated mid-sentence
+    // and becomes advice the user cannot follow. Verified against a 150-column
+    // pane where the view indicator starts around column 117.
+    assert!(
+        error.lines().count() == 1 && error.len() <= 90,
+        "status message will be truncated ({} chars, {} lines): {error}",
+        error.len(),
+        error.lines().count(),
     );
 }
+
+/// An explicit `--source` path that is wrong should say so plainly, not recite
+/// an installer the user did not ask about.
+#[test]
+fn a_bad_explicit_source_path_says_so_without_the_installer_spiel() {
+    let h = harness(Path::new("/definitely/not/here/earshot"));
+    h.source.load("whatever.ogg", 0);
+
+    assert!(
+        wait_for(Duration::from_secs(5), || h.source.state().error.is_some()),
+        "no error recorded",
+    );
+    let error = h.source.state().error.unwrap();
+    assert!(
+        error.contains("no such source program"),
+        "wrong message for an explicit path: {error}",
+    );
+    assert!(
+        !error.contains("cargo install"),
+        "should not push an installer at someone who gave a path: {error}",
+    );
+}
+
+// ------------------------------------------------------------- failure paths
 
 /// A helper that fails on its input must not leave myx believing it is playing.
 #[test]

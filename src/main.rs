@@ -555,7 +555,6 @@ async fn run_ui(
                 app.playback.flush_seek(&mut do_seek, Instant::now());
                 // Mirror the external source into `playback.now` so the transport
                 // bar works without a Spotify metadata fetch behind it.
-                app.sync_external_now();
                 // Drain library updates deterministically before rendering. Keeping
                 // this solely as a select arm could starve under a hot player-event
                 // stream / 60fps visualizer — which looked like a frozen library.
@@ -573,6 +572,12 @@ async fn run_ui(
                     }
                     app.status = format!("loaded {}", section.label());
                 }
+
+                // After the library drain, not before: a source failure such as
+                // "helper is not on PATH" must not be overwritten by routine
+                // "loaded Playlists" progress in the same frame. It self-clears
+                // when a load succeeds.
+                app.sync_external_now();
                 while let Ok(got_any) = libdone_rx.try_recv() {
                     dirty = true;
                     if got_any {
