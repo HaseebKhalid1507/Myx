@@ -198,13 +198,20 @@ impl App {
             return;
         };
         let duration_ms = state.duration_ms.unwrap_or(0).min(u32::MAX as u64) as u32;
+        // While the user is scrubbing, the displayed position is theirs, not the
+        // source's. The engine path already routes through this rule; the
+        // external path must obey the same one or each frame would wipe the
+        // accumulated scrub before `flush_seek` ever committed it.
+        let apply_position = should_apply_engine_position(true, self.playback.seek_target);
 
         match self.playback.now.as_mut() {
             Some(now) if now.uri == uri => {
                 now.is_playing = state.playing;
                 now.duration_ms = duration_ms;
-                now.position_ms = state.position_ms;
-                now.position_at = Instant::now();
+                if apply_position {
+                    now.position_ms = state.position_ms;
+                    now.position_at = Instant::now();
+                }
             }
             _ => {
                 // Name it after the file; there is no catalogue to ask.
