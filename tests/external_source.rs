@@ -25,7 +25,11 @@ use librespot_playback::decoder::AudioPacket;
 
 use myx::audio::VisBands;
 use myx::engine::EngineEvent;
-use myx::external::{ExternalSource, SinkBuilder};
+use myx::external::{ExternalSource, SinkBuilder, DEFAULT_PROGRAM};
+
+/// A name that cannot resolve, deliberately longer than the real one so the
+/// length assertion below has to compensate for it explicitly.
+const MISSING_PROGRAM: &str = "earshot-that-does-not-exist";
 
 /// Counts what reached the sink, so a test can watch audio flow without hearing it.
 #[derive(Default)]
@@ -502,7 +506,7 @@ fn resolves_the_helper_from_path_with_no_flags() {
 
     let bin_dir = std::env::temp_dir().join(format!("myx-pnp-{}", std::process::id()));
     std::fs::create_dir_all(&bin_dir).expect("scratch bin dir");
-    let installed = bin_dir.join(myx::external::DEFAULT_PROGRAM);
+    let installed = bin_dir.join(DEFAULT_PROGRAM);
     std::fs::copy(&program, &installed).expect("install helper");
 
     // Make it executable, as an installer would.
@@ -521,7 +525,7 @@ fn resolves_the_helper_from_path_with_no_flags() {
     let combined = format!("{}:{previous}", bin_dir.display());
     unsafe { std::env::set_var("PATH", &combined) };
 
-    let h = harness(Path::new(myx::external::DEFAULT_PROGRAM));
+    let h = harness(Path::new(DEFAULT_PROGRAM));
     h.source
         .load(fixture("vorbis_5s.ogg").to_string_lossy().to_string(), 0);
 
@@ -541,7 +545,7 @@ fn resolves_the_helper_from_path_with_no_flags() {
 /// uninstalled dependency look like a broken feature.
 #[test]
 fn a_missing_helper_explains_how_to_install_it() {
-    let h = harness(Path::new("earshot-that-does-not-exist"));
+    let h = harness(Path::new(MISSING_PROGRAM));
     h.source.load("whatever.ogg", 0);
 
     assert!(
@@ -554,17 +558,29 @@ fn a_missing_helper_explains_how_to_install_it() {
         "error does not name the problem: {error}",
     );
     assert!(
-        error.contains("cargo install"),
+        error.contains("install"),
         "error does not say how to fix it: {error}",
+    );
+    // Must not point at `cargo install earshot`: that crate name belongs to an
+    // unrelated voice-activity-detection library on crates.io, so the advice
+    // would install someone else's software.
+    assert!(
+        !error.contains("cargo install earshot"),
+        "hint points at a crates.io name owned by another project: {error}",
     );
     // It has to fit myx's one-line status slot, or it is truncated mid-sentence
     // and becomes advice the user cannot follow. Verified against a 150-column
     // pane where the view indicator starts around column 117.
+    //
+    // Measure the message as a *real* invocation would produce it: this test's
+    // placeholder name is far longer than `earshot`, and it is the hint that has
+    // to fit, not the placeholder.
+    let realistic = error.len() - MISSING_PROGRAM.len() + DEFAULT_PROGRAM.len();
+    assert_eq!(error.lines().count(), 1, "hint must be one line: {error}");
     assert!(
-        error.lines().count() == 1 && error.len() <= 90,
-        "status message will be truncated ({} chars, {} lines): {error}",
-        error.len(),
-        error.lines().count(),
+        realistic <= 90,
+        "status message will be truncated ({realistic} chars with the real \
+         program name): {error}",
     );
 }
 
@@ -585,7 +601,7 @@ fn a_bad_explicit_source_path_says_so_without_the_installer_spiel() {
         "wrong message for an explicit path: {error}",
     );
     assert!(
-        !error.contains("cargo install"),
+        !error.contains("install:"),
         "should not push an installer at someone who gave a path: {error}",
     );
 }

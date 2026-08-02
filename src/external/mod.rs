@@ -91,7 +91,7 @@ pub type SinkBuilder = Arc<dyn Fn(u32) -> Box<dyn Sink> + Send + Sync>;
 /// hint, because it looks like advice and cannot be followed. `cargo install
 /// earshot` fits and is sufficient on its own; [`INSTALL_HINT_FULL`] adds the
 /// alternatives for anyone running with `MYX_LOG` set.
-const INSTALL_HINT: &str = "install: cargo install earshot";
+const INSTALL_HINT: &str = "install: github.com/vishalmakwana111/earshot#install";
 
 /// The complete install instructions. Only reaches the log, which is opt-in via
 /// `MYX_LOG`, so this supplements the status line rather than replacing it.
