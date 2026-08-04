@@ -184,23 +184,16 @@ pub(crate) fn render_library(
             ));
         }
         if now_here {
-            // ♪ in accent while playing; dimmed when paused. The label also
-            // takes the accent so the row reads at a glance without selection.
+            // Bold ● while playing, dimmed while paused. No color — the
+            // weight is the signal (boss's call over the accented ♪).
             let is_playing = app.playback.now.as_ref().is_some_and(|n| n.is_playing);
             let marker_style = if is_playing {
-                Style::default().fg(theme.accent.into())
+                Style::default().add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
-                    .fg(theme.accent.into())
-                    .add_modifier(Modifier::DIM)
+                Style::default().add_modifier(Modifier::DIM)
             };
-            spans.push(Span::styled(" ♪", marker_style));
+            spans.push(Span::styled(" ●", marker_style));
         }
-        let style = if now_here && !selected {
-            Style::default().fg(theme.accent.into())
-        } else {
-            style
-        };
         spans.push(Span::styled(format!(" {label}"), style));
         if !item.subtitle.is_empty() {
             let used = label.chars().count() + 1;
