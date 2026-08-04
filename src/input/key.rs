@@ -45,6 +45,11 @@ pub(crate) fn handle_key(
                     spawn_search(app.svc.webapi.clone(), q, chans.search.clone());
                 }
             }
+            // Ctrl-U clears the query — readline muscle memory. The fork
+            // binds Ctrl-U to undo; shadow it (same call as agent-runtime).
+            KeyCode::Char('u') if mods.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                app.search.clear();
+            }
             // Everything else — typing, cursor movement, word ops — is the
             // editor's business. Enter is intercepted above, so no newlines.
             _ => {
