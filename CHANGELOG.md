@@ -4,6 +4,33 @@ Newest first. Format follows [Keep a Changelog](https://keepachangelog.com);
 versions follow [semver](https://semver.org). Released sections are a record —
 they are added to, never rewritten.
 
+## [0.4.0] — 2026-08-04
+
+### Added
+
+- **MXC — the Myx Color Protocol.** Myx's 16-token semantic palette (derived
+  from album art on every track change) is now a published local resource: a
+  Unix-socket publisher (`$XDG_RUNTIME_DIR/myx/theme.sock`, newline-delimited
+  JSON, full state every message, snapshot on connect) fans the palette out to
+  any number of subscribers. The publisher is structurally incapable of
+  stalling playback: non-blocking publishes, bounded per-peer queues with
+  dedicated writer threads, and slow consumers are dropped, never waited on.
+  Ships with a subscriber client, `myx theme` CLI, and a ratatui demo.
+  First external consumer: SynapsCLI's `myx` theme (Synaps v0.8.0) — including
+  cross-machine over an SSH Unix-socket forward.
+
+### Changed
+
+- **Architecture split.** `main.rs` split into four modules (`src/app/`,
+  `src/api/`, `src/input/`, plus the render layer), with `CONTRIBUTING.md`
+  documenting the architecture map.
+
+### Fixed
+
+- A bad LRC tag no longer discards the rest of its lyric line.
+- Windows builds: the socket layer is gated to Unix.
+
+
 ## [0.3.1] — 2026-08-01
 
 ### Added
