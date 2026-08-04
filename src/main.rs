@@ -66,6 +66,19 @@ use souvlaki::{
 // ------------------------------------------------------------------ main
 
 fn main() -> Result<()> {
+    // `myx theme …` is a socket client, not a player: it must not authorize
+    // with Spotify, start librespot, or touch the terminal. Intercepting argv
+    // here — before anything else in `main` runs — is what guarantees that,
+    // and it also keeps `theme` from reaching the "first positional argument
+    // is a Spotify URI" path in `boot`.
+    #[cfg(all(feature = "mxc", unix))]
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).is_some_and(|a| a == "theme") {
+            std::process::exit(myx::mxc::cli::run(&argv[2..]));
+        }
+    }
+
     install_librespot_log();
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -115,9 +128,76 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("start tokio runtime")?;
-    let res = runtime.block_on(boot(&mut terminal, saved, init_vol, creds, webapi, picker));
-    restore_terminal(&mut terminal)?;
+    let outcome = runtime.block_on(boot(&mut terminal, saved, init_vol, creds, webapi, picker));
+    let restored = restore_terminal(&mut terminal);
+    // Say goodbye *after* the screen is back, so a subscriber that has stopped
+    // reading can never hold the alternate screen open while `shutdown` waits
+    // on it. On the error path the publisher was dropped inside `boot`, and
+    // `Publisher`'s `Drop` sends the same `bye` — this call exists so that the
+    // clean path does not depend on drop order.
+    let res = match outcome {
+        Ok(handle) => {
+            shutdown_publisher(handle);
+            Ok(())
+        }
+        Err(e) => Err(e),
+    };
+    restored?;
     res
+}
+
+/// What `boot` hands back so `main` can say goodbye on the exit path.
+///
+/// A type alias rather than `#[cfg]` on the signature: the non-MXC build then
+/// differs in exactly one place instead of in every function that carries the
+/// value through.
+#[cfg(all(feature = "mxc", unix))]
+type MxcHandle = Option<myx::mxc::publish::Publisher>;
+#[cfg(not(all(feature = "mxc", unix)))]
+type MxcHandle = ();
+
+/// Send `bye` to every subscriber and close the socket.
+#[cfg(all(feature = "mxc", unix))]
+fn shutdown_publisher(handle: MxcHandle) {
+    if let Some(publisher) = handle {
+        publisher.shutdown(myx::mxc::ByeReason::Shutdown);
+    }
+}
+
+#[cfg(not(all(feature = "mxc", unix)))]
+fn shutdown_publisher(_handle: MxcHandle) {}
+
+/// Bind the MXC theme socket, or run without one.
+///
+/// **Publishing is opt-out.** Album-reactive colour is a headline feature, so
+/// it is on unless `MYX_NO_COLOR_SOCKET` is set to something other than `0` or
+/// the empty string.
+///
+/// A bind failure is never fatal — not a stale socket, not a read-only
+/// `XDG_RUNTIME_DIR`, not an exhausted thread limit. Myx is a music player
+/// first; losing colour publishing costs a subscriber a repaint, whereas
+/// refusing to start costs the user their music. Failures go to the librespot
+/// log, where the rest of the optional-integration diagnostics already live.
+#[cfg(all(feature = "mxc", unix))]
+fn bind_publisher() -> MxcHandle {
+    if std::env::var("MYX_NO_COLOR_SOCKET").is_ok_and(|v| !v.is_empty() && v != "0") {
+        liblog("mxc: MYX_NO_COLOR_SOCKET set; colour publishing disabled");
+        return None;
+    }
+    let path = myx::mxc::socket_path();
+    match myx::mxc::publish::Publisher::bind(&path) {
+        Ok(publisher) => {
+            liblog(format!("mxc: publishing on {}", path.display()));
+            Some(publisher)
+        }
+        Err(e) => {
+            liblog(format!(
+                "mxc: could not bind {} ({e}); continuing without colour publishing",
+                path.display()
+            ));
+            None
+        }
+    }
 }
 
 // Run every potentially-interactive authentication step before constructing the
@@ -146,7 +226,7 @@ async fn boot(
     creds: librespot_core::authentication::Credentials,
     webapi: WebApi,
     picker: Picker,
-) -> Result<()> {
+) -> Result<MxcHandle> {
     let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
     let engine = with_loader(
         terminal,
@@ -158,7 +238,10 @@ async fn boot(
 
     let webapi = Arc::new(Mutex::new(webapi));
 
-    if let Some(uri) = std::env::args().nth(1) {
+    // The one positional argument is a Spotify URI. `theme` never reaches
+    // here (see `main`), but the guard keeps that true if the dispatch is ever
+    // compiled out.
+    if let Some(uri) = std::env::args().nth(1).filter(|a| a != "theme") {
         let _ = engine.play_context(uri, false);
     }
 
@@ -212,6 +295,8 @@ async fn boot(
             webapi,
         },
         media_controls,
+        #[cfg(all(feature = "mxc", unix))]
+        mxc: bind_publisher(),
         playback: PlaybackState {
             now,
             seek_target: None,
@@ -296,7 +381,7 @@ async fn run_ui(
     terminal: &mut Term,
     mut app: App,
     ev_rx: flume::Receiver<EngineEvent>,
-) -> Result<()> {
+) -> Result<MxcHandle> {
     let (in_tx, in_rx) = flume::unbounded::<Event>();
     std::thread::spawn(move || loop {
         if matches!(event::poll(Duration::from_millis(200)), Ok(true)) {
@@ -643,7 +728,17 @@ async fn run_ui(
         };
         dirty |= touched;
     }
-    Ok(())
+    // Hand the publisher back to `main` so the `bye` goes out on the same path
+    // that restores the terminal, rather than relying on where `App` happens
+    // to be dropped.
+    #[cfg(all(feature = "mxc", unix))]
+    {
+        Ok(app.mxc.take())
+    }
+    #[cfg(not(all(feature = "mxc", unix)))]
+    {
+        Ok(())
+    }
 }
 
 /// Resume the persisted playback source at the last track/position — the

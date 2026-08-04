@@ -39,6 +39,13 @@ pub(crate) struct App {
     // Best-effort OS integration. Headless/SSH sessions may not expose the
     // platform media service, but that must never prevent Myx from playing.
     pub(crate) media_controls: Option<MediaControls>,
+    // The MXC colour publisher, when one could be bound. `None` means
+    // publishing is disabled (`MYX_NO_COLOR_SOCKET`) or the bind failed — both
+    // are ordinary states, not errors: a player that refuses to play music
+    // because a socket is unavailable would be a worse player. Every use site
+    // is a `if let Some(..)`, so `None` is simply inert.
+    #[cfg(all(feature = "mxc", unix))]
+    pub(crate) mxc: Option<myx::mxc::publish::Publisher>,
     pub(crate) status: String,
     pub(crate) browse: BrowseState,
     pub(crate) transport: Transport,

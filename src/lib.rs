@@ -19,6 +19,9 @@ pub mod reactive;
 pub mod theme;
 pub mod util;
 
+#[cfg(all(feature = "mxc", unix))]
+pub mod mxc;
+
 #[cfg(feature = "streaming")]
 pub mod audio;
 #[cfg(feature = "streaming")]
