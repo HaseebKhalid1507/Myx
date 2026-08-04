@@ -2822,6 +2822,7 @@ dependencies = [
  "souvlaki",
  "tokio",
  "toml",
+ "tui-textarea-2",
  "vergen",
  "windows-win",
  "winit",
@@ -5769,6 +5770,20 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
+
+[[package]]
+name = "tui-textarea-2"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4296a13cbcb20abd7b62f96154cad81053eb82ee8d24db3d7fdca16b31f118e9"
+dependencies = [
+ "crossterm",
+ "portable-atomic",
+ "ratatui-core",
+ "ratatui-widgets",
+ "unicode-segmentation",
+ "unicode-width",
+]
 
 [[package]]
 name = "tungstenite"
