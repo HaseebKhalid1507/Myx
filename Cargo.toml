@@ -16,6 +16,7 @@ default-run = "myx"
 ratatui = "0.30.2"
 crossterm = "0.29.0"
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
+tui-textarea-2 = { version = "0.12", default-features = false, features = ["crossterm"] }
 image = "0.25"
 color-thief = "0.2"
 

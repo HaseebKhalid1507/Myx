@@ -27,10 +27,11 @@ pub(crate) fn render_library(
             Span::styled("  Esc", theme.muted()),
         ])
     } else if app.search.input_mode {
+        let (before, after) = split_at_cursor(app.search.query(), app.search.input.cursor().1);
         Line::from(vec![
             Span::styled("search: ", theme.heading()),
             Span::styled(
-                format!("{}▏", app.search.query),
+                format!("{before}▏{after}"),
                 Style::default().fg(theme.text.into()),
             ),
         ])
@@ -38,7 +39,7 @@ pub(crate) fn render_library(
         Line::from(vec![
             Span::styled("search: ", theme.heading()),
             Span::styled(
-                app.search.query.clone(),
+                app.search.query().to_string(),
                 Style::default().fg(theme.text.into()),
             ),
             Span::styled("  (Esc)", theme.muted()),
@@ -235,4 +236,15 @@ pub(crate) fn render_library(
     } else {
         out.hits.scroll = None;
     }
+}
+
+/// Split the query at the editor's cursor column (a char index) so the ▏
+/// glyph can be drawn where the cursor actually is. Clamps past-the-end.
+pub(crate) fn split_at_cursor(q: &str, col: usize) -> (&str, &str) {
+    let byte = q
+        .char_indices()
+        .nth(col)
+        .map(|(i, _)| i)
+        .unwrap_or(q.len());
+    q.split_at(byte)
 }

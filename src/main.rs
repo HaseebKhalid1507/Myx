@@ -332,7 +332,7 @@ async fn boot(
         },
         search: SearchState {
             input_mode: false,
-            query: String::new(),
+            input: Default::default(),
             searching: false,
             search_results: Vec::new(),
         },
