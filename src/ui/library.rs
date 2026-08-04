@@ -167,7 +167,14 @@ pub(crate) fn render_library(
         // Mark rows that `P` can play outright (playlist / album / artist), so
         // they're distinguishable from tracks at a glance.
         let playable_ctx = context_target(item).is_some() && !item.is_play;
-        let max = if playable_ctx {
+        // The currently playing track, wherever it appears in the list (#33).
+        let now_here = item.is_track
+            && app
+                .playback
+                .now
+                .as_ref()
+                .is_some_and(|n| n.uri == item.uri);
+        let max = if playable_ctx || now_here {
             max.saturating_sub(2)
         } else {
             max
@@ -180,6 +187,24 @@ pub(crate) fn render_library(
                 Style::default().fg(theme.border_dimmest.into()),
             ));
         }
+        if now_here {
+            // ♪ in accent while playing; dimmed when paused. The label also
+            // takes the accent so the row reads at a glance without selection.
+            let is_playing = app.playback.now.as_ref().is_some_and(|n| n.is_playing);
+            let marker_style = if is_playing {
+                Style::default().fg(theme.accent.into())
+            } else {
+                Style::default()
+                    .fg(theme.accent.into())
+                    .add_modifier(Modifier::DIM)
+            };
+            spans.push(Span::styled(" ♪", marker_style));
+        }
+        let style = if now_here && !selected {
+            Style::default().fg(theme.accent.into())
+        } else {
+            style
+        };
         spans.push(Span::styled(format!(" {label}"), style));
         if !item.subtitle.is_empty() {
             let used = label.chars().count() + 1;
