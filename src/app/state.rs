@@ -77,6 +77,10 @@ pub(crate) struct SearchState {
     // The prompt's editor. Read through `query()`, reset through `clear()`.
     pub(crate) input: tui_textarea::TextArea<'static>,
     pub(crate) searching: bool,
+    // A submitted query whose results have not landed yet. `searching` means
+    // "the search view is active"; this means "the wire is hot" — the empty
+    // list renders "searching…" instead of "(empty)" while it's set.
+    pub(crate) in_flight: bool,
     pub(crate) search_results: Vec<LibItem>,
 }
 

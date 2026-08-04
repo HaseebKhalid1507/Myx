@@ -87,8 +87,14 @@ pub(crate) fn render_library(
     if total_items == 0 {
         out.hits.scroll = None;
         out.hits.lib = None;
+        let label = empty_list_label(
+            !app.browse.details.is_empty(),
+            app.search.searching,
+            app.search.in_flight,
+            app.browse.library.is_loaded(app.browse.section),
+        );
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled("(empty)", theme.muted())))
+            Paragraph::new(Line::from(Span::styled(label, theme.muted())))
                 .block(Block::default().style(theme.panel())),
             Rect {
                 x: inner.x,
@@ -247,4 +253,61 @@ pub(crate) fn split_at_cursor(q: &str, col: usize) -> (&str, &str) {
         .map(|(i, _)| i)
         .unwrap_or(q.len());
     q.split_at(byte)
+}
+
+/// What an empty list means, in priority order matching `cur_items`:
+/// drill-ins only exist once their items arrived, so an empty one is truly
+/// empty; an active search is "searching…" only while the wire is hot; a
+/// library section is "loading…" until its first delivery (issue #25).
+fn empty_list_label(
+    in_details: bool,
+    searching: bool,
+    search_in_flight: bool,
+    section_loaded: bool,
+) -> &'static str {
+    if in_details {
+        "(empty)"
+    } else if searching {
+        if search_in_flight {
+            "searching…"
+        } else {
+            "(empty)"
+        }
+    } else if !section_loaded {
+        "loading…"
+    } else {
+        "(empty)"
+    }
+}
+
+#[cfg(test)]
+mod empty_label_tests {
+    use super::empty_list_label;
+
+    #[test]
+    fn section_not_yet_delivered_says_loading() {
+        assert_eq!(empty_list_label(false, false, false, false), "loading…");
+    }
+
+    #[test]
+    fn delivered_but_empty_section_says_empty() {
+        assert_eq!(empty_list_label(false, false, false, true), "(empty)");
+    }
+
+    #[test]
+    fn search_in_flight_says_searching() {
+        assert_eq!(empty_list_label(false, true, true, true), "searching…");
+    }
+
+    #[test]
+    fn search_landed_with_no_results_says_empty() {
+        assert_eq!(empty_list_label(false, true, false, true), "(empty)");
+    }
+
+    #[test]
+    fn drill_in_wins_over_everything() {
+        // Details only exist once their items arrived — an empty one is real,
+        // regardless of what the search or library are doing underneath.
+        assert_eq!(empty_list_label(true, true, true, false), "(empty)");
+    }
 }

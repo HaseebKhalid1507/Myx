@@ -334,6 +334,7 @@ async fn boot(
             input_mode: false,
             input: Default::default(),
             searching: false,
+            in_flight: false,
             search_results: Vec::new(),
         },
         view: ViewState {
@@ -512,6 +513,9 @@ async fn run_ui(
                         spawn_library_fetch(app.svc.webapi.clone(), chans.lib.clone(), chans.libdone.clone());
                     } else {
                         app.status = "library failed — press r to reload".to_string();
+                        // Give up honestly: undelivered sections stop claiming
+                        // "loading…" — the status line carries the failure.
+                        app.browse.library.mark_all_loaded();
                     }
                 }
                 // Radio results are drained here (not as a `select!` arm) for the
@@ -656,6 +660,7 @@ async fn run_ui(
             }
             s = search_rx.recv_async() => {
                 if let Ok(results) = s {
+                    app.search.in_flight = false;
                     app.search.search_results = results;
                     app.browse.selected = app.first_selectable();
                     app.status = if app.search.search_results.is_empty() {

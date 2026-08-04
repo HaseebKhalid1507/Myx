@@ -40,6 +40,7 @@ pub(crate) fn handle_key(
                 let q = app.search.query().trim().to_string();
                 if !q.is_empty() {
                     app.search.searching = true;
+                    app.search.in_flight = true;
                     app.browse.selected = 0;
                     app.status = "searching…".to_string();
                     spawn_search(app.svc.webapi.clone(), q, chans.search.clone());
@@ -135,6 +136,7 @@ pub(crate) fn handle_key(
         }
         KeyCode::Char('r') => {
             app.status = "loading library…".to_string();
+            app.browse.library.reset_loading();
             spawn_library_fetch(
                 app.svc.webapi.clone(),
                 chans.lib.clone(),
