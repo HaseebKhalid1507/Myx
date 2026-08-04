@@ -188,7 +188,9 @@ pub(crate) fn render_library(
             // weight is the signal (boss's call over the accented ♪).
             let is_playing = app.playback.now.as_ref().is_some_and(|n| n.is_playing);
             let marker_style = if is_playing {
-                Style::default().add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.accent.into())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().add_modifier(Modifier::DIM)
             };
