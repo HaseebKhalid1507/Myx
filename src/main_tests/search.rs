@@ -10,6 +10,7 @@ fn state() -> SearchState {
         input_mode: true,
         input: Default::default(),
         searching: false,
+        in_flight: false,
         search_results: Vec::new(),
     }
 }
