@@ -168,12 +168,8 @@ pub(crate) fn render_library(
         // they're distinguishable from tracks at a glance.
         let playable_ctx = context_target(item).is_some() && !item.is_play;
         // The currently playing track, wherever it appears in the list (#33).
-        let now_here = item.is_track
-            && app
-                .playback
-                .now
-                .as_ref()
-                .is_some_and(|n| n.uri == item.uri);
+        let now_here =
+            item.is_track && app.playback.now.as_ref().is_some_and(|n| n.uri == item.uri);
         let max = if playable_ctx || now_here {
             max.saturating_sub(2)
         } else {
