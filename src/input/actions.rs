@@ -13,6 +13,7 @@ pub(crate) fn handle_action_key(
     match code {
         KeyCode::Esc | KeyCode::Char('a') => {
             app.view.actions = None;
+            app.view.action_anchor = None;
             app.status.clear();
             return;
         }
@@ -61,7 +62,9 @@ pub(crate) fn handle_action_key(
             if items.is_empty() {
                 app.status = "no playlists to add to".to_string();
                 app.view.actions = None;
+                app.view.action_anchor = None;
             } else {
+                app.view.action_anchor = None;
                 app.view.actions = Some(ActionMenu {
                     title: "Add to playlist".to_string(),
                     items,
@@ -76,10 +79,12 @@ pub(crate) fn handle_action_key(
             let shuffle = app.transport.shuffle;
             app.play_context_row(uri, name, shuffle);
             app.view.actions = None;
+            app.view.action_anchor = None;
         }
         ActionKind::Open { uri, name } => {
             spawn_detail_fetch(app.svc.webapi.clone(), uri, name, detail_tx.clone());
             app.view.actions = None;
+            app.view.action_anchor = None;
         }
         ActionKind::CopyLink { uri } => {
             app.status = if copy_to_clipboard(&uri_to_url(&uri)) {
@@ -88,10 +93,23 @@ pub(crate) fn handle_action_key(
                 "clipboard unavailable".to_string()
             };
             app.view.actions = None;
+            app.view.action_anchor = None;
+        }
+        ActionKind::Queue { uri, display } => {
+            app.transport.queue.insert(0, display.clone());
+            app.transport.queue_uris.insert(0, uri.clone());
+            spawn_action(
+                app.svc.webapi.clone(),
+                ActionKind::Queue { uri, display },
+                astatus_tx.clone(),
+            );
+            app.view.actions = None;
+            app.view.action_anchor = None;
         }
         other => {
             spawn_action(app.svc.webapi.clone(), other, astatus_tx.clone());
             app.view.actions = None;
+            app.view.action_anchor = None;
         }
     }
 }

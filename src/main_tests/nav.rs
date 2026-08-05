@@ -2,6 +2,60 @@ use crate::ui::*;
 use crate::*;
 use ratatui::Terminal;
 
+#[test]
+fn library_row_at_maps_pointer_through_scroll_offset() {
+    let rect = Rect::new(4, 3, 20, 8);
+    assert_eq!(library_row_at(rect, 10, 4, 3), Some(10));
+    assert_eq!(library_row_at(rect, 10, 12, 7), Some(14));
+    assert_eq!(library_row_at(rect, 10, 24, 7), None);
+}
+
+#[test]
+fn context_popup_stays_inside_the_screen() {
+    let menu = ActionMenu {
+        title: "Song".to_string(),
+        items: vec![ActionItem {
+            label: "+ Add to Queue".to_string(),
+            kind: ActionKind::Queue {
+                uri: "spotify:track:1".to_string(),
+                display: "Song — Artist".to_string(),
+            },
+        }],
+        selected: 0,
+    };
+    let area = Rect::new(2, 1, 40, 12);
+    let popup = context_popup_rect(&menu, (41, 12), area);
+    assert!(popup.right() <= area.right());
+    assert!(popup.bottom() <= area.bottom());
+    assert_eq!(popup.width, 16);
+    assert_eq!(popup.height, 1);
+}
+
+#[test]
+fn current_track_is_removed_from_up_next() {
+    let mut queue = vec!["Current — Artist".to_string(), "Next — Artist".to_string()];
+    let mut uris = vec![
+        "spotify:track:current".to_string(),
+        "spotify:track:next".to_string(),
+    ];
+
+    advance_queue(&mut queue, &mut uris, "spotify:track:current");
+
+    assert_eq!(queue, ["Next — Artist"]);
+    assert_eq!(uris, ["spotify:track:next"]);
+}
+
+#[test]
+fn unrelated_track_change_waits_for_server_queue_refresh() {
+    let mut queue = vec!["Next — Artist".to_string()];
+    let mut uris = vec!["spotify:track:next".to_string()];
+
+    advance_queue(&mut queue, &mut uris, "spotify:track:elsewhere");
+
+    assert_eq!(queue, ["Next — Artist"]);
+    assert_eq!(uris, ["spotify:track:next"]);
+}
+
 // -------------------------------------------------- filter_detail_items
 
 #[test]
@@ -261,6 +315,25 @@ fn a_forced_repaint_blanks_the_box_before_redrawing_it() {
     assert_eq!(ArtRepaint::Wipe.advance(), ArtRepaint::Draw);
     assert_eq!(ArtRepaint::Draw.advance(), ArtRepaint::Idle);
     assert_eq!(ArtRepaint::Idle.advance(), ArtRepaint::Idle);
+}
+
+#[test]
+fn returning_to_now_playing_draws_cover_without_blank_frame() {
+    assert_eq!(
+        repaint_for_layout_change((RightView::Queue, false), (RightView::NowPlaying, false)),
+        ArtRepaint::Draw
+    );
+}
+
+#[test]
+fn resizing_now_playing_still_clears_the_old_cover_footprint() {
+    assert_eq!(
+        repaint_for_layout_change(
+            (RightView::NowPlaying, false),
+            (RightView::NowPlaying, true)
+        ),
+        ArtRepaint::Wipe
+    );
 }
 
 // ----------------------------------------------------------- should_draw

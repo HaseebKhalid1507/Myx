@@ -91,6 +91,13 @@ impl PlaybackState {
             n.position_at = Instant::now();
         }
     }
+    pub(crate) fn set_playing_locally(&mut self, playing: bool) {
+        let position = self.position_ms();
+        self.set_local_position(position, false);
+        if let Some(now) = self.now.as_mut() {
+            now.is_playing = playing;
+        }
+    }
     /// Seek to an absolute position (clamped), updating the local display too.
     pub(crate) fn seek_to(&mut self, engine: &Engine, position_ms: u32) {
         let Some(dur) = self.now.as_ref().map(|n| n.duration_ms) else {

@@ -351,6 +351,7 @@ async fn boot(
             lyrics: Vec::new(),
             lyrics_synced: false,
             actions: None,
+            action_anchor: None,
         },
         session: SessionState {
             restore_uri,
@@ -489,7 +490,7 @@ async fn run_ui(
     // Nothing is on screen yet, so the first tick must draw.
     let mut dirty = true;
     let mut last_layout = (app.view.mode, app.view.zen);
-    let mut overlay_open = app.view.actions.is_some();
+    let mut art_overlay_open = app.view.actions.is_some() && app.view.action_anchor.is_none();
     // What the renderer writes. Lives across frames: the hit rects are what the
     // mouse handler reads between draws, and `lib_offset` is fed back into the
     // next frame's sticky-viewport calculation.
@@ -570,18 +571,18 @@ async fn run_ui(
                     dirty = true;
                 }
                 if (app.view.mode, app.view.zen) != last_layout {
-                    last_layout = (app.view.mode, app.view.zen);
-                    app.art_repaint = ArtRepaint::Wipe;
+                    let new_layout = (app.view.mode, app.view.zen);
+                    app.art_repaint = repaint_for_layout_change(last_layout, new_layout);
+                    last_layout = new_layout;
                     dirty = true;
                 }
-                // An overlay draws over the art and the terminal loses those
-                // pixels, so the cover has to be sent again once it closes.
-                // Opening one must not wipe: the image would be redrawn a frame
-                // later, back on top of the popup.
-                let overlay = app.view.actions.is_some();
-                if overlay != overlay_open {
-                    overlay_open = overlay;
-                    if !overlay {
+                // The centered actions overlay can cover the art, so the cover
+                // has to be sent again once it closes. The compact mouse popup
+                // stays in the library pane and must not make the cover flash.
+                let art_overlay = app.view.actions.is_some() && app.view.action_anchor.is_none();
+                if art_overlay != art_overlay_open {
+                    art_overlay_open = art_overlay;
+                    if !art_overlay {
                         app.art_repaint = ArtRepaint::Wipe;
                     }
                     dirty = true;
@@ -614,6 +615,17 @@ async fn run_ui(
             }
             ev = ev_rx.recv_async() => {
                 let Ok(ev) = ev else { break };
+                if let EngineEvent::TrackChanged { uri } = &ev {
+                    advance_queue(&mut app.transport.queue, &mut app.transport.queue_uris, uri);
+                    let webapi = app.svc.webapi.clone();
+                    let tx = chans.queue.clone();
+                    tokio::spawn(async move {
+                        // Connect emits TrackChanged before Spotify's queue
+                        // endpoint always reflects the transition.
+                        tokio::time::sleep(Duration::from_millis(750)).await;
+                        spawn_queue_fetch(webapi, tx);
+                    });
+                }
                 handle_engine_event(&mut app, ev, &chans.meta);
                 true
             }
@@ -713,7 +725,12 @@ async fn run_ui(
                 true
             }
             st = astatus_rx.recv_async() => {
-                if let Ok(msg) = st { app.status = msg; }
+                if let Ok(msg) = st {
+                    if msg.starts_with("queue failed:") {
+                        spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
+                    }
+                    app.status = msg;
+                }
                 true
             }
             ps = pstate_rx.recv_async() => {
@@ -766,6 +783,15 @@ async fn run_ui(
     #[cfg(not(all(feature = "mxc", unix)))]
     {
         Ok(())
+    }
+}
+
+pub(crate) fn advance_queue(queue: &mut Vec<String>, uris: &mut Vec<String>, current_uri: &str) {
+    if uris.first().is_some_and(|uri| uri == current_uri) {
+        uris.remove(0);
+        if !queue.is_empty() {
+            queue.remove(0);
+        }
     }
 }
 

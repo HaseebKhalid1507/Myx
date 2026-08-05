@@ -93,6 +93,9 @@ pub(crate) struct ViewState {
     pub(crate) lyrics_synced: bool,
     // Context actions menu overlay (opened with `a`).
     pub(crate) actions: Option<ActionMenu>,
+    // Mouse position for a compact context popup; `None` keeps the centered
+    // keyboard-driven actions overlay.
+    pub(crate) action_anchor: Option<(u16, u16)>,
 }
 
 /// Cross-cutting session bookkeeping: what we resumed into, which metadata

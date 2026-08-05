@@ -90,7 +90,15 @@ pub(crate) fn handle_key(
         }
         KeyCode::Char(' ') | KeyCode::Char('p') | KeyCode::Media(MediaKeyCode::PlayPause) => {
             if app.transport.playback_started {
-                let _ = app.svc.engine.toggle();
+                let playing = app.playback.now.as_ref().is_some_and(|now| now.is_playing);
+                let result = if playing {
+                    app.svc.engine.pause()
+                } else {
+                    app.svc.engine.play()
+                };
+                if result.is_ok() {
+                    app.playback.set_playing_locally(!playing);
+                }
             } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
                 let _ = app.svc.engine.play();
@@ -169,6 +177,7 @@ pub(crate) fn handle_key(
             if let Some(item) = item {
                 if !item.is_header && !item.is_play {
                     // Instant menu (no network), then enrich when the API returns.
+                    app.view.action_anchor = None;
                     app.view.actions = Some(build_action_menu(None, &item));
                     spawn_action_menu(app.svc.webapi.clone(), item, chans.menu.clone());
                 }
@@ -194,7 +203,7 @@ pub(crate) fn handle_key(
         }
         KeyCode::Right => {
             app.view.mode = app.view.mode.shift(1);
-            if app.view.mode == RightView::Queue
+            if matches!(app.view.mode, RightView::NowPlaying | RightView::Queue)
                 && (app.session.reclaimed || app.transport.playback_started)
             {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
@@ -202,7 +211,7 @@ pub(crate) fn handle_key(
         }
         KeyCode::Left => {
             app.view.mode = app.view.mode.shift(-1);
-            if app.view.mode == RightView::Queue
+            if matches!(app.view.mode, RightView::NowPlaying | RightView::Queue)
                 && (app.session.reclaimed || app.transport.playback_started)
             {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());

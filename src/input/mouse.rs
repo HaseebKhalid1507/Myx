@@ -10,6 +10,67 @@ pub(crate) fn handle_mouse(
     m: crossterm::event::MouseEvent,
     chans: &UiChannels,
 ) -> bool {
+    if m.kind == MouseEventKind::Down(MouseButton::Right) {
+        app.view.actions = None;
+        app.view.action_anchor = None;
+        if let Some(idx) = out
+            .hits
+            .lib
+            .and_then(|rect| library_row_at(rect, out.lib_offset, m.column, m.row))
+        {
+            if let Some(item) = app
+                .cur_items()
+                .get(idx)
+                .filter(|item| item.is_track)
+                .cloned()
+            {
+                app.browse.selected = idx;
+                app.session.last_click = None;
+                let display = if item.subtitle.is_empty() {
+                    item.name.clone()
+                } else {
+                    format!("{} — {}", item.name, item.subtitle)
+                };
+                app.view.actions = Some(ActionMenu {
+                    title: item.name,
+                    items: vec![ActionItem {
+                        label: "+ Add to Queue".to_string(),
+                        kind: ActionKind::Queue {
+                            uri: item.uri,
+                            display,
+                        },
+                    }],
+                    selected: 0,
+                });
+                app.view.action_anchor = Some((m.column.saturating_add(1), m.row));
+            }
+        }
+        return false;
+    }
+
+    // An open menu owns mouse input. Clicking an entry activates it; clicking
+    // elsewhere dismisses it without also activating the underlying UI.
+    if app.view.actions.is_some() {
+        if m.kind == MouseEventKind::Down(MouseButton::Left) {
+            let selected = out.hits.actions.iter().position(|rect| {
+                m.column >= rect.x
+                    && m.column < rect.right()
+                    && m.row >= rect.y
+                    && m.row < rect.bottom()
+            });
+            if let Some(selected) = selected {
+                if let Some(menu) = app.view.actions.as_mut() {
+                    menu.selected = selected;
+                }
+                handle_action_key(app, KeyCode::Enter, &chans.detail, &chans.astatus);
+            } else {
+                app.view.actions = None;
+                app.view.action_anchor = None;
+            }
+        }
+        return false;
+    }
+
     if matches!(
         m.kind,
         MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
@@ -73,6 +134,11 @@ pub(crate) fn handle_mouse(
                 .map(|(v, _)| *v);
             if let Some(v) = hit {
                 app.view.mode = v;
+                if matches!(v, RightView::NowPlaying | RightView::Queue)
+                    && (app.session.reclaimed || app.transport.playback_started)
+                {
+                    spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
+                }
                 consumed = true;
             }
         }
@@ -147,4 +213,9 @@ pub(crate) fn handle_mouse(
         }
     }
     false
+}
+
+pub(crate) fn library_row_at(rect: Rect, offset: usize, column: u16, row: u16) -> Option<usize> {
+    (column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom())
+        .then(|| offset + (row - rect.y) as usize)
 }

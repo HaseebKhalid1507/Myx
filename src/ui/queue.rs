@@ -3,6 +3,7 @@
 use crate::*;
 
 pub(crate) fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
+    f.render_widget(Block::default().style(theme.panel()), area);
     let inner = area.inner(Margin::new(2, 1));
     if inner.height == 0 {
         return;

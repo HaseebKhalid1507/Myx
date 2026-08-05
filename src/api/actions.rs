@@ -52,7 +52,14 @@ pub(crate) fn build_action_menu(token: Option<&str>, item: &LibItem) -> ActionMe
             });
             items.push(ActionItem {
                 label: "＋  Add to Queue".into(),
-                kind: ActionKind::Queue { uri: uri.clone() },
+                kind: ActionKind::Queue {
+                    uri: uri.clone(),
+                    display: if item.subtitle.is_empty() {
+                        item.name.clone()
+                    } else {
+                        format!("{} — {}", item.name, item.subtitle)
+                    },
+                },
             });
             items.push(ActionItem {
                 label: "≡  Add to Playlist…".into(),
@@ -240,7 +247,7 @@ pub(crate) fn run_action(token: &str, kind: ActionKind) -> String {
                 Err(e) => format!("like failed: {e}"),
             }
         }
-        ActionKind::Queue { uri } => {
+        ActionKind::Queue { uri, .. } => {
             match api_modify(
                 &client,
                 token,

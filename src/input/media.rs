@@ -29,7 +29,15 @@ pub(crate) fn handle_media_control_event(
         }
         MediaControlEvent::Toggle => {
             if app.transport.playback_started {
-                let _ = app.svc.engine.toggle();
+                let playing = app.playback.now.as_ref().is_some_and(|now| now.is_playing);
+                let result = if playing {
+                    app.svc.engine.pause()
+                } else {
+                    app.svc.engine.play()
+                };
+                if result.is_ok() {
+                    app.playback.set_playing_locally(!playing);
+                }
             } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
                 let _ = app.svc.engine.play();

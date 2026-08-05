@@ -238,6 +238,8 @@ impl Engine {
     pub fn stop(&self) {
         self.inner.link().player.stop()
     }
+    /// Compatibility toggle for callers that do not track playback state.
+    /// The UI uses explicit `play`/`pause` to avoid stale toggles.
     pub fn toggle(&self) -> Result<()> {
         self.active_command("toggle", Spirc::play_pause)
     }
