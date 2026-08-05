@@ -2,6 +2,50 @@ use crate::ui::*;
 use crate::*;
 use ratatui::Terminal;
 
+// -------------------------------------------------- filter_detail_items
+
+#[test]
+fn playlist_filter_matches_track_title_or_artist() {
+    let items = vec![
+        LibItem::play("Play".to_string(), "spotify:playlist:list".to_string()),
+        LibItem::track(
+            "Midnight City".to_string(),
+            "M83".to_string(),
+            "spotify:track:1".to_string(),
+        ),
+        LibItem::track(
+            "Genesis".to_string(),
+            "Grimes".to_string(),
+            "spotify:track:2".to_string(),
+        ),
+    ];
+
+    let by_title = filter_detail_items(&items, "MIDNIGHT");
+    assert_eq!(by_title.len(), 1);
+    assert_eq!(by_title[0].uri, "spotify:track:1");
+
+    let by_artist = filter_detail_items(&items, "grimes");
+    assert_eq!(by_artist.len(), 1);
+    assert_eq!(by_artist[0].uri, "spotify:track:2");
+}
+
+#[test]
+fn playlist_filter_only_returns_tracks() {
+    let items = vec![
+        LibItem::play("Play".to_string(), "spotify:playlist:list".to_string()),
+        LibItem::header("Songs"),
+        LibItem::track(
+            "Song".to_string(),
+            "Artist".to_string(),
+            "spotify:track:1".to_string(),
+        ),
+    ];
+
+    let results = filter_detail_items(&items, "");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_track);
+}
+
 // -------------------------------------------------------- scroll_offset
 
 /// Walk the cursor from `from` to `to` one row at a time, as the arrow keys

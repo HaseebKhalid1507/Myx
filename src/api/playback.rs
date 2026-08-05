@@ -12,6 +12,11 @@ pub(crate) struct RemotePlaybackState {
     pub(crate) volume: u8,
 }
 
+pub(crate) enum RestoreOutcome {
+    Reclaimed(RemotePlaybackState),
+    Unavailable,
+}
+
 pub(crate) fn fetch_playback_state(token: &str) -> Option<RemotePlaybackState> {
     let client = http_client();
     let resp = client
@@ -66,22 +71,31 @@ pub(crate) fn transfer_playback(token: &str, device_id: &str, play: bool) -> Res
 pub(crate) fn spawn_restore(
     webapi: Arc<Mutex<WebApi>>,
     device_id: String,
-    tx: flume::Sender<RemotePlaybackState>,
+    tx: flume::Sender<RestoreOutcome>,
 ) {
     tokio::task::spawn_blocking(move || {
         let Some(token) = token_of(&webapi) else {
+            let _ = tx.send(RestoreOutcome::Unavailable);
             return;
         };
         let Some(state) = fetch_playback_state(&token) else {
+            let _ = tx.send(RestoreOutcome::Unavailable);
             return;
         };
         // Retry the transfer — the Connect device can take a moment to appear.
+        let mut transferred = false;
         for _ in 0..6 {
-            if transfer_playback(&token, &device_id, false).is_ok() {
+            if transfer_playback(&token, &device_id, true).is_ok() {
+                transferred = true;
                 break;
             }
             std::thread::sleep(Duration::from_secs(1));
         }
-        let _ = tx.send(state);
+        let outcome = if transferred {
+            RestoreOutcome::Reclaimed(state)
+        } else {
+            RestoreOutcome::Unavailable
+        };
+        let _ = tx.send(outcome);
     });
 }

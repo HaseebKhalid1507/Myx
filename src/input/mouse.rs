@@ -115,21 +115,35 @@ pub(crate) fn handle_mouse(
             }
         }
     }
-    // Scroll wheel → volume (anywhere in the window).
+    // Scroll the list under the pointer; only the volume meter owns wheel
+    // volume changes, so browsing cannot alter playback volume by accident.
     if matches!(
         m.kind,
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
     ) {
-        match m.kind {
-            MouseEventKind::ScrollUp => {
-                app.transport.volume = (app.transport.volume + 5).min(100);
-                let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+        let over = |rect: Rect| {
+            m.column >= rect.x
+                && m.column < rect.x + rect.width
+                && m.row >= rect.y
+                && m.row < rect.y + rect.height
+        };
+        if out.hits.lib.is_some_and(over) {
+            app.move_sel(if m.kind == MouseEventKind::ScrollUp {
+                -1
+            } else {
+                1
+            });
+        } else if out.hits.vol.is_some_and(over) {
+            match m.kind {
+                MouseEventKind::ScrollUp => {
+                    app.transport.volume = (app.transport.volume + 5).min(100);
+                }
+                MouseEventKind::ScrollDown => {
+                    app.transport.volume = app.transport.volume.saturating_sub(5);
+                }
+                _ => {}
             }
-            MouseEventKind::ScrollDown => {
-                app.transport.volume = app.transport.volume.saturating_sub(5);
-                let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
-            }
-            _ => {}
+            let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
         }
     }
     false

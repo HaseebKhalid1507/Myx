@@ -39,10 +39,19 @@ pub(crate) fn handle_key(
                 app.search.input_mode = false;
                 let q = app.search.query.trim().to_string();
                 if !q.is_empty() {
-                    app.search.searching = true;
-                    app.browse.selected = 0;
-                    app.status = "searching…".to_string();
-                    spawn_search(app.svc.webapi.clone(), q, chans.search.clone());
+                    if app.in_playlist() {
+                        app.filter_playlist();
+                        app.status = if app.cur_items().is_empty() {
+                            "no matching tracks".to_string()
+                        } else {
+                            String::new()
+                        };
+                    } else {
+                        app.search.searching = true;
+                        app.browse.selected = 0;
+                        app.status = "searching…".to_string();
+                        spawn_search(app.svc.webapi.clone(), q, chans.search.clone());
+                    }
                 }
             }
             KeyCode::Backspace => {
@@ -68,7 +77,10 @@ pub(crate) fn handle_key(
         }
         KeyCode::Char('q') => return true,
         KeyCode::Esc => {
-            if let Some(d) = app.browse.details.pop() {
+            if app.search.playlist_results.take().is_some() {
+                app.search.query.clear();
+                app.browse.selected = app.first_selectable();
+            } else if let Some(d) = app.browse.details.pop() {
                 app.browse.selected = d.parent_selected;
             } else if app.search.searching {
                 app.search.searching = false;
@@ -204,6 +216,7 @@ pub(crate) fn handle_key(
         KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) => play_selected_context(app, false),
         KeyCode::Enter => match app.activate() {
             Activated::Open(uri, name) => {
+                app.search.playlist_results = None;
                 spawn_detail_fetch(app.svc.webapi.clone(), uri, name, chans.detail.clone());
             }
             Activated::Radio(uri) => {

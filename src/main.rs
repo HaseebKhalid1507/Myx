@@ -241,24 +241,32 @@ async fn boot(
     // The one positional argument is a Spotify URI. `theme` never reaches
     // here (see `main`), but the guard keeps that true if the dispatch is ever
     // compiled out.
-    if let Some(uri) = std::env::args().nth(1).filter(|a| a != "theme") {
-        let _ = engine.play_context(uri, false);
+    let startup_uri = std::env::args().nth(1).filter(|a| a != "theme");
+    if let Some(uri) = startup_uri.as_ref() {
+        let _ = engine.play_context(uri.clone(), false);
     }
 
-    // Rebuild the last now-playing (paused) for a seamless resume look.
-    let now = saved.last_played.as_ref().map(|last_played| NowPlaying {
-        uri: last_played.uri.clone(),
-        title: last_played.title.clone(),
-        artist: last_played.artist.clone(),
-        album: last_played.album.clone(),
-        duration_ms: last_played.duration_ms,
-        position_ms: last_played.position_ms,
-        position_at: Instant::now(),
-        is_playing: false,
-        cover: None,
-    });
+    // Rebuild the last now-playing while the live restore is negotiated.
+    let now = startup_uri
+        .is_none()
+        .then_some(saved.last_played.as_ref())
+        .flatten()
+        .map(|last_played| NowPlaying {
+            uri: last_played.uri.clone(),
+            title: last_played.title.clone(),
+            artist: last_played.artist.clone(),
+            album: last_played.album.clone(),
+            duration_ms: last_played.duration_ms,
+            position_ms: last_played.position_ms,
+            position_at: Instant::now(),
+            is_playing: false,
+            cover: None,
+        });
 
-    let restore_uri = saved.last_played.as_ref().map(|lp| lp.uri.clone());
+    let restore_uri = startup_uri
+        .is_none()
+        .then(|| saved.last_played.as_ref().map(|lp| lp.uri.clone()))
+        .flatten();
 
     // HWND is a Windows-specific API.
     #[cfg(unix)]
@@ -326,7 +334,7 @@ async fn boot(
             },
             queue: saved.queue,
             queue_uris: saved.queue_uris,
-            playback_started: false,
+            playback_started: startup_uri.is_some(),
             source: saved.source.clone(),
             source_name: saved.source_name.clone(),
         },
@@ -335,6 +343,7 @@ async fn boot(
             query: String::new(),
             searching: false,
             search_results: Vec::new(),
+            playlist_results: None,
         },
         view: ViewState {
             mode: RightView::NowPlaying,
@@ -345,6 +354,7 @@ async fn boot(
         },
         session: SessionState {
             restore_uri,
+            restore_on_startup: startup_uri.is_none(),
             pending_meta: None,
             reclaimed: false,
             last_ctrl_c: None,
@@ -372,7 +382,7 @@ struct UiChannels {
     detail: flume::Sender<(String, String, Vec<LibItem>)>,
     menu: flume::Sender<ActionMenu>,
     astatus: flume::Sender<String>,
-    pstate: flume::Sender<RemotePlaybackState>,
+    pstate: flume::Sender<RestoreOutcome>,
     radio: flume::Sender<Result<Radio, String>>,
     libdone: flume::Sender<bool>,
 }
@@ -401,7 +411,7 @@ async fn run_ui(
     let (detail_tx, detail_rx) = flume::unbounded::<(String, String, Vec<LibItem>)>();
     let (menu_tx, menu_rx) = flume::unbounded::<ActionMenu>();
     let (astatus_tx, astatus_rx) = flume::unbounded::<String>();
-    let (pstate_tx, pstate_rx) = flume::unbounded::<RemotePlaybackState>();
+    let (pstate_tx, pstate_rx) = flume::unbounded::<RestoreOutcome>();
     let (radio_tx, radio_rx) = flume::unbounded::<Result<Radio, String>>();
     let (libdone_tx, libdone_rx) = flume::unbounded::<bool>();
     let (souvlaki_tx, souvlaki_rx) = flume::unbounded::<MediaControlEvent>();
@@ -424,17 +434,23 @@ async fn run_ui(
         chans.libdone.clone(),
     );
 
-    // Reclaim server-side playback: read live state + transfer it onto myx so the
-    // full context + queue + position come back.
-    //
-    // Clone: `spawn_restore` sends once and exits. Moving the sender in would
-    // drop the last one, and a disconnected receiver resolves `recv_async()`
-    // instantly and forever — spinning the select loop below.
-    spawn_restore(
-        app.svc.webapi.clone(),
-        app.svc.engine.device_id(),
-        chans.pstate.clone(),
-    );
+    // The local snapshot is what Myx was actually playing when it closed, so it
+    // wins over Spotify's server-side state, which may belong to another device.
+    // Only reclaim that live state when no local track exists.
+    if app.session.restore_on_startup {
+        if app.playback.now.is_some() {
+            resume_source(&mut app, &chans.radio);
+            app.transport.playback_started = true;
+        } else {
+            // `spawn_restore` sends once and exits. Keep the sender in `chans`,
+            // or a disconnected receiver would spin the select loop forever.
+            spawn_restore(
+                app.svc.webapi.clone(),
+                app.svc.engine.device_id(),
+                chans.pstate.clone(),
+            );
+        }
+    }
 
     // Re-enrich the restored last-played track (cover / theme / lyrics).
     if let Some(uri) = app.session.restore_uri.take() {
@@ -676,6 +692,7 @@ async fn run_ui(
             }
             d = detail_rx.recv_async() => {
                 if let Ok((context_uri, title, items)) = d {
+                    app.search.playlist_results = None;
                     app.browse.details.push(Detail { context_uri, title, items, parent_selected: app.browse.selected });
                     app.browse.selected = app.first_selectable();
                     app.status.clear();
@@ -700,29 +717,39 @@ async fn run_ui(
                 true
             }
             ps = pstate_rx.recv_async() => {
-                if let Ok(state) = ps {
-                    app.session.reclaimed = true;
-                    app.transport.shuffle = state.shuffle;
-                    app.transport.repeat = state.repeat;
-                    app.transport.volume = state.volume.min(100);
-                    let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
-                    app.playback.now = Some(NowPlaying {
-                        uri: format!("spotify:track:{}", state.track_id),
-                        title: String::new(),
-                        artist: String::new(),
-                        album: String::new(),
-                        duration_ms: 0,
-                        position_ms: state.progress_ms,
-                        position_at: Instant::now(),
-                        is_playing: false,
-                        cover: None,
-                    });
-                    let webapi = app.svc.webapi.clone();
-                    let tx = chans.meta.clone();
-                    let id = state.track_id.clone();
-                    app.session.pending_meta = Some(format!("spotify:track:{id}"));
-                    tokio::task::spawn_blocking(move || { let _ = tx.send(fetch_track_meta(&webapi, &id)); });
-                    spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
+                if let Ok(outcome) = ps {
+                    match outcome {
+                        RestoreOutcome::Reclaimed(state) => {
+                            app.session.reclaimed = true;
+                            app.transport.playback_started = true;
+                            app.transport.shuffle = state.shuffle;
+                            app.transport.repeat = state.repeat;
+                            app.transport.volume = state.volume.min(100);
+                            let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+                            app.playback.now = Some(NowPlaying {
+                                uri: format!("spotify:track:{}", state.track_id),
+                                title: String::new(),
+                                artist: String::new(),
+                                album: String::new(),
+                                duration_ms: 0,
+                                position_ms: state.progress_ms,
+                                position_at: Instant::now(),
+                                is_playing: true,
+                                cover: None,
+                            });
+                            let webapi = app.svc.webapi.clone();
+                            let tx = chans.meta.clone();
+                            let id = state.track_id.clone();
+                            app.session.pending_meta = Some(format!("spotify:track:{id}"));
+                            tokio::task::spawn_blocking(move || { let _ = tx.send(fetch_track_meta(&webapi, &id)); });
+                            spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
+                        }
+                        RestoreOutcome::Unavailable if app.playback.now.is_some() => {
+                            resume_source(&mut app, &chans.radio);
+                            app.transport.playback_started = true;
+                        }
+                        RestoreOutcome::Unavailable => {}
+                    }
                 }
                 true
             }
