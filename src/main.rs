@@ -621,12 +621,13 @@ async fn run_ui(
                             break;
                         }
                     }
-                    // A repaint from the terminal's own buffer loses inline art.
-                    // A repaint from the terminal's own buffer loses inline art;
-                    // returning to the window is when it has to go back out.
-                    // tmux only forwards focus with `focus-events on` — see the
-                    // README — and stores sixel itself either way.
-                    Ok(Event::Resize(..)) | Ok(Event::FocusGained) => {
+                    // Resizes lose inline art. Focus only does so when tmux
+                    // repaints a pane; compositor focus-follows-mouse events do
+                    // not and must not make the cover flash.
+                    Ok(Event::Resize(..)) => {
+                        app.art_repaint = ArtRepaint::Wipe;
+                    }
+                    Ok(Event::FocusGained) if std::env::var_os("TMUX").is_some() => {
                         app.art_repaint = ArtRepaint::Wipe;
                     }
                     _ => {}
