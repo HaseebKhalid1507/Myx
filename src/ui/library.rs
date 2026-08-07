@@ -167,7 +167,10 @@ pub(crate) fn render_library(
         // Mark rows that `P` can play outright (playlist / album / artist), so
         // they're distinguishable from tracks at a glance.
         let playable_ctx = context_target(item).is_some() && !item.is_play;
-        let max = if playable_ctx {
+        // The currently playing track, wherever it appears in the list (#33).
+        let now_here =
+            item.is_track && app.playback.now.as_ref().is_some_and(|n| n.uri == item.uri);
+        let max = if playable_ctx || now_here {
             max.saturating_sub(2)
         } else {
             max
@@ -179,6 +182,19 @@ pub(crate) fn render_library(
                 " ▶",
                 Style::default().fg(theme.border_dimmest.into()),
             ));
+        }
+        if now_here {
+            // Bold ● while playing, dimmed while paused. No color — the
+            // weight is the signal (boss's call over the accented ♪).
+            let is_playing = app.playback.now.as_ref().is_some_and(|n| n.is_playing);
+            let marker_style = if is_playing {
+                Style::default()
+                    .fg(theme.accent.into())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::DIM)
+            };
+            spans.push(Span::styled(" ●", marker_style));
         }
         spans.push(Span::styled(format!(" {label}"), style));
         if !item.subtitle.is_empty() {
