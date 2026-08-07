@@ -17,22 +17,33 @@ pub(crate) fn render_library(
     }
 
     // Header line: drill-in title, search input/results, or section indicator.
-    let head: Line = if let Some(d) = app.browse.details.last() {
+    let head: Line = if app.search.input_mode {
+        let (before, after) = split_at_cursor(app.search.query(), app.search.input.cursor().1);
+        Line::from(vec![
+            Span::styled(
+                if app.in_playlist() {
+                    "filter: "
+                } else {
+                    "search: "
+                },
+                theme.heading(),
+            ),
+            Span::styled(
+                format!("{before}▏{after}"),
+                Style::default().fg(theme.text.into()),
+            ),
+        ])
+    } else if let Some(d) = app.browse.details.last() {
+        let filtered = app.search.playlist_results.is_some();
         Line::from(vec![
             Span::styled("‹ ", Style::default().fg(theme.primary.into())),
             Span::styled(
                 truncate(&d.title, inner.width.saturating_sub(8) as usize),
                 theme.heading(),
             ),
-            Span::styled("  Esc", theme.muted()),
-        ])
-    } else if app.search.input_mode {
-        let (before, after) = split_at_cursor(app.search.query(), app.search.input.cursor().1);
-        Line::from(vec![
-            Span::styled("search: ", theme.heading()),
             Span::styled(
-                format!("{before}▏{after}"),
-                Style::default().fg(theme.text.into()),
+                if filtered { "  filter · Esc" } else { "  Esc" },
+                theme.muted(),
             ),
         ])
     } else if app.search.searching {

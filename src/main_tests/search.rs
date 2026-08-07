@@ -12,6 +12,7 @@ fn state() -> SearchState {
         searching: false,
         in_flight: false,
         search_results: Vec::new(),
+        playlist_results: None,
     }
 }
 

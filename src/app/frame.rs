@@ -22,6 +22,8 @@ pub(crate) struct HitRects {
     pub(crate) tabs: Vec<(RightView, Rect)>,
     /// Library list viewport.
     pub(crate) lib: Option<Rect>,
+    /// Rows in the currently visible actions menu.
+    pub(crate) actions: Vec<Rect>,
 }
 
 /// Everything the renderer writes, kept out of `App` so every render function
@@ -62,6 +64,17 @@ impl ArtRepaint {
     }
 }
 
+pub(crate) fn repaint_for_layout_change(
+    previous: (RightView, bool),
+    current: (RightView, bool),
+) -> ArtRepaint {
+    match (previous, current) {
+        ((RightView::NowPlaying, _), (RightView::NowPlaying, _)) => ArtRepaint::Wipe,
+        ((_, _), (RightView::NowPlaying, _)) => ArtRepaint::Draw,
+        _ => ArtRepaint::Idle,
+    }
+}
+
 /// Ceiling on the redraw rate: one frame per ~60Hz terminal refresh.
 pub(crate) const MIN_FRAME: Duration = Duration::from_millis(16);
 /// Redraw rate while the visualizer or a theme fade is running.
@@ -70,7 +83,7 @@ pub(crate) const ANIM_FRAME: Duration = Duration::from_millis(33);
 /// honest without repainting an identical frame 60 times a second.
 pub(crate) const IDLE_REDRAW: Duration = Duration::from_millis(500);
 /// How often the live queue is re-fetched and the session persisted.
-pub(crate) const SYNC_EVERY: Duration = Duration::from_secs(24);
+pub(crate) const SYNC_EVERY: Duration = Duration::from_secs(10);
 
 /// Whether this frame is worth drawing.
 ///

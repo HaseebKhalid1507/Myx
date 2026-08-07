@@ -9,6 +9,7 @@ pub(crate) enum ActionKind {
     },
     Queue {
         uri: String,
+        display: String,
     },
     AddToPlaylistMenu {
         track_uri: String,

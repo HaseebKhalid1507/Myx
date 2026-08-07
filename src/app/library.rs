@@ -171,6 +171,20 @@ pub(crate) struct Detail {
     pub(crate) parent_selected: usize,
 }
 
+pub(crate) fn filter_detail_items(items: &[LibItem], query: &str) -> Vec<LibItem> {
+    let query = query.trim().to_lowercase();
+    items
+        .iter()
+        .filter(|item| {
+            item.is_track
+                && (query.is_empty()
+                    || item.name.to_lowercase().contains(&query)
+                    || item.subtitle.to_lowercase().contains(&query))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Result of activating (Enter on) a library item.
 pub(crate) enum Activated {
     None,

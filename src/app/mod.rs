@@ -59,7 +59,7 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn cur_items(&self) -> &[LibItem] {
         if let Some(d) = self.browse.details.last() {
-            &d.items
+            self.search.playlist_results.as_deref().unwrap_or(&d.items)
         } else if self.search.searching {
             &self.search.search_results
         } else {
@@ -67,8 +67,12 @@ impl App {
         }
     }
     pub(crate) fn cur_list_mut(&mut self) -> &mut Vec<LibItem> {
-        if let Some(d) = self.browse.details.last_mut() {
-            &mut d.items
+        if !self.browse.details.is_empty() {
+            if let Some(results) = self.search.playlist_results.as_mut() {
+                return results;
+            }
+            let last = self.browse.details.len() - 1;
+            &mut self.browse.details[last].items
         } else if self.search.searching {
             &mut self.search.search_results
         } else {
@@ -110,6 +114,22 @@ impl App {
         {
             self.browse.selected = self.first_selectable();
         }
+    }
+
+    pub(crate) fn in_playlist(&self) -> bool {
+        self.browse
+            .details
+            .last()
+            .is_some_and(|d| d.context_uri.starts_with("spotify:playlist:"))
+    }
+
+    pub(crate) fn filter_playlist(&mut self) {
+        let Some(detail) = self.browse.details.last() else {
+            return;
+        };
+        let results = filter_detail_items(&detail.items, self.search.query());
+        self.search.playlist_results = Some(results);
+        self.browse.selected = self.first_selectable();
     }
     /// The single entry point for "play this context URI".
     ///

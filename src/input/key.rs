@@ -39,11 +39,20 @@ pub(crate) fn handle_key(
                 app.search.input_mode = false;
                 let q = app.search.query().trim().to_string();
                 if !q.is_empty() {
-                    app.search.searching = true;
-                    app.search.in_flight = true;
-                    app.browse.selected = 0;
-                    app.status = "searching…".to_string();
-                    spawn_search(app.svc.webapi.clone(), q, chans.search.clone());
+                    if app.in_playlist() {
+                        app.filter_playlist();
+                        app.status = if app.cur_items().is_empty() {
+                            "no matching tracks".to_string()
+                        } else {
+                            String::new()
+                        };
+                    } else {
+                        app.search.searching = true;
+                        app.search.in_flight = true;
+                        app.browse.selected = 0;
+                        app.status = "searching…".to_string();
+                        spawn_search(app.svc.webapi.clone(), q, chans.search.clone());
+                    }
                 }
             }
             // Ctrl-U clears the query — readline muscle memory. The fork
@@ -76,7 +85,10 @@ pub(crate) fn handle_key(
         }
         KeyCode::Char('q') => return true,
         KeyCode::Esc => {
-            if let Some(d) = app.browse.details.pop() {
+            if app.search.playlist_results.take().is_some() {
+                app.search.clear();
+                app.browse.selected = app.first_selectable();
+            } else if let Some(d) = app.browse.details.pop() {
                 app.browse.selected = d.parent_selected;
             } else if app.search.searching {
                 app.search.searching = false;
@@ -86,7 +98,15 @@ pub(crate) fn handle_key(
         }
         KeyCode::Char(' ') | KeyCode::Char('p') | KeyCode::Media(MediaKeyCode::PlayPause) => {
             if app.transport.playback_started {
-                let _ = app.svc.engine.toggle();
+                let playing = app.playback.now.as_ref().is_some_and(|now| now.is_playing);
+                let result = if playing {
+                    app.svc.engine.pause()
+                } else {
+                    app.svc.engine.play()
+                };
+                if result.is_ok() {
+                    app.playback.set_playing_locally(!playing);
+                }
             } else if app.session.reclaimed {
                 // Resume the reclaimed server-side context (full queue intact).
                 let _ = app.svc.engine.play();
@@ -166,6 +186,7 @@ pub(crate) fn handle_key(
             if let Some(item) = item {
                 if !item.is_header && !item.is_play {
                     // Instant menu (no network), then enrich when the API returns.
+                    app.view.action_anchor = None;
                     app.view.actions = Some(build_action_menu(None, &item));
                     spawn_action_menu(app.svc.webapi.clone(), item, chans.menu.clone());
                 }
@@ -191,7 +212,7 @@ pub(crate) fn handle_key(
         }
         KeyCode::Right => {
             app.view.mode = app.view.mode.shift(1);
-            if app.view.mode == RightView::Queue
+            if matches!(app.view.mode, RightView::NowPlaying | RightView::Queue)
                 && (app.session.reclaimed || app.transport.playback_started)
             {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
@@ -199,7 +220,7 @@ pub(crate) fn handle_key(
         }
         KeyCode::Left => {
             app.view.mode = app.view.mode.shift(-1);
-            if app.view.mode == RightView::Queue
+            if matches!(app.view.mode, RightView::NowPlaying | RightView::Queue)
                 && (app.session.reclaimed || app.transport.playback_started)
             {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
@@ -213,6 +234,7 @@ pub(crate) fn handle_key(
         KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) => play_selected_context(app, false),
         KeyCode::Enter => match app.activate() {
             Activated::Open(uri, name) => {
+                app.search.playlist_results = None;
                 spawn_detail_fetch(app.svc.webapi.clone(), uri, name, chans.detail.clone());
             }
             Activated::Radio(uri) => {
