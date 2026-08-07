@@ -74,9 +74,23 @@ pub(crate) struct BrowseState {
 /// query, and the results that temporarily replace the library list.
 pub(crate) struct SearchState {
     pub(crate) input_mode: bool,
-    pub(crate) query: String,
+    // The prompt's editor. Read through `query()`, reset through `clear()`.
+    pub(crate) input: tui_textarea::TextArea<'static>,
     pub(crate) searching: bool,
     pub(crate) search_results: Vec<LibItem>,
+}
+
+impl SearchState {
+    /// The typed query. First line only — the prompt is single-line (Enter is
+    /// intercepted), so this also defuses any newline a paste might smuggle in.
+    pub(crate) fn query(&self) -> &str {
+        self.input.lines().first().map_or("", String::as_str)
+    }
+
+    /// Empty the editor (fresh buffer, cursor at column 0).
+    pub(crate) fn clear(&mut self) {
+        self.input = tui_textarea::TextArea::default();
+    }
 }
 
 /// What the user is looking at: the right pane's mode, the zen (sidebar

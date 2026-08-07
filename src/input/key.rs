@@ -37,7 +37,7 @@ pub(crate) fn handle_key(
             KeyCode::Esc => app.search.input_mode = false,
             KeyCode::Enter => {
                 app.search.input_mode = false;
-                let q = app.search.query.trim().to_string();
+                let q = app.search.query().trim().to_string();
                 if !q.is_empty() {
                     app.search.searching = true;
                     app.browse.selected = 0;
@@ -45,11 +45,18 @@ pub(crate) fn handle_key(
                     spawn_search(app.svc.webapi.clone(), q, chans.search.clone());
                 }
             }
-            KeyCode::Backspace => {
-                app.search.query.pop();
+            // Ctrl-U clears the query — readline muscle memory. The fork
+            // binds Ctrl-U to undo; shadow it (same call as agent-runtime).
+            KeyCode::Char('u') if mods.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                app.search.clear();
             }
-            KeyCode::Char(c) => app.search.query.push(c),
-            _ => {}
+            // Everything else — typing, cursor movement, word ops — is the
+            // editor's business. Enter is intercepted above, so no newlines.
+            _ => {
+                app.search
+                    .input
+                    .input(crossterm::event::KeyEvent::new(code, mods));
+            }
         }
         return false;
     }
@@ -64,7 +71,7 @@ pub(crate) fn handle_key(
     match code {
         KeyCode::Char('/') => {
             app.search.input_mode = true;
-            app.search.query.clear();
+            app.search.clear();
         }
         KeyCode::Char('q') => return true,
         KeyCode::Esc => {
