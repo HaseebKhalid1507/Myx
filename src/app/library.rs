@@ -24,7 +24,7 @@ impl RightView {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Section {
     Home,
     Recent,
@@ -186,6 +186,11 @@ pub(crate) struct Library {
     pub(crate) liked: Vec<LibItem>,
     pub(crate) albums: Vec<LibItem>,
     pub(crate) artists: Vec<LibItem>,
+    // Sections that have received a delivery since boot / the last refresh.
+    // An undelivered section is *loading*, not empty — the UI renders the
+    // difference (issue #25). Lives here because `set` is the one delivery
+    // point for every section.
+    loaded: std::collections::HashSet<Section>,
 }
 
 impl Library {
@@ -210,6 +215,7 @@ impl Library {
         }
     }
     pub(crate) fn set(&mut self, s: Section, items: Vec<LibItem>) {
+        self.loaded.insert(s);
         match s {
             Section::Home => self.home = items,
             Section::Recent => self.recent = items,
@@ -217,6 +223,50 @@ impl Library {
             Section::Liked => self.liked = items,
             Section::Albums => self.albums = items,
             Section::Artists => self.artists = items,
+        }
+    }
+
+    /// Has this section received a delivery since boot / the last refresh?
+    pub(crate) fn is_loaded(&self, s: Section) -> bool {
+        self.loaded.contains(&s)
+    }
+
+    /// A refresh is starting: sections are loading again. Existing items keep
+    /// rendering; only *empty* sections fall back to the loading label.
+    pub(crate) fn reset_loading(&mut self) {
+        self.loaded.clear();
+    }
+
+    /// The fetch gave up (retries exhausted). Mark everything delivered so
+    /// empty sections read "(empty)" honestly — the status line carries the
+    /// failure message.
+    pub(crate) fn mark_all_loaded(&mut self) {
+        self.loaded.extend(Section::ALL);
+    }
+}
+
+#[cfg(test)]
+mod loaded_tracking_tests {
+    use super::*;
+
+    #[test]
+    fn sections_start_unloaded_and_load_on_delivery() {
+        let mut lib = Library::default();
+        assert!(!lib.is_loaded(Section::Liked));
+        lib.set(Section::Liked, Vec::new()); // empty delivery still counts
+        assert!(lib.is_loaded(Section::Liked));
+        assert!(!lib.is_loaded(Section::Albums)); // others untouched
+    }
+
+    #[test]
+    fn refresh_resets_and_failure_marks_all() {
+        let mut lib = Library::default();
+        lib.set(Section::Home, Vec::new());
+        lib.reset_loading();
+        assert!(!lib.is_loaded(Section::Home));
+        lib.mark_all_loaded();
+        for s in Section::ALL {
+            assert!(lib.is_loaded(s));
         }
     }
 }
