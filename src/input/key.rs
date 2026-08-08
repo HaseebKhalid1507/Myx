@@ -87,12 +87,8 @@ pub(crate) fn handle_key(
         KeyCode::Char(' ') | KeyCode::Char('p') | KeyCode::Media(MediaKeyCode::PlayPause) => {
             if app.transport.playback_started {
                 let _ = app.svc.engine.toggle();
-            } else if app.session.reclaimed {
-                // Resume the reclaimed server-side context (full queue intact).
-                let _ = app.svc.engine.play();
-                app.transport.playback_started = true;
             } else {
-                // No live session — resume the persisted source (context/radio/liked).
+                // Resume the persisted source (context/radio/liked).
                 resume_source(app, &chans.radio);
                 app.transport.playback_started = true;
             }
@@ -191,17 +187,13 @@ pub(crate) fn handle_key(
         }
         KeyCode::Right => {
             app.view.mode = app.view.mode.shift(1);
-            if app.view.mode == RightView::Queue
-                && (app.session.reclaimed || app.transport.playback_started)
-            {
+            if app.view.mode == RightView::Queue && app.transport.playback_started {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         KeyCode::Left => {
             app.view.mode = app.view.mode.shift(-1);
-            if app.view.mode == RightView::Queue
-                && (app.session.reclaimed || app.transport.playback_started)
-            {
+            if app.view.mode == RightView::Queue && app.transport.playback_started {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
