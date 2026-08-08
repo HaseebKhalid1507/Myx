@@ -91,6 +91,29 @@ fn active_scrub_rejects_stale_engine_position() {
     assert!(should_apply_engine_position(false, Some(42_000)));
 }
 
+#[test]
+fn startup_restore_requires_the_setting_and_a_saved_track() {
+    let mut saved = SavedState::default();
+    assert!(!should_restore_saved_playback(true, None, &saved));
+
+    saved.last_played = Some(LastPlayed::default());
+    assert!(should_restore_saved_playback(true, None, &saved));
+    assert!(!should_restore_saved_playback(false, None, &saved));
+}
+
+#[test]
+fn explicit_startup_uri_wins_over_the_saved_track() {
+    let saved = SavedState {
+        last_played: Some(LastPlayed::default()),
+        ..SavedState::default()
+    };
+    assert!(!should_restore_saved_playback(
+        true,
+        Some("spotify:album:1"),
+        &saved,
+    ));
+}
+
 // -------------------------------------------------------- context_target
 
 #[test]

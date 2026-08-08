@@ -30,12 +30,8 @@ pub(crate) fn handle_media_control_event(
         MediaControlEvent::Toggle => {
             if app.transport.playback_started {
                 let _ = app.svc.engine.toggle();
-            } else if app.session.reclaimed {
-                // Resume the reclaimed server-side context (full queue intact).
-                let _ = app.svc.engine.play();
-                app.transport.playback_started = true;
             } else {
-                // No live session — resume the persisted source (context/radio/liked).
+                // Resume the persisted source (context/radio/liked).
                 resume_source(app, radio_tx);
                 app.transport.playback_started = true;
             }
@@ -43,12 +39,8 @@ pub(crate) fn handle_media_control_event(
         MediaControlEvent::Play => {
             if app.transport.playback_started {
                 let _ = app.svc.engine.play();
-            } else if app.session.reclaimed {
-                // Resume the reclaimed server-side context (full queue intact).
-                let _ = app.svc.engine.play();
-                app.transport.playback_started = true;
             } else {
-                // No live session — resume the persisted source (context/radio/liked).
+                // Resume the persisted source (context/radio/liked).
                 resume_source(app, radio_tx);
                 app.transport.playback_started = true;
             }

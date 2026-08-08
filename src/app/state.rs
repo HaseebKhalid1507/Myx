@@ -112,17 +112,14 @@ pub(crate) struct ViewState {
     pub(crate) actions: Option<ActionMenu>,
 }
 
-/// Cross-cutting session bookkeeping: what we resumed into, which metadata
-/// fetch is still in flight, and the input timestamps that make Ctrl-C and
-/// double-click work.
+/// Cross-cutting session bookkeeping: which metadata fetch is still in flight
+/// and the input timestamps that make Ctrl-C and double-click work.
 pub(crate) struct SessionState {
     pub(crate) restore_uri: Option<String>,
     // Track URI whose metadata was last requested. Fetches run on separate
     // blocking tasks and can land out of order when skipping quickly, so a
     // reply for any other track is stale and must be dropped.
     pub(crate) pending_meta: Option<String>,
-    // Whether we reclaimed a live server-side session (vs. local fallback).
-    pub(crate) reclaimed: bool,
     // Timestamp of last Ctrl-C — a second press within 1.5s quits.
     pub(crate) last_ctrl_c: Option<Instant>,
     pub(crate) last_click: Option<(u16, Instant)>,

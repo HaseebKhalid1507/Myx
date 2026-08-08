@@ -10,6 +10,8 @@ use std::sync::OnceLock;
 pub struct Config {
     /// Rows kept visible above and below the list cursor, like vim's `scrolloff`.
     pub scrolloff: usize,
+    /// Resume the locally saved track, source and position when Myx starts.
+    pub restore_on_startup: bool,
     /// Spotify app client id. `MYX_CLIENT_ID` takes precedence.
     pub client_id: Option<String>,
     /// Terminal graphics protocol: kitty, iterm2, sixel or halfblocks. Set this
@@ -22,6 +24,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             scrolloff: 3,
+            restore_on_startup: true,
             client_id: None,
             protocol: None,
         }
@@ -42,6 +45,9 @@ const TEMPLATE: &str = "\
 
 # Rows kept visible above and below the list cursor, like vim's scrolloff.
 #scrolloff = 3
+
+# Resume the locally saved track, source and position when Myx starts.
+#restore_on_startup = true
 
 # Spotify app client id. MYX_CLIENT_ID overrides this if it is set.
 #client_id = \"\"
@@ -91,13 +97,16 @@ mod tests {
     fn empty_config_is_all_defaults() {
         let c = Config::parse("").expect("empty toml is valid");
         assert_eq!(c.scrolloff, 3);
+        assert!(c.restore_on_startup);
         assert!(c.client_id.is_none());
     }
 
     #[test]
     fn reads_keys() {
-        let c = Config::parse("scrolloff = 5\nclient_id = \"abc\"").expect("valid toml");
+        let c = Config::parse("scrolloff = 5\nrestore_on_startup = false\nclient_id = \"abc\"")
+            .expect("valid toml");
         assert_eq!(c.scrolloff, 5);
+        assert!(!c.restore_on_startup);
         assert_eq!(c.client_id.as_deref(), Some("abc"));
     }
 
@@ -120,6 +129,7 @@ mod tests {
         let c = Config::parse(TEMPLATE).expect("template is valid toml");
         let d = Config::default();
         assert_eq!(c.scrolloff, d.scrolloff);
+        assert_eq!(c.restore_on_startup, d.restore_on_startup);
         assert!(c.client_id.is_none());
         assert!(c.protocol.is_none());
     }

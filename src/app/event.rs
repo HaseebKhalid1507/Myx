@@ -59,7 +59,6 @@ pub(crate) fn handle_engine_event(
             app.transport.playback_started = false;
             // librespot cleared its context too, so only a fresh load can
             // resume from here — not a bare `play`.
-            app.session.reclaimed = false;
 
             if let Some(controls) = app.media_controls.as_mut() {
                 let _ = controls.set_playback(MediaPlayback::Stopped);
