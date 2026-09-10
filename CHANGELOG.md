@@ -6,6 +6,11 @@ they are added to, never rewritten.
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS: launching myx no longer takes keyboard focus from the terminal. The
+  media-key event loop activated its windowless app at launch, so keys went
+  nowhere until you switched apps and back.
 
 ## [0.5.0] — 2026-09-09
 

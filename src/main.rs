@@ -208,9 +208,11 @@ fn run_player_macos(
         }
     }
 
-    // Accessory keeps myx out of the Dock and the app switcher.
+    // Accessory keeps myx out of the Dock and the app switcher. Activating at
+    // launch would take keyboard focus from the terminal running us.
     let event_loop = match EventLoop::<PlayerDone>::with_user_event()
         .with_activation_policy(ActivationPolicy::Accessory)
+        .with_activate_ignoring_other_apps(false)
         .build()
     {
         Ok(event_loop) => event_loop,
