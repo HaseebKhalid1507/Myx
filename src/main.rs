@@ -414,8 +414,8 @@ async fn boot(
             seek_last_input: Instant::now(),
         },
         theme: ThemeState {
-            displayed: TOKYONIGHT,
-            target: TOKYONIGHT,
+            displayed: startup_theme(),
+            target: startup_theme(),
             fade: None,
         },
         status: "loading library…".to_string(),

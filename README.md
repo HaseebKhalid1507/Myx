@@ -72,13 +72,28 @@ space      play · pause          n / b    next · prev
 + / -      volume                R        repeat
 o          sort                  r        reload
 z          hide sidebar          e        equalizer
-q          quit
+q          quit                  T        transparent background
 ```
 
 Media keys (Play/Pause, Stop, Next, Prev, Volume) work when the terminal is
 focused. On macOS and Linux, AirPods and headphone controls work from anywhere
 via the system's Now Playing integration. Mouse works too: click tabs, click a
 track, double-click to play.
+
+## Transparent background
+
+myx can leave the background to your terminal, so its own colour, opacity and
+blur show through while the text, accents and borders keep following the album
+art. The selected row and popups stay on a solid fill so they still read.
+
+- **Press `T`** (Shift+t) to flip between the transparent and the album-tinted
+  background. The choice is saved to `~/.config/myx/config.toml`, so it sticks.
+- **Or set it by hand**: `transparent = true` or `false` in the same file.
+
+New installs start transparent. A config written by an older myx has no
+`transparent` line and keeps the album-tinted background until you press `T`.
+How see-through it gets is up to the terminal — WezTerm's
+`window_background_opacity`, kitty's `background_opacity`, and so on.
 
 ## Equalizer
 
@@ -99,8 +114,8 @@ inside tmux. If your tmux has no sixel support, add `set -g focus-events on` to
 
 ## Config
 
-`~/.config/myx/config.toml` is written on first run with every key commented
-out, so there is a file to edit and nothing to look up:
+`~/.config/myx/config.toml` is written on first run with every key but
+`transparent` commented out, so there is a file to edit and nothing to look up:
 
 ```toml
 # Rows kept visible above and below the cursor before the list scrolls.
@@ -125,6 +140,11 @@ bitrate = 160
 # Even out loudness across tracks, the equivalent of the official client's
 # "Normalize volume". Leave it off to keep each track's own dynamics.
 normalize_volume = false
+
+# Leave the background to the terminal — its own colour, opacity and blur —
+# instead of the album-tinted one. Text and accents still follow the cover.
+# Press T in myx to flip it; this line is rewritten when you do.
+transparent = true
 ```
 
 ## Credits

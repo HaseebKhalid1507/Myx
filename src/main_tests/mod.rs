@@ -4,6 +4,7 @@
 mod nav;
 mod playlist;
 mod search;
+mod theme;
 
 /// Live-API tests, `#[ignore]`d so `cargo test` stays offline:
 ///

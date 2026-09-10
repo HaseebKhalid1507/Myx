@@ -6,6 +6,16 @@ they are added to, never rewritten.
 
 ## [Unreleased]
 
+### Added
+
+- **Transparent background**, `transparent` in `config.toml` and `T` to flip
+  it. The screen and panel backgrounds are left to the terminal — its own
+  colour, opacity and blur — instead of the album-tinted fill; the selected row
+  and popups keep theirs so they still read. Text, accents and borders still
+  follow the cover. New installs start transparent. An existing config keeps
+  the album background until you press `T`, which rewrites that one line and
+  leaves the rest of the file alone.
+
 ### Fixed
 
 - macOS: launching myx no longer takes keyboard focus from the terminal. The
