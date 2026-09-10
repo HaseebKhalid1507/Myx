@@ -13,6 +13,10 @@ they are added to, never rewritten.
   nowhere until you switched apps and back.
 - Startup no longer starts playing on its own. `restore_on_startup` puts the
   saved track back on screen paused, and the first play press resumes it.
+- Album art no longer blinks inside tmux. Ending a synchronized update makes
+  tmux redraw the whole pane and send the image again, every frame; inside
+  tmux frames are now written without one.
+
 
 ## [0.5.0] — 2026-09-09
 
