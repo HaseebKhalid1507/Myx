@@ -11,7 +11,8 @@ use std::sync::OnceLock;
 pub struct Config {
     /// Rows kept visible above and below the list cursor, like vim's `scrolloff`.
     pub scrolloff: usize,
-    /// Resume the locally saved track, source and position when Myx starts.
+    /// Show the locally saved track, source and position when Myx starts,
+    /// paused until the first play press.
     pub restore_on_startup: bool,
     /// Spotify app client id. `MYX_CLIENT_ID` takes precedence.
     pub client_id: Option<String>,
@@ -58,7 +59,8 @@ const TEMPLATE: &str = "\
 # Rows kept visible above and below the list cursor, like vim's scrolloff.
 #scrolloff = 3
 
-# Resume the locally saved track, source and position when Myx starts.
+# Show the locally saved track, source and position when Myx starts, paused
+# until you press play.
 #restore_on_startup = true
 
 # Spotify app client id. MYX_CLIENT_ID overrides this if it is set.

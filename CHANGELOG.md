@@ -11,6 +11,8 @@ they are added to, never rewritten.
 - macOS: launching myx no longer takes keyboard focus from the terminal. The
   media-key event loop activated its windowless app at launch, so keys went
   nowhere until you switched apps and back.
+- Startup no longer starts playing on its own. `restore_on_startup` puts the
+  saved track back on screen paused, and the first play press resumes it.
 
 ## [0.5.0] — 2026-09-09
 

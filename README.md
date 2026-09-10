@@ -106,7 +106,8 @@ out, so there is a file to edit and nothing to look up:
 # Rows kept visible above and below the cursor before the list scrolls.
 scrolloff = 3
 
-# Resume the locally saved track, source and position when Myx starts.
+# Show the locally saved track, source and position when Myx starts, paused
+# until you press play.
 restore_on_startup = true
 
 # Spotify app client id. MYX_CLIENT_ID overrides this if it is set.

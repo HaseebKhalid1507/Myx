@@ -533,11 +533,6 @@ async fn run_ui(
         chans.libdone.clone(),
     );
 
-    if app.playback.now.is_some() {
-        resume_source(&mut app, &chans.radio);
-        app.transport.playback_started = true;
-    }
-
     // Re-enrich the restored last-played track (cover / theme / lyrics).
     if let Some(uri) = app.session.restore_uri.take() {
         if let Some(id) = track_id_from_uri(&uri) {
@@ -562,6 +557,12 @@ async fn run_ui(
         }
     }
     let mut media_events_open = true;
+    // A restored track stays paused until the first play press resumes it.
+    if let (Some(now), Some(controls)) = (app.playback.now.as_ref(), app.media_controls.as_mut()) {
+        let _ = controls.set_playback(MediaPlayback::Paused {
+            progress: Some(MediaPosition(Duration::from_millis(now.position_ms as u64))),
+        });
+    }
 
     let mut lib_attempts: u32 = 0;
     // A persistent interval must live OUTSIDE the select loop. Recreating a
