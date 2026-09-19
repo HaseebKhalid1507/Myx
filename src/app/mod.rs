@@ -79,7 +79,7 @@ impl App {
     pub(crate) fn first_selectable(&self) -> usize {
         self.cur_items()
             .iter()
-            .position(|i| !i.is_header)
+            .position(|i| !i.is_header())
             .unwrap_or(0)
     }
     /// Move the selection by `dir`, skipping header rows, clamped at the ends.
@@ -95,7 +95,7 @@ impl App {
             if i < 0 || i >= n {
                 return;
             }
-            if !items[i as usize].is_header {
+            if !items[i as usize].is_header() {
                 self.browse.selected = i as usize;
                 return;
             }
@@ -106,7 +106,7 @@ impl App {
         if self
             .cur_items()
             .get(self.browse.selected)
-            .is_some_and(|i| i.is_header)
+            .is_some_and(|i| i.is_header())
         {
             self.browse.selected = self.first_selectable();
         }
@@ -133,10 +133,10 @@ impl App {
         let Some(item) = self.cur_items().get(self.browse.selected).cloned() else {
             return Activated::None;
         };
-        if item.is_header {
+        if item.is_header() {
             return Activated::None;
         }
-        if item.is_play {
+        if item.is_play() {
             // Special synthetic rows: play the Liked list (optionally shuffled).
             if item.uri == "myx:action:liked-play" {
                 let uris: Vec<String> = self
@@ -144,7 +144,7 @@ impl App {
                     .library
                     .liked
                     .iter()
-                    .filter(|i| i.is_track)
+                    .filter(|i| i.is_track())
                     .map(|i| i.uri.clone())
                     .collect();
                 if !uris.is_empty() {
@@ -174,7 +174,7 @@ impl App {
             self.play_context_row(item.uri, name, shuffle);
             return Activated::None;
         }
-        if item.is_track {
+        if item.is_track() {
             if self.search.searching {
                 // A search-result song starts that song's radio (seed + similar).
                 self.transport.source = PlaySource::Radio(item.uri.clone());
@@ -201,7 +201,7 @@ impl App {
             let uris = self
                 .cur_items()
                 .iter()
-                .filter(|i| i.is_track)
+                .filter(|i| i.is_track())
                 .map(|i| i.uri.clone())
                 .collect();
             self.status = format!("starting {}…", item.name);

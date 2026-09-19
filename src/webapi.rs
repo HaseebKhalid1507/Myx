@@ -15,6 +15,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
 use sha2::{Digest as _, Sha256};
 
+use crate::util::urlencode;
+
 const AUTHORIZE_URL: &str = "https://accounts.spotify.com/authorize";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 const REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
@@ -443,15 +445,3 @@ fn random_url_safe(n: usize) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}

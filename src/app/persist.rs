@@ -53,7 +53,15 @@ impl SavedState {
             let _ = std::fs::create_dir_all(dir);
         }
         if let Ok(json) = serde_json::to_string(self) {
-            let _ = std::fs::write(path, json);
+            // Write via a temporary file and rename, so a crash or kill mid-write
+            // can't leave a truncated state.json behind — that would lose the
+            // entire saved queue, position and equalizer curve.
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, json).is_ok() {
+                if std::fs::rename(&tmp, &path).is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                }
+            }
         }
     }
 }

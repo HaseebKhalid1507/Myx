@@ -136,7 +136,7 @@ pub(crate) fn render_library(
         };
 
         // Header rows: a bold section label (Home feed groups), not selectable.
-        if item.is_header {
+        if item.is_header() {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     item.name.clone(),
@@ -166,10 +166,10 @@ pub(crate) fn render_library(
         };
         // Mark rows that `P` can play outright (playlist / album / artist), so
         // they're distinguishable from tracks at a glance.
-        let playable_ctx = context_target(item).is_some() && !item.is_play;
+        let playable_ctx = context_target(item).is_some() && !item.is_play();
         // The currently playing track, wherever it appears in the list (#33).
         let now_here =
-            item.is_track && app.playback.now.as_ref().is_some_and(|n| n.uri == item.uri);
+            item.is_track() && app.playback.now.as_ref().is_some_and(|n| n.uri == item.uri);
         let max = if playable_ctx || now_here {
             max.saturating_sub(2)
         } else {
