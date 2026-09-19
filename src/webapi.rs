@@ -67,13 +67,82 @@ fn resolve_client_id() -> Result<String> {
             }
         }
     }
-    bail!(
-        "No Spotify client id found.\n\
-         Create a free app at https://developer.spotify.com/dashboard\n\
-         (add redirect URI http://127.0.0.1:8989/login), then either:\n\
-         \x20 export MYX_CLIENT_ID=<your-client-id>\n\
-         \x20 or write client_id = \"<your-client-id>\" to ~/.config/myx/config.toml"
-    )
+    // No id in any of the usual places — walk the user through first-run
+    // setup so they never have to read the README to get started.
+    prompt_and_save_client_id()
+}
+
+/// Interactive first-run helper: prints setup steps, reads a client id from
+/// stdin, and persists it to `config.toml` so future launches skip this.
+fn prompt_and_save_client_id() -> Result<String> {
+    eprintln!();
+    eprintln!("  No Spotify Client ID found. Let's set one up (takes ~1 minute).");
+    eprintln!();
+    eprintln!("  1. Open https://developer.spotify.com/dashboard");
+    eprintln!("  2. Click \"Create App\" — any name/description works.");
+    eprintln!("  3. Set the Redirect URI to: {REDIRECT_URI}");
+    eprintln!("  4. Save, then copy the Client ID shown on the app page.");
+    eprintln!();
+    eprint!("  Paste your Client ID here: ");
+    std::io::stderr().flush().ok();
+
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_line(&mut buf)
+        .context("failed to read from stdin")?;
+    let id = buf.trim().to_string();
+
+    if id.is_empty() {
+        bail!(
+            "No Client ID entered.\n\
+             Run myx again when you're ready, or set it manually:\n\
+             \x20 export MYX_CLIENT_ID=<your-client-id>\n\
+             \x20 or write client_id = \"<your-client-id>\" to ~/.config/myx/config.toml"
+        );
+    }
+
+    // Persist so the user is never asked again.
+    save_client_id_to_config(&id);
+    Ok(id)
+}
+
+/// Write `client_id = "…"` into `~/.config/myx/config.toml`. If the file
+/// already contains a (possibly commented-out) `client_id` line, replace it
+/// in place; otherwise append. Best-effort — a read-only home just means the
+/// user will be prompted again next launch.
+fn save_client_id_to_config(id: &str) {
+    let Some(path) = crate::config::Config::path() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+
+    let line = format!("client_id = \"{id}\"");
+    let contents = std::fs::read_to_string(&path).unwrap_or_default();
+
+    let updated = if contents.contains("client_id") {
+        // Replace the first (possibly commented) client_id line.
+        contents
+            .lines()
+            .map(|l| {
+                if l.trim_start().starts_with("client_id")
+                    || l.trim_start().starts_with("#client_id")
+                {
+                    line.as_str()
+                } else {
+                    l
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    } else {
+        format!("{contents}\n{line}\n")
+    };
+
+    if std::fs::write(&path, &updated).is_ok() {
+        eprintln!("  ✔ Saved to {}", path.display());
+        eprintln!();
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
