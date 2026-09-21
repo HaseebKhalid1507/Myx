@@ -53,6 +53,9 @@ pub(crate) struct Transport {
     pub(crate) queue_uris: Vec<String>,
     // Whether real playback has started this session (gates resume-on-play).
     pub(crate) playback_started: bool,
+    // Audio was playing when the access point dropped, so the replacement
+    // Connect device should pick the source back up once it is ready.
+    pub(crate) resume_after_reconnect: bool,
     // What's playing (context/radio/liked), for faithful resume on reboot.
     pub(crate) source: PlaySource,
     pub(crate) source_name: String,

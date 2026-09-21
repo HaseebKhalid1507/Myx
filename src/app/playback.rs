@@ -79,6 +79,20 @@ impl PlaybackState {
             None => 0,
         }
     }
+    /// Stop the playhead where it is, keeping the extrapolated position, and
+    /// report whether it had been playing. For when the audio stops without
+    /// the engine saying so — a dropped connection takes its player with it.
+    pub(crate) fn freeze(&mut self) -> bool {
+        let position_ms = self.position_ms();
+        let Some(n) = self.now.as_mut() else {
+            return false;
+        };
+        let was_playing = n.is_playing;
+        n.is_playing = false;
+        n.position_ms = position_ms;
+        n.position_at = Instant::now();
+        was_playing
+    }
     /// Move the progress bar, without telling the engine. Reports from the
     /// engine are ignored mid-scrub — what we painted is newer than anything
     /// librespot has heard about.
@@ -130,5 +144,57 @@ impl PlaybackState {
         if let Some(target) = self.seek_target.take() {
             self.seek_to(engine, target);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn playing_at(position_ms: u32, since: Duration) -> PlaybackState {
+        let now = Instant::now();
+        PlaybackState {
+            now: Some(NowPlaying {
+                uri: "spotify:track:x".to_string(),
+                title: String::new(),
+                artist: String::new(),
+                album: String::new(),
+                duration_ms: 200_000,
+                position_ms,
+                position_at: now - since,
+                is_playing: true,
+                cover: None,
+            }),
+            seek_target: None,
+            seek_last_step: now,
+            seek_last_input: now,
+        }
+    }
+
+    #[test]
+    fn freezing_keeps_the_position_and_stops_the_clock() {
+        let mut playback = playing_at(10_000, Duration::from_secs(5));
+        assert!(playback.freeze());
+        let frozen = playback.position_ms();
+        assert!((15_000..16_000).contains(&frozen), "{frozen}");
+        // Stopped means stopped: time passing must not move it any further.
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(playback.position_ms(), frozen);
+    }
+
+    #[test]
+    fn freezing_again_reports_nothing_was_playing() {
+        // The watchdog repeats `Reconnecting` for every failed attempt; only
+        // the first can have interrupted audio.
+        let mut playback = playing_at(0, Duration::ZERO);
+        assert!(playback.freeze());
+        assert!(!playback.freeze());
+    }
+
+    #[test]
+    fn freezing_nothing_is_a_no_op() {
+        let mut playback = playing_at(0, Duration::ZERO);
+        playback.now = None;
+        assert!(!playback.freeze());
     }
 }
