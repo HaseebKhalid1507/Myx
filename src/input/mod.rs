@@ -8,11 +8,13 @@
 //! came from.
 
 mod actions;
+mod equalizer;
 mod key;
 mod media;
 mod mouse;
 
 pub(crate) use actions::*;
+pub(crate) use equalizer::*;
 pub(crate) use key::*;
 pub(crate) use media::*;
 pub(crate) use mouse::*;

@@ -63,17 +63,30 @@ impl Section {
     }
 }
 
-/// A library entry. Behavior on Enter is driven by the flags:
-/// header = non-selectable label; track = play as a track list; play = play this
-/// URI as a context; otherwise = open (drill into) this context.
+/// What kind of thing a library row represents. Replaces the old
+/// `is_track` / `is_header` / `is_play` boolean triple — only one of the four
+/// states was ever true at a time, but booleans couldn't enforce that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ItemKind {
+    /// A playable track (song / episode).
+    Track,
+    /// A non-selectable section label (e.g. "Popular", "Albums").
+    Header,
+    /// A synthetic "▶︎ Play …" row that plays its URI as a context.
+    Play,
+    /// A navigable context: playlist, album, or artist.
+    Context,
+}
+
+/// A library entry. Behavior on Enter is driven by the `kind` field:
+/// Header = non-selectable label; Track = play as a track list; Play = play this
+/// URI as a context; Context = open (drill into) this context.
 #[derive(Clone)]
 pub(crate) struct LibItem {
     pub(crate) name: String,
     pub(crate) subtitle: String,
     pub(crate) uri: String,
-    pub(crate) is_track: bool,
-    pub(crate) is_header: bool,
-    pub(crate) is_play: bool,
+    pub(crate) kind: ItemKind,
     pub(crate) order: u32, // original fetch position (for the "Added" sort)
 }
 
@@ -83,9 +96,7 @@ impl LibItem {
             name,
             subtitle,
             uri,
-            is_track: true,
-            is_header: false,
-            is_play: false,
+            kind: ItemKind::Track,
             order: 0,
         }
     }
@@ -94,9 +105,7 @@ impl LibItem {
             name,
             subtitle,
             uri,
-            is_track: false,
-            is_header: false,
-            is_play: false,
+            kind: ItemKind::Context,
             order: 0,
         }
     }
@@ -105,9 +114,7 @@ impl LibItem {
             name,
             subtitle: String::new(),
             uri,
-            is_track: false,
-            is_header: false,
-            is_play: true,
+            kind: ItemKind::Play,
             order: 0,
         }
     }
@@ -116,11 +123,22 @@ impl LibItem {
             name: name.to_string(),
             subtitle: String::new(),
             uri: String::new(),
-            is_track: false,
-            is_header: true,
-            is_play: false,
+            kind: ItemKind::Header,
             order: 0,
         }
+    }
+
+    /// Convenience: is this row a playable track?
+    pub(crate) fn is_track(&self) -> bool {
+        self.kind == ItemKind::Track
+    }
+    /// Convenience: is this row a non-selectable header?
+    pub(crate) fn is_header(&self) -> bool {
+        self.kind == ItemKind::Header
+    }
+    /// Convenience: is this row a synthetic "Play" action?
+    pub(crate) fn is_play(&self) -> bool {
+        self.kind == ItemKind::Play
     }
 }
 
@@ -153,7 +171,7 @@ impl SortMode {
 pub(crate) fn sort_list(items: &mut [LibItem], mode: SortMode) {
     let pin = items
         .iter()
-        .take_while(|i| i.is_header || i.is_play)
+        .take_while(|i| i.is_header() || i.is_play())
         .count();
     let tail = &mut items[pin..];
     match mode {

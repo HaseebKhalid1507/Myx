@@ -77,7 +77,7 @@ fn live_artist_top_tracks_are_not_empty() {
         println!("  {} · {}", r.name, r.subtitle);
     }
     assert!(!rows.is_empty(), "the Popular section came back empty");
-    assert!(rows.iter().all(|r| r.is_track));
+    assert!(rows.iter().all(|r| r.is_track()));
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn live_artist_albums_page_past_the_first_ten() {
         "expected a paged discography, got {}",
         rows.len()
     );
-    assert!(rows.iter().all(|r| !r.is_track && !r.is_header));
+    assert!(rows.iter().all(|r| !r.is_track() && !r.is_header()));
     // Newest first.
     let years: Vec<&str> = rows.iter().map(|r| r.subtitle.as_str()).collect();
     assert!(
@@ -117,7 +117,7 @@ fn live_artist_detail_has_both_sections() {
         fetch_detail_blocking(&token, &format!("spotify:artist:{ARTIST_ID}"), ARTIST_NAME);
     let headers: Vec<&str> = items
         .iter()
-        .filter(|i| i.is_header)
+        .filter(|i| i.is_header())
         .map(|i| i.name.as_str())
         .collect();
     println!("{title}: {} rows, headers {headers:?}", items.len());

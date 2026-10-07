@@ -82,13 +82,29 @@ pub(crate) fn handle_engine_event(
             }
         }
         EngineEvent::Reconnecting => {
+            // The old player is gone with the old connection, so the audio has
+            // already stopped. Stop the progress bar with it instead of letting
+            // it run on to the end of a track nobody is hearing.
+            if app.playback.freeze() {
+                app.transport.resume_after_reconnect = true;
+            }
             app.status = "connection dropped — reconnecting…".to_string();
         }
         EngineEvent::Reconnected => {
-            // The replacement Connect device starts idle, so whatever was
-            // playing is not resumed; say so rather than leave a silent player
-            // looking broken.
-            app.status = if app.transport.playback_started {
+            // The replacement device has nothing loaded: `toggle`/`next` on it
+            // are no-ops, so play must go back through the resume path. When
+            // audio was playing, the main loop resumes it right away.
+            let had_playback = std::mem::take(&mut app.transport.playback_started);
+            if let Some(controls) = app.media_controls.as_mut() {
+                let _ = controls.set_playback(MediaPlayback::Paused {
+                    progress: Some(MediaPosition(Duration::from_millis(
+                        app.playback.position_ms() as u64,
+                    ))),
+                });
+            }
+            app.status = if app.transport.resume_after_reconnect {
+                "reconnected — resuming…".to_string()
+            } else if had_playback {
                 "reconnected — press play to resume".to_string()
             } else {
                 "reconnected".to_string()
@@ -246,13 +262,13 @@ fn publish_theme(app: &App, theme: &Theme) {
 /// test. `enter_label` shares this predicate so Enter opens exactly the rows
 /// `P` plays.
 pub(crate) fn context_target(item: &LibItem) -> Option<(String, String)> {
-    (!item.is_header && !item.is_track).then(|| (item.uri.clone(), item.name.clone()))
+    (!item.is_header() && !item.is_track()).then(|| (item.uri.clone(), item.name.clone()))
 }
 
 /// Enter opens context rows and plays everything else.
 pub(crate) fn enter_label(item: Option<&LibItem>) -> &'static str {
     match item {
-        Some(i) if !i.is_track && !i.is_header => "open",
+        Some(i) if !i.is_track() && !i.is_header() => "open",
         _ => "select",
     }
 }

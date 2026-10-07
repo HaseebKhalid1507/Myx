@@ -22,14 +22,37 @@ pub(crate) struct ThemeState {
     pub(crate) fade: Option<ThemeFade>,
 }
 
+/// The palette before any cover has arrived, with the background as configured.
+pub(crate) fn startup_theme() -> Theme {
+    Theme {
+        transparent: myx::config::get().transparent,
+        ..TOKYONIGHT
+    }
+}
+
 impl ThemeState {
     pub(crate) fn start_fade(&mut self, to: Theme) {
+        // A cover's palette knows nothing of the config; the startup flag rides along.
+        let to = Theme {
+            transparent: self.target.transparent,
+            ..to
+        };
         self.fade = Some(ThemeFade::new(
             self.displayed,
             to,
             Duration::from_millis(FADE_MS),
         ));
         self.target = to;
+    }
+
+    /// Flip the background between the terminal's and the palette's. A running
+    /// fade is restarted towards the same palette so it lands with the new flag.
+    pub(crate) fn set_transparent(&mut self, on: bool) {
+        self.displayed.transparent = on;
+        self.target.transparent = on;
+        if self.fade.is_some() {
+            self.start_fade(self.target);
+        }
     }
 
     pub(crate) fn advance(&mut self) {
@@ -53,9 +76,15 @@ pub(crate) struct Transport {
     pub(crate) queue_uris: Vec<String>,
     // Whether real playback has started this session (gates resume-on-play).
     pub(crate) playback_started: bool,
+    // Audio was playing when the access point dropped, so the replacement
+    // Connect device should pick the source back up once it is ready.
+    pub(crate) resume_after_reconnect: bool,
     // What's playing (context/radio/liked), for faithful resume on reboot.
     pub(crate) source: PlaySource,
     pub(crate) source_name: String,
+    /// Local DSP state. Kept with the transport controls because it affects the
+    /// audio path and is persisted alongside volume/shuffle/repeat.
+    pub(crate) equalizer: EqualizerSettings,
 }
 
 /// The library browser: what's loaded, where the cursor is, and the drill-in
@@ -110,6 +139,13 @@ pub(crate) struct ViewState {
     pub(crate) lyrics_synced: bool,
     // Context actions menu overlay (opened with `a`).
     pub(crate) actions: Option<ActionMenu>,
+    // Ten-band equalizer overlay (opened with `e`).
+    pub(crate) equalizer: Option<EqualizerOverlay>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct EqualizerOverlay {
+    pub(crate) selected_band: usize,
 }
 
 /// Cross-cutting session bookkeeping: which metadata fetch is still in flight

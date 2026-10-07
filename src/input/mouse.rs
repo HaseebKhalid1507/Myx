@@ -10,6 +10,13 @@ pub(crate) fn handle_mouse(
     m: crossterm::event::MouseEvent,
     chans: &UiChannels,
 ) -> bool {
+    // The equalizer is modal: its own hit rects get first refusal and every
+    // other mouse event is swallowed so nothing hidden behind it moves.
+    if app.view.equalizer.is_some() {
+        handle_equalizer_mouse(app, out, m);
+        return false;
+    }
+
     if matches!(
         m.kind,
         MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
@@ -88,7 +95,7 @@ pub(crate) fn handle_mouse(
                     let selectable = app
                         .cur_items()
                         .get(idx)
-                        .map(|it| !it.is_header)
+                        .map(|it| !it.is_header())
                         .unwrap_or(false);
                     if selectable {
                         app.browse.selected = idx;

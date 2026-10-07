@@ -11,7 +11,7 @@
 //! hex values lifted straight from noodle's `theme-data.ts`.
 
 use crate::gradient::{lerp_color, Rgb};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 /// A complete semantic palette. Field names mirror noodle's `Theme` interface
 /// so cross-referencing is trivial.
@@ -44,6 +44,11 @@ pub struct Theme {
     pub border_active: Rgb,
     pub border_subtle: Rgb,
     pub border_dimmest: Rgb,
+
+    /// Leave the base and panel backgrounds to the terminal — its own colour,
+    /// opacity and blur — instead of painting the palette's. Selection and
+    /// popups keep their fill.
+    pub transparent: bool,
 }
 
 impl Theme {
@@ -54,6 +59,7 @@ impl Theme {
         let m = |a: Rgb, b: Rgb| lerp_color(a, b, t);
         Theme {
             name: to.name,
+            transparent: to.transparent,
             primary: m(from.primary, to.primary),
             secondary: m(from.secondary, to.secondary),
             accent: m(from.accent, to.accent),
@@ -78,22 +84,40 @@ impl Theme {
     /// Base canvas — the whole screen sits on this.
     pub fn base(&self) -> Style {
         Style::default()
-            .bg(self.background.into())
+            .bg(self.fill(self.background))
             .fg(self.text.into())
     }
 
     /// A pane surface — slightly elevated above the base.
     pub fn panel(&self) -> Style {
-        Style::default()
-            .bg(self.background_panel.into())
-            .fg(self.text.into())
+        Style::default().bg(self.panel_bg()).fg(self.text.into())
+    }
+
+    /// The pane fill on its own, for widgets that take a bare colour.
+    pub fn panel_bg(&self) -> Color {
+        self.fill(self.background_panel)
+    }
+
+    /// `Reset` is the terminal's default background, which is what shows
+    /// through when it has opacity or blur.
+    fn fill(&self, bg: Rgb) -> Color {
+        if self.transparent {
+            Color::Reset
+        } else {
+            bg.into()
+        }
     }
 
     /// A selected / active row — the top elevation layer.
     pub fn element(&self) -> Style {
-        Style::default()
-            .bg(self.background_element.into())
-            .fg(self.text.into())
+        Style::default().bg(self.element_bg()).fg(self.text.into())
+    }
+
+    /// The selection and popup fill on its own, for widgets that take a bare
+    /// colour. Opaque even when transparent, so a selection and a popup still
+    /// read over whatever is behind the terminal.
+    pub fn element_bg(&self) -> Color {
+        self.background_element.into()
     }
 
     /// De-emphasized text (secondary labels, inactive items).
@@ -145,6 +169,7 @@ pub const TOKYONIGHT: Theme = Theme {
     border_active: c(0x90, 0x99, 0xb2),
     border_subtle: c(0x54, 0x5c, 0x7e),
     border_dimmest: c(0x2a, 0x2c, 0x41),
+    transparent: false,
 };
 
 pub const CATPPUCCIN: Theme = Theme {
@@ -165,6 +190,7 @@ pub const CATPPUCCIN: Theme = Theme {
     border_active: c(0x58, 0x5b, 0x70),
     border_subtle: c(0x31, 0x32, 0x44),
     border_dimmest: c(0x31, 0x32, 0x44),
+    transparent: false,
 };
 
 pub const ROSEPINE: Theme = Theme {
@@ -185,6 +211,7 @@ pub const ROSEPINE: Theme = Theme {
     border_active: c(0x9c, 0xcf, 0xd8),
     border_subtle: c(0x21, 0x20, 0x2e),
     border_dimmest: c(0x25, 0x23, 0x38),
+    transparent: false,
 };
 
 pub const GRUVBOX: Theme = Theme {
@@ -205,7 +232,44 @@ pub const GRUVBOX: Theme = Theme {
     border_active: c(0xeb, 0xdb, 0xb2),
     border_subtle: c(0x50, 0x49, 0x45),
     border_dimmest: c(0x50, 0x49, 0x45),
+    transparent: false,
 };
 
 /// All built-in themes, in picker order.
 pub const THEMES: &[Theme] = &[TOKYONIGHT, CATPPUCCIN, ROSEPINE, GRUVBOX];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_transparent_theme_leaves_base_and_panel_to_the_terminal() {
+        let t = Theme {
+            transparent: true,
+            ..TOKYONIGHT
+        };
+        assert_eq!(t.base().bg, Some(Color::Reset));
+        assert_eq!(t.panel().bg, Some(Color::Reset));
+        assert_eq!(t.panel_bg(), Color::Reset);
+        // Selection and popups keep their fill so they still read over
+        // whatever is behind the terminal.
+        let element = TOKYONIGHT.background_element.into();
+        assert_eq!(t.element().bg, Some(element));
+        assert_eq!(t.element_bg(), element);
+    }
+
+    #[test]
+    fn an_opaque_theme_paints_its_palette() {
+        assert_eq!(TOKYONIGHT.base().bg, Some(TOKYONIGHT.background.into()));
+        assert_eq!(TOKYONIGHT.panel_bg(), TOKYONIGHT.background_panel.into());
+    }
+
+    #[test]
+    fn a_fade_carries_the_targets_transparency() {
+        let to = Theme {
+            transparent: true,
+            ..GRUVBOX
+        };
+        assert!(Theme::lerp(&TOKYONIGHT, &to, 0.0).transparent);
+    }
+}

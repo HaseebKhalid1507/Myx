@@ -1,7 +1,7 @@
 //! myx — the fully-wired terminal Spotify player.
 //!
 //! librespot streaming engine + Web API (your own client id) + album-art-reactive
-//! theming with cross-fades + live FFT visualizer, in noodle's visual language.
+//! theming with cross-fades + live equalizer/FFT visualizer, in noodle's visual language.
 //! Multi-section library (playlists / liked / albums / artists), shuffle, repeat,
 //! and a live queue view.
 
@@ -44,7 +44,10 @@ use api::*;
 use app::*;
 use input::*;
 use myx::anim::ThemeFade;
-use myx::audio::NUM_BANDS;
+use myx::audio::{
+    EqualizerPreset, EqualizerSettings, EQ_FREQUENCIES_HZ, MAX_EQ_GAIN_DB, MIN_EQ_GAIN_DB,
+    NUM_BANDS, NUM_EQ_BANDS,
+};
 use myx::components::{gradient_line, gradient_progress, left_bar_block};
 use myx::cover::Cover;
 use myx::engine::{self, Engine, EngineEvent};
@@ -205,9 +208,11 @@ fn run_player_macos(
         }
     }
 
-    // Accessory keeps myx out of the Dock and the app switcher.
+    // Accessory keeps myx out of the Dock and the app switcher. Activating at
+    // launch would take keyboard focus from the terminal running us.
     let event_loop = match EventLoop::<PlayerDone>::with_user_event()
         .with_activation_policy(ActivationPolicy::Accessory)
+        .with_activate_ignoring_other_apps(false)
         .build()
     {
         Ok(event_loop) => event_loop,
@@ -331,6 +336,8 @@ async fn boot(
     )
     .await?
     .context("start engine")?;
+    let equalizer = saved.equalizer.normalized();
+    engine.set_equalizer(equalizer);
 
     let webapi = Arc::new(Mutex::new(webapi));
 
@@ -407,8 +414,8 @@ async fn boot(
             seek_last_input: Instant::now(),
         },
         theme: ThemeState {
-            displayed: TOKYONIGHT,
-            target: TOKYONIGHT,
+            displayed: startup_theme(),
+            target: startup_theme(),
             fade: None,
         },
         status: "loading library…".to_string(),
@@ -430,8 +437,10 @@ async fn boot(
             queue,
             queue_uris,
             playback_started: startup_uri.is_some(),
+            resume_after_reconnect: false,
             source,
             source_name,
+            equalizer,
         },
         search: SearchState {
             input_mode: false,
@@ -446,6 +455,7 @@ async fn boot(
             lyrics: Vec::new(),
             lyrics_synced: false,
             actions: None,
+            equalizer: None,
         },
         session: SessionState {
             restore_uri,
@@ -524,11 +534,6 @@ async fn run_ui(
         chans.libdone.clone(),
     );
 
-    if app.playback.now.is_some() {
-        resume_source(&mut app, &chans.radio);
-        app.transport.playback_started = true;
-    }
-
     // Re-enrich the restored last-played track (cover / theme / lyrics).
     if let Some(uri) = app.session.restore_uri.take() {
         if let Some(id) = track_id_from_uri(&uri) {
@@ -553,6 +558,13 @@ async fn run_ui(
         }
     }
     let mut media_events_open = true;
+    // A restored track stays paused until the first play press resumes it.
+    if let (Some(now), Some(controls)) = (app.playback.now.as_ref(), app.media_controls.as_mut()) {
+        let _ = controls.set_playback(MediaPlayback::Paused {
+            progress: Some(MediaPosition(Duration::from_millis(now.position_ms as u64))),
+        });
+    }
+    let in_tmux = std::env::var_os("TMUX").is_some();
 
     let mut lib_attempts: u32 = 0;
     // A persistent interval must live OUTSIDE the select loop. Recreating a
@@ -567,6 +579,9 @@ async fn run_ui(
     let mut dirty = true;
     let mut last_layout = (app.view.mode, app.view.zen);
     let mut overlay_open = app.view.actions.is_some();
+    // A popup overwrites inline-image pixels. Replay the cached cover after the
+    // popup-free frame instead of blanking it for one visible frame first.
+    let mut restore_art = false;
     // What the renderer writes. Lives across frames: the hit rects are what the
     // mouse handler reads between draws, and `lib_offset` is fed back into the
     // next frame's sticky-viewport calculation.
@@ -662,7 +677,7 @@ async fn run_ui(
                 if overlay != overlay_open {
                     overlay_open = overlay;
                     if !overlay {
-                        app.art_repaint = ArtRepaint::Wipe;
+                        restore_art = true;
                     }
                     dirty = true;
                 }
@@ -671,13 +686,44 @@ async fn run_ui(
                     // Present the frame atomically. Without this the terminal
                     // renders whatever has arrived so far, and a recolour that
                     // touches every glyph on screen shows up half-applied.
-                    // Terminals that don't know the mode ignore it.
-                    let _ = execute!(io::stdout(), BeginSynchronizedUpdate);
+                    // Terminals that don't know the mode ignore it. tmux answers
+                    // its end by redrawing the whole pane and re-sending the
+                    // cover, which blinks it on every frame.
+                    if !in_tmux {
+                        let _ = execute!(io::stdout(), BeginSynchronizedUpdate);
+                    }
                     let repaint = app.art_repaint;
-                    let drawn = terminal.draw(|f| render(f, &app, &mut out, repaint));
-                    let _ = execute!(io::stdout(), EndSynchronizedUpdate);
+                    let drawn = terminal
+                        .draw(|f| render(f, &app, &mut out, repaint))
+                        .map(|_| ());
+                    let restore_result = if drawn.is_ok()
+                        && restore_art
+                        && !overlay_open
+                        && app.view.mode == RightView::NowPlaying
+                    {
+                        out.art
+                            .zip(
+                                app.playback
+                                    .now
+                                    .as_ref()
+                                    .and_then(|now| now.cover.as_ref()),
+                            )
+                            .map(|(area, cover)| cover.render_direct(terminal.backend_mut(), area))
+                    } else {
+                        None
+                    };
+                    if !in_tmux {
+                        let _ = execute!(io::stdout(), EndSynchronizedUpdate);
+                    }
                     drawn?;
                     app.art_repaint = app.art_repaint.advance();
+                    if restore_art && !overlay_open {
+                        restore_art = false;
+                        if let Some(Err(err)) = restore_result {
+                            liblog(format!("cover restore failed: {err}"));
+                            app.art_repaint = ArtRepaint::Wipe;
+                        }
+                    }
                     last_draw = Instant::now();
                     dirty = false;
                 }
@@ -694,7 +740,14 @@ async fn run_ui(
             }
             ev = ev_rx.recv_async() => {
                 let Ok(ev) = ev else { break };
+                let reconnected = matches!(ev, EngineEvent::Reconnected);
                 handle_engine_event(&mut app, ev, &chans.meta);
+                // The replacement Connect device starts empty; reload what was
+                // playing so a dropped access point costs a gap, not the track.
+                if reconnected && std::mem::take(&mut app.transport.resume_after_reconnect) {
+                    resume_source(&mut app, &chans.radio);
+                    app.transport.playback_started = true;
+                }
                 true
             }
             ev = in_rx.recv_async() => {
@@ -719,8 +772,8 @@ async fn run_ui(
                     Ok(Event::Resize(..)) => {
                         app.art_repaint = ArtRepaint::Wipe;
                     }
-                    Ok(Event::FocusGained) if std::env::var_os("TMUX").is_some() => {
-                        app.art_repaint = ArtRepaint::Wipe;
+                    Ok(Event::FocusGained) if in_tmux => {
+                        restore_art = true;
                     }
                     _ => {}
                 }

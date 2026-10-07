@@ -118,6 +118,7 @@ fn theme_from_swatches(swatches: &[Rgb], name: &'static str) -> Theme {
         border_active: primary,
         border_subtle: surface(0.16, 0.24),
         border_dimmest: surface(0.18, 0.17),
+        transparent: false,
     }
 }
 

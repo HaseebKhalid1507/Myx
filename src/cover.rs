@@ -5,13 +5,19 @@
 //! The encoded protocol is cached per render area — re-encoding only happens when
 //! the cover box changes size, keeping the render loop cheap.
 
+use crossterm::cursor::{RestorePosition, SavePosition};
+use crossterm::queue;
 use image::DynamicImage;
+use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
+use ratatui::widgets::Widget;
 use ratatui::Frame;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
 use std::cell::RefCell;
+use std::io::{self, Write};
 use std::sync::OnceLock;
 
 pub struct Cover {
@@ -114,8 +120,48 @@ impl Cover {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        if area.width == 0 || area.height == 0 {
+        if !self.ensure_cached(area) {
             return;
+        }
+        let cached = self.cached.borrow();
+        if let Some((_, protocol)) = &*cached {
+            frame.render_widget(Image::new(protocol), area);
+        }
+    }
+
+    /// Replay the cached protocol straight to a terminal writer.
+    ///
+    /// This is used after a popup that covered the image closes. Going through
+    /// the regular terminal diff can discard a byte-identical image anchor, so
+    /// render it against a fresh buffer and send that diff in the same
+    /// synchronized update as the popup-free frame.
+    pub fn render_direct<W: Write>(&self, writer: &mut W, area: Rect) -> io::Result<()> {
+        if !self.ensure_cached(area) {
+            return Ok(());
+        }
+
+        let cached = self.cached.borrow();
+        let Some((_, protocol)) = &*cached else {
+            return Ok(());
+        };
+        let previous = Buffer::empty(area);
+        let mut current = Buffer::empty(area);
+        Image::new(protocol).render(area, &mut current);
+
+        queue!(writer, SavePosition)?;
+        {
+            let mut backend = CrosstermBackend::new(&mut *writer);
+            backend.draw(previous.diff_iter(&current))?;
+        }
+        queue!(writer, RestorePosition)?;
+        writer.flush()
+    }
+
+    /// Make sure the protocol cache matches `area`. A failed encode leaves the
+    /// cache empty and both rendering paths become a no-op.
+    fn ensure_cached(&self, area: Rect) -> bool {
+        if area.width == 0 || area.height == 0 {
+            return false;
         }
         let mut cached = self.cached.borrow_mut();
         let needs_encode = cached
@@ -130,13 +176,10 @@ impl Cover {
                 Resize::Fit(None),
             ) {
                 Ok(protocol) => *cached = Some((area, protocol)),
-                Err(_) => return,
+                Err(_) => return false,
             }
         }
-
-        if let Some((_, protocol)) = &*cached {
-            frame.render_widget(Image::new(protocol), area);
-        }
+        true
     }
 }
 
@@ -265,6 +308,25 @@ mod tests {
         // Outside tmux there is no reply at all, and nothing may be inferred:
         // guessing kitty here would send escapes a plain terminal prints raw.
         assert_eq!(parse_client_info(""), (false, false));
+    }
+
+    #[test]
+    fn cached_cover_can_be_replayed_without_a_blank_frame() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            4,
+            image::Rgb([24, 120, 220]),
+        ));
+        let cover = Cover::from_image(img, Picker::halfblocks());
+        let mut output = Vec::new();
+
+        cover
+            .render_direct(&mut output, Rect::new(3, 2, 4, 2))
+            .expect("direct cover render");
+
+        assert!(!output.is_empty());
+        assert!(String::from_utf8_lossy(&output).contains('▀'));
+        assert!(!cover.needs_send(Rect::new(3, 2, 4, 2)));
     }
 
     /// What one cover re-encode costs on the UI thread, per protocol. Ignored

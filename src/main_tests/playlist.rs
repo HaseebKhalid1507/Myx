@@ -155,7 +155,7 @@ fn parses_an_items_entry() {
     assert_eq!(li.name, "Coffee");
     assert_eq!(li.subtitle, "beabadoobee");
     assert_eq!(li.uri, "spotify:track:429NtPmr12aypzFH3FkN9l");
-    assert!(li.is_track);
+    assert!(li.is_track());
 }
 
 #[test]
@@ -264,6 +264,6 @@ fn enter_label_matches_context_target() {
     // the rows P can play.
     for row in [ctx_row(), track, LibItem::header("Songs")] {
         let opens = enter_label(Some(&row)) == "open";
-        assert_eq!(opens, context_target(&row).is_some() && !row.is_play);
+        assert_eq!(opens, context_target(&row).is_some() && !row.is_play());
     }
 }

@@ -22,6 +22,19 @@ pub(crate) struct HitRects {
     pub(crate) tabs: Vec<(RightView, Rect)>,
     /// Library list viewport.
     pub(crate) lib: Option<Rect>,
+    /// Equalizer overlay controls. Empty whenever that modal is closed.
+    pub(crate) eq_toggle: Option<Rect>,
+    pub(crate) eq_presets: Vec<(EqualizerPreset, Rect)>,
+    pub(crate) eq_bands: Vec<EqualizerBandHit>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EqualizerBandHit {
+    pub(crate) band: usize,
+    pub(crate) rect: Rect,
+    /// Normal layout uses vertical sliders; the narrow fallback uses one
+    /// horizontal slider for the selected band.
+    pub(crate) vertical: bool,
 }
 
 /// Everything the renderer writes, kept out of `App` so every render function
@@ -29,6 +42,9 @@ pub(crate) struct HitRects {
 #[derive(Default)]
 pub(crate) struct FrameOut {
     pub(crate) hits: HitRects,
+    /// Album-art footprint in the current frame. Used to restore pixels that
+    /// an overlay covered without forcing a blank intermediate frame.
+    pub(crate) art: Option<Rect>,
     /// Library viewport start row. Unlike `hits`, this is read-modify-write:
     /// the renderer feeds the previous frame's value into `scroll_offset` and
     /// stores the result back, which is what makes scrolling sticky. Owned by
@@ -41,8 +57,10 @@ pub(crate) struct FrameOut {
 /// `ratatui-image` puts the whole image in one cell's symbol and marks the rest
 /// of the box `Skip`, which the diff never touches again — so leftovers stay,
 /// and a re-encode is byte-identical for sixel and iTerm2 and gets discarded.
-/// Blanking the box for one frame is the only change the diff will emit, and it
-/// makes the image that follows one too.
+/// Blanking the box for one frame forces the diff to emit a changed image on
+/// the next. Overlay restoration bypasses this state and replays the cached
+/// protocol directly, but resizes and layout changes still need the wipe to
+/// remove the old footprint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArtRepaint {
     /// The box holds what it should.

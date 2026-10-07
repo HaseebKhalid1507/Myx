@@ -7,6 +7,7 @@ use crate::*;
 pub(crate) fn render_nowplaying_view(
     f: &mut Frame,
     app: &App,
+    out: &mut FrameOut,
     theme: Theme,
     area: Rect,
     repaint: ArtRepaint,
@@ -64,6 +65,7 @@ pub(crate) fn render_nowplaying_view(
         width: art_w,
         height: art_h,
     };
+    out.art = Some(art_rect);
 
     match app.playback.now.as_ref().and_then(|n| n.cover.as_ref()) {
         _ if repaint == ArtRepaint::Wipe => wipe_area(f, art_rect),

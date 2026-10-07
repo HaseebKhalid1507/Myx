@@ -6,8 +6,51 @@ they are added to, never rewritten.
 
 ## [Unreleased]
 
+### Added
+
+- **Transparent background**, `transparent` in `config.toml` and `T` to flip
+  it. The screen and panel backgrounds are left to the terminal — its own
+  colour, opacity and blur — instead of the album-tinted fill; the selected row
+  and popups keep theirs so they still read. Text, accents and borders still
+  follow the cover. New installs start transparent. An existing config keeps
+  the album background until you press `T`, which rewrites that one line and
+  leaves the rest of the file alone.
+
 ### Fixed
 
+- macOS: launching myx no longer takes keyboard focus from the terminal. The
+  media-key event loop activated its windowless app at launch, so keys went
+  nowhere until you switched apps and back.
+- Startup no longer starts playing on its own. `restore_on_startup` puts the
+  saved track back on screen paused, and the first play press resumes it.
+- Album art no longer blinks inside tmux. Ending a synchronized update makes
+  tmux redraw the whole pane and send the image again, every frame; inside
+  tmux frames are now written without one.
+
+
+## [0.5.0] — 2026-09-09
+
+### Added
+
+- **Ten-band graphic equalizer** (open with `e`). Cookbook peaking filters
+  across ten bands from 31 Hz to 16 kHz, ±12 dB each, with seven presets
+  (Bass Boost, Rock, Jazz, Vocal, Electronic, Treble Boost, and Flat). An
+  automatic preamp tracks the curve's peak response so boosted bands never
+  clip, and the curve persists across restarts. The filters run in the audio
+  sink ahead of the visualizer — the spectrum on screen is the spectrum you
+  hear — and settings are read between packets, so adjusting a band never
+  interrupts playback.
+- `bitrate` and `normalize_volume` in `config.toml`. Streaming quality (96, 160
+  or 320 kbps) and loudness normalization were pinned to librespot's defaults
+  with no key, flag or environment variable to reach them. Both keep the old
+  values as their defaults, so an existing install is unchanged until you opt
+  in.
+
+### Fixed
+
+- Closing a popup that covered the album art no longer blanks the cover for one
+  visible frame before redrawing it. The cached image is now replayed directly
+  in the same synchronized update, so the art reappears without a flicker.
 - macOS: AirPods, headphone and Control Center controls now work without the
   terminal focused. The handlers were registered but nothing ran the
   main-thread event loop that delivers them.

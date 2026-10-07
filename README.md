@@ -1,8 +1,8 @@
 # myx
 
 A lean, beautiful terminal Spotify player in Rust. Streams natively as a Spotify
-Connect device, with album-art-reactive theming, a live audio visualizer, and
-synced lyrics.
+Connect device, with album-art-reactive theming, a live audio visualizer, a
+ten-band equalizer, and synced lyrics.
 
 <p align="center"><video src="https://github.com/user-attachments/assets/90706ba9-4c48-43d0-ad16-17b95c95dc94" alt="myx recolors the whole interface to the album art" width="100%"></p>
 
@@ -71,13 +71,38 @@ space      play · pause          n / b    next · prev
 ⇧ ← →      seek                  s        shuffle
 + / -      volume                R        repeat
 o          sort                  r        reload
-z          hide sidebar          q        quit
+z          hide sidebar          e        equalizer
+q          quit                  T        transparent background
 ```
 
 Media keys (Play/Pause, Stop, Next, Prev, Volume) work when the terminal is
 focused. On macOS and Linux, AirPods and headphone controls work from anywhere
 via the system's Now Playing integration. Mouse works too: click tabs, click a
 track, double-click to play.
+
+## Transparent background
+
+myx can leave the background to your terminal, so its own colour, opacity and
+blur show through while the text, accents and borders keep following the album
+art. The selected row and popups stay on a solid fill so they still read.
+
+- **Press `T`** (Shift+t) to flip between the transparent and the album-tinted
+  background. The choice is saved to `~/.config/myx/config.toml`, so it sticks.
+- **Or set it by hand**: `transparent = true` or `false` in the same file.
+
+New installs start transparent. A config written by an older myx has no
+`transparent` line and keeps the album-tinted background until you press `T`.
+How see-through it gets is up to the terminal — WezTerm's
+`window_background_opacity`, kitty's `background_opacity`, and so on.
+
+## Equalizer
+
+Press `e` for the live ten-band equalizer. Choose Flat, Bass Boost, Rock, Jazz,
+Vocal, Electronic or Treble Boost with `Tab` / `Shift+Tab`; changing a band
+creates a Custom curve. Use `←`/`→` to choose a band, `↑`/`↓` to adjust it,
+`Space` to compare against bypass, and `Esc` to close. Presets and sliders are
+also clickable and draggable. Automatic headroom keeps boosted curves from
+digitally clipping, and the complete curve is restored on the next launch.
 
 Holding `⇧ ←` / `⇧ →` scrubs continuously and commits one seek when you let go.
 `⇧ ⏎` needs a terminal that reports modified Enter (kitty, WezTerm, foot); `P`
@@ -89,14 +114,15 @@ inside tmux. If your tmux has no sixel support, add `set -g focus-events on` to
 
 ## Config
 
-`~/.config/myx/config.toml` is written on first run with every key commented
-out, so there is a file to edit and nothing to look up:
+`~/.config/myx/config.toml` is written on first run with every key but
+`transparent` commented out, so there is a file to edit and nothing to look up:
 
 ```toml
 # Rows kept visible above and below the cursor before the list scrolls.
 scrolloff = 3
 
-# Resume the locally saved track, source and position when Myx starts.
+# Show the locally saved track, source and position when Myx starts, paused
+# until you press play.
 restore_on_startup = true
 
 # Spotify app client id. MYX_CLIENT_ID overrides this if it is set.
@@ -106,6 +132,19 @@ client_id = "your-client-id"
 # album art comes out as a coarse mosaic, which means the terminal never
 # answered the detection query. MYX_PROTOCOL overrides this.
 protocol = "kitty"
+
+# Streaming quality in kbps: 96, 160 or 320. Any other whole number falls
+# back to 160.
+bitrate = 160
+
+# Even out loudness across tracks, the equivalent of the official client's
+# "Normalize volume". Leave it off to keep each track's own dynamics.
+normalize_volume = false
+
+# Leave the background to the terminal — its own colour, opacity and blur —
+# instead of the album-tinted one. Text and accents still follow the cover.
+# Press T in myx to flip it; this line is rewritten when you do.
+transparent = true
 ```
 
 ## Credits

@@ -4,6 +4,7 @@
 //! nothing here mutates application state. One module per screen, so the file
 //! to open is the one named after the thing on screen.
 
+mod equalizer;
 mod footer;
 mod library;
 mod lyrics;
@@ -12,6 +13,7 @@ mod overlay;
 mod queue;
 mod visualizer;
 
+pub(crate) use equalizer::*;
 pub(crate) use footer::*;
 pub(crate) use library::*;
 pub(crate) use lyrics::*;
@@ -23,6 +25,7 @@ pub(crate) use visualizer::*;
 use crate::*;
 
 pub(crate) fn render(f: &mut Frame, app: &App, out: &mut FrameOut, repaint: ArtRepaint) {
+    out.art = None;
     let theme = app.theme.displayed;
     let area = f.area();
     f.render_widget(Block::default().style(theme.base()), area);
@@ -101,7 +104,7 @@ pub(crate) fn render(f: &mut Frame, app: &App, out: &mut FrameOut, repaint: ArtR
         body[1]
     };
     match app.view.mode {
-        RightView::NowPlaying => render_nowplaying_view(f, app, theme, right, repaint),
+        RightView::NowPlaying => render_nowplaying_view(f, app, out, theme, right, repaint),
         RightView::Lyrics => render_lyrics(f, app, theme, right),
         RightView::Queue => render_queue_view(f, app, theme, right),
     }
@@ -111,6 +114,10 @@ pub(crate) fn render(f: &mut Frame, app: &App, out: &mut FrameOut, repaint: ArtR
 
     if app.view.actions.is_some() {
         render_actions_overlay(f, app, theme, area);
+    } else if app.view.equalizer.is_some() {
+        // Keep album art visible: the editor lives in the active pane and
+        // positions itself in free space around the cover.
+        render_equalizer_overlay(f, app, out, theme, right);
     }
 }
 

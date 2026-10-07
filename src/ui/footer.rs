@@ -36,6 +36,7 @@ pub(crate) fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) 
             lbl(" shuffle   "),
         ),
         (false, key("a"), lbl(" actions   ")),
+        (false, key("e"), lbl(" eq   ")),
         (
             false,
             Span::styled("z", Style::default().fg(on(app.view.zen).into())),

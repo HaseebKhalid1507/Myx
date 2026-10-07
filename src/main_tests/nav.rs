@@ -211,9 +211,9 @@ fn zen_keeps_playback_and_the_right_hand_pane() {
 
 #[test]
 fn a_forced_repaint_blanks_the_box_before_redrawing_it() {
-    // The wipe is the whole mechanism: re-encoding is byte-identical for
-    // sixel and iTerm2, so a blank frame is the only thing the diff will
-    // emit — and it takes the overlay's leftovers with it.
+    // Resizes and layout changes still need a wipe because the previous image
+    // footprint may no longer match. Popup restoration uses the direct cached
+    // replay path instead, so it does not expose this blank intermediate frame.
     assert_eq!(ArtRepaint::Wipe.advance(), ArtRepaint::Draw);
     assert_eq!(ArtRepaint::Draw.advance(), ArtRepaint::Idle);
     assert_eq!(ArtRepaint::Idle.advance(), ArtRepaint::Idle);

@@ -96,6 +96,7 @@ construction.
 | `engine/mod.rs` | The librespot engine. Brings up a Spotify Connect device (Spirc) with our tee'd audio sink, and bridges librespot's player events into a clean `EngineEvent` stream. `TrackChanged` landing on that channel is what makes track changes *real* — it's the hook the theme fade and cover reload fire from. Also `radio_tracks` (seeded autoplay). |
 | `engine/auth.rs` | OAuth 2.0 PKCE against librespot's public desktop client ID, with a tiny localhost callback server. Produces librespot `Credentials`. Adapted from spotify-player (MIT). |
 | `audio/visualizer.rs` | The FFT visualizer sink. It's a **tee**: every audio packet is forwarded unchanged to the real backend (playback is never affected) while a windowed FFT writes frequency bands into a plain `Arc<Mutex<VisBands>>`. |
+| `audio/equalizer.rs` | The ten-band graphic EQ. Cascaded stereo biquads transform PCM before it reaches the visualizer/backend; a shared settings snapshot lets the UI change curves without blocking the audio thread. |
 | `webapi.rs` | The Spotify **Web API** side: a *separate* OAuth PKCE flow using your own app's client ID, so metadata and library calls get their own rate-limit bucket instead of fighting librespot's saturated shared one. Token cached to `~/.cache/myx/webapi.json` and auto-refreshed. |
 | `httpcache.rs` | On-disk cache for catalogue reads (`~/.cache/myx/api`). Spotify's dev quota runs out fast; stale entries are served when a request fails, because yesterday's album list beats an empty page. |
 
@@ -122,6 +123,7 @@ open is the one named after what you're looking at.
 | `ui/library.rs` | Left sidebar: sections, search results, drill-in lists. |
 | `ui/nowplaying.rs` | The Now Playing view *and* the persistent bottom strip (volume, progress). |
 | `ui/lyrics.rs` / `ui/queue.rs` / `ui/visualizer.rs` | The other views and the spectrum bars under the art. |
+| `ui/equalizer.rs` | The modal ten-band equalizer: preset pills, sliders, headroom and its narrow-terminal fallback. |
 | `ui/overlay.rs` | Things drawn on top: the actions menu, the startup loading screen. |
 | `ui/footer.rs` | The one-line keybinding hint. |
 
@@ -152,6 +154,7 @@ the file to open is the one named after where the event came from. It reads
 | `input/key.rs` | The main keymap. |
 | `input/mouse.rs` | Clicks, drags and wheel, resolved against the hit rects. |
 | `input/actions.rs` | Input while the actions overlay is open, plus copy-to-clipboard. |
+| `input/equalizer.rs` | Modal equalizer keyboard/mouse input and the pointer-to-gain mapping. |
 | `input/media.rs` | OS media keys (souvlaki). |
 
 ### The network

@@ -31,6 +31,11 @@ pub(crate) fn handle_key(
         return false;
     }
 
+    if app.view.equalizer.is_some() {
+        handle_equalizer_key(app, code);
+        return false;
+    }
+
     // --- Search input mode captures everything ---
     if app.search.input_mode {
         match code {
@@ -70,6 +75,9 @@ pub(crate) fn handle_key(
     }
 
     match code {
+        KeyCode::Char('e') => {
+            app.view.equalizer = Some(EqualizerOverlay::default());
+        }
         KeyCode::Char('/') => {
             app.search.input_mode = true;
             app.search.clear();
@@ -160,7 +168,7 @@ pub(crate) fn handle_key(
                 app.cur_items().get(app.browse.selected).cloned()
             };
             if let Some(item) = item {
-                if !item.is_header && !item.is_play {
+                if !item.is_header() && !item.is_play() {
                     // Instant menu (no network), then enrich when the API returns.
                     app.view.actions = Some(build_action_menu(None, &item));
                     spawn_action_menu(app.svc.webapi.clone(), item, chans.menu.clone());
@@ -199,6 +207,16 @@ pub(crate) fn handle_key(
         }
         // The frame loop notices the layout change and wipes the art box.
         KeyCode::Char('z') => app.view.zen = !app.view.zen,
+        // Shifted on purpose: a stray press repaints everything and rewrites
+        // config.toml.
+        KeyCode::Char('T') => {
+            let on = !app.theme.target.transparent;
+            app.theme.set_transparent(on);
+            app.status = match myx::config::Config::save_transparent(on) {
+                Ok(()) => format!("transparent background {}", if on { "on" } else { "off" }),
+                Err(e) => format!("background switched, but config.toml was not saved: {e}"),
+            };
+        }
         KeyCode::Down | KeyCode::Char('j') => app.move_sel(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_sel(-1),
         // Needs a terminal that reports modified Enter (kitty, WezTerm, foot).

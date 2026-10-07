@@ -4,10 +4,11 @@
 //! © 2021 Thang Pham). Decoupled here from that app's global state so it writes
 //! to a plain `Arc<Mutex<VisBands>>` that myx owns.
 //!
-//! The design is a **tee'd audio sink**: it forwards every packet unchanged to
-//! the real backend (so playback is never affected) while computing a windowed
-//! FFT on a copy. The hot path is allocation-free and the UI reads the bands via
-//! `try_lock`, so the audio thread never stalls waiting on a render.
+//! The design is a **tee'd audio sink**: it forwards every packet it receives
+//! unchanged to the real backend while computing a windowed FFT on a copy. The
+//! equalizer sits immediately before this sink, so these bands describe the
+//! sound after EQ. The hot path is allocation-free and the UI reads the bands
+//! via `try_lock`, so the audio thread never stalls waiting on a render.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

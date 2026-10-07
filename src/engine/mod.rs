@@ -1,7 +1,7 @@
 //! The librespot streaming engine.
 //!
-//! Authenticates, brings up a Spotify Connect device (Spirc) with our tee'd FFT
-//! sink, and bridges librespot's player events into a clean [`EngineEvent`]
+//! Authenticates, brings up a Spotify Connect device (Spirc) with our local EQ +
+//! tee'd FFT sinks, and bridges librespot's player events into a clean [`EngineEvent`]
 //! stream. This is what makes "track change" *real*: when Spotify hands us a new
 //! track, a `TrackChanged` lands on the channel — the hook the reactive theme +
 //! cover fade will fire from.
@@ -30,7 +30,8 @@ use librespot_playback::mixer::softmixer::SoftMixer;
 use librespot_playback::mixer::{Mixer, MixerConfig};
 use librespot_playback::player::{self, Player};
 
-use crate::audio::{VisBands, VisualizationSink};
+use crate::audio::equalizer::{shared_equalizer, EqualizerControl, EqualizerSink};
+use crate::audio::{EqualizerSettings, VisBands, VisualizationSink};
 pub use playlist::{playlist_tracks, PlaylistTrack};
 
 /// A normalized playback event surfaced to the rest of the app.
@@ -89,6 +90,7 @@ struct Inner {
     link: Mutex<Arc<Link>>,
     mixer: Arc<SoftMixer>,
     bands: Arc<Mutex<VisBands>>,
+    equalizer: EqualizerControl,
     events: flume::Sender<EngineEvent>,
     /// First-login credentials, used only until librespot has cached reusable
     /// ones: a first run authenticates with a one-shot OAuth token that a
@@ -110,7 +112,16 @@ impl Inner {
     /// Build a replacement connection and swap it in. The dead one is dropped
     /// afterwards, which stops its player and ends its event bridge.
     async fn reconnect(&self) -> Result<()> {
-        let fresh = Arc::new(connect(&self.creds, &self.mixer, &self.bands, &self.events).await?);
+        let fresh = Arc::new(
+            connect(
+                &self.creds,
+                &self.mixer,
+                &self.bands,
+                &self.equalizer,
+                &self.events,
+            )
+            .await?,
+        );
         let dead = std::mem::replace(
             &mut *self.link.lock().unwrap_or_else(PoisonError::into_inner),
             fresh,
@@ -262,6 +273,15 @@ impl Engine {
         // Sync the volume to Spotify Connect in the background.
         self.command("set volume", |spirc| spirc.set_volume(vol))
     }
+    /// Replace the complete local equalizer curve. The audio sink observes the
+    /// snapshot between packets, so this never waits on or interrupts playback.
+    pub fn set_equalizer(&self, settings: EqualizerSettings) {
+        *self
+            .inner
+            .equalizer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = settings.normalized();
+    }
     /// Seek to an absolute position in the current track.
     pub fn seek(&self, position_ms: u32) -> Result<()> {
         self.active_command("seek", |spirc| spirc.set_position_ms(position_ms))
@@ -402,17 +422,19 @@ pub async fn run(
     initial_volume_pct: u8,
 ) -> Result<Engine> {
     let bands = VisBands::shared();
+    let equalizer = shared_equalizer();
 
     // 50% volume in librespot's 0..=65535 range.
     let volume: u16 = (u32::from(initial_volume_pct.clamp(0, 100)) * 65535 / 100) as u16;
     let mixer = Arc::new(SoftMixer::open(MixerConfig::default()).context("open softmixer")?);
     mixer.set_volume(volume);
 
-    let link = connect(&creds, &mixer, &bands, &tx).await?;
+    let link = connect(&creds, &mixer, &bands, &equalizer, &tx).await?;
     let inner = Arc::new(Inner {
         link: Mutex::new(Arc::new(link)),
         mixer,
         bands: Arc::clone(&bands),
+        equalizer,
         events: tx,
         creds,
     });
@@ -427,6 +449,7 @@ async fn connect(
     first_login: &Credentials,
     mixer: &Arc<SoftMixer>,
     bands: &Arc<Mutex<VisBands>>,
+    equalizer: &EqualizerControl,
     events: &flume::Sender<EngineEvent>,
 ) -> Result<Link> {
     let cache = build_cache()?;
@@ -437,23 +460,29 @@ async fn connect(
     let session = Session::new(SessionConfig::default(), Some(cache));
 
     let backend = audio_backend::find(None).expect("an audio backend should be available");
+    let cfg = crate::config::get();
     let player_config = PlayerConfig {
         // Each correction pushes the whole Connect state to Spotify, so the old
         // 100ms announced us ten times a second. Position is extrapolated
         // locally; this only trims the drift.
         position_update_interval: Some(Duration::from_secs(1)),
+        bitrate: cfg.bitrate(),
+        normalisation: cfg.normalize_volume,
         ..Default::default()
     };
 
     let player = {
         let bands = Arc::clone(bands);
+        let equalizer = Arc::clone(equalizer);
         Player::new(
             player_config,
             session.clone(),
             mixer.get_soft_volume(),
             move || -> Box<dyn Sink> {
                 let real = backend(None, AudioFormat::default());
-                Box::new(VisualizationSink::new(real, Arc::clone(&bands), 44_100.0))
+                let visualizer =
+                    Box::new(VisualizationSink::new(real, Arc::clone(&bands), 44_100.0));
+                Box::new(EqualizerSink::new(visualizer, Arc::clone(&equalizer)))
             },
         )
     };
