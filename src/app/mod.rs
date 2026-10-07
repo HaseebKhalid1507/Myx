@@ -76,6 +76,34 @@ impl App {
             self.browse.library.items_mut(self.browse.section)
         }
     }
+    /// The views ←/→ step through right now.
+    pub(crate) fn rotation(&self) -> &'static [RightView] {
+        if self.view.layout == LayoutMode::Focus && !self.view.zen {
+            &RightView::WITH_LIBRARY
+        } else {
+            &RightView::VIEWS
+        }
+    }
+
+    /// Whether the library is on screen: its sidebar in Full, or its view in
+    /// Focus — never under zen. Keys and hints for it only count while it is.
+    pub(crate) fn library_visible(&self) -> bool {
+        !self.view.zen
+            && match self.view.layout {
+                LayoutMode::Full => true,
+                LayoutMode::Focus => self.view.mode == RightView::Library,
+            }
+    }
+
+    /// Keep the current view one the rotation has, after the layout or zen
+    /// changed: the Library view only exists in Focus without zen, and from
+    /// it you land on Now Playing.
+    pub(crate) fn settle_view(&mut self) {
+        if !self.rotation().contains(&self.view.mode) {
+            self.view.mode = RightView::NowPlaying;
+        }
+    }
+
     /// Which list `cur_items` is showing.
     pub(crate) fn list_key(&self) -> ListKey {
         if let Some(d) = self.browse.details.last() {
