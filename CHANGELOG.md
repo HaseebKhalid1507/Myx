@@ -26,6 +26,10 @@ they are added to, never rewritten.
 - Album art no longer blinks inside tmux. Ending a synchronized update makes
   tmux redraw the whole pane and send the image again, every frame; inside
   tmux frames are now written without one.
+- Killing myx (`kill`, closing its terminal window, `kill -INT`) no longer
+  leaves the terminal in raw mode on the alternate screen, or loses the last
+  half-minute of saved state. SIGTERM, SIGHUP and SIGINT now quit the way `q`
+  does: state saved, terminal restored, colour subscribers told.
 
 
 ## [0.5.0] — 2026-09-09

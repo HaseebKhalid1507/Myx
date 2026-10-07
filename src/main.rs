@@ -55,7 +55,7 @@ use myx::gradient::{self};
 use myx::liblog::{install_librespot_log, liblog};
 use myx::lyrics::parse::parse_lrc;
 use myx::reactive::derive_theme;
-use myx::term::{acquire_single_instance_lock, init_terminal, restore_terminal, Term};
+use myx::term::{acquire_single_instance_lock, init_terminal, restore_terminal, QuitSignals, Term};
 use myx::theme::{Theme, TOKYONIGHT};
 use myx::util::{center_v, fmt_ms, track_id_from_uri, truncate, uri_to_url, urlencode, vol_u16};
 use myx::webapi::WebApi;
@@ -328,9 +328,13 @@ async fn boot(
     picker: Picker,
     media_platform_ready: bool,
 ) -> Result<MxcHandle> {
+    // Caught from here on, so even a kill during the loading screen leaves the
+    // terminal restored.
+    let mut signals = QuitSignals::install();
     let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
     let engine = with_loader(
         terminal,
+        &mut signals,
         "connecting to Spotify",
         engine::run(creds, ev_tx, init_vol),
     )
@@ -466,7 +470,7 @@ async fn boot(
         art_repaint: ArtRepaint::Idle,
     };
 
-    run_ui(terminal, app, ev_rx).await
+    run_ui(terminal, app, ev_rx, signals).await
 }
 
 struct Radio {
@@ -493,6 +497,7 @@ async fn run_ui(
     terminal: &mut Term,
     mut app: App,
     ev_rx: flume::Receiver<EngineEvent>,
+    mut signals: QuitSignals,
 ) -> Result<MxcHandle> {
     let (in_tx, in_rx) = flume::unbounded::<Event>();
     std::thread::spawn(move || loop {
@@ -590,6 +595,12 @@ async fn run_ui(
     loop {
         let touched = tokio::select! {
             biased;
+            // kill, a closed terminal, kill -INT: leave the way `q` does.
+            sig = signals.recv() => {
+                liblog(format!("{sig}: saving and quitting"));
+                save_state(&app);
+                break;
+            }
             _ = frame.tick() => {
                 app.playback.flush_seek(&app.svc.engine, Instant::now());
                 // Drain library updates deterministically before rendering. Keeping
@@ -967,6 +978,7 @@ fn resume_source(app: &mut App, radio_tx: &flume::Sender<Result<Radio, String>>)
 /// Run `task`, drawing the startup screen until it finishes.
 async fn with_loader<T>(
     terminal: &mut Term,
+    signals: &mut QuitSignals,
     label: &str,
     task: impl std::future::Future<Output = T>,
 ) -> Result<T> {
@@ -977,6 +989,8 @@ async fn with_loader<T>(
         tokio::select! {
             biased;
             done = &mut task => return Ok(done),
+            // Nothing to save yet; returning lets the terminal be restored.
+            sig = signals.recv() => anyhow::bail!("stopped by {sig} while {label}"),
             _ = tick.tick() => {
                 terminal.draw(|f| render_loading(f, label, frame))?;
                 frame = frame.wrapping_add(1);
