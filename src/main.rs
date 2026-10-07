@@ -208,9 +208,11 @@ fn run_player_macos(
         }
     }
 
-    // Accessory keeps myx out of the Dock and the app switcher.
+    // Accessory keeps myx out of the Dock and the app switcher. Activating at
+    // launch would take keyboard focus from the terminal running us.
     let event_loop = match EventLoop::<PlayerDone>::with_user_event()
         .with_activation_policy(ActivationPolicy::Accessory)
+        .with_activate_ignoring_other_apps(false)
         .build()
     {
         Ok(event_loop) => event_loop,
@@ -412,8 +414,8 @@ async fn boot(
             seek_last_input: Instant::now(),
         },
         theme: ThemeState {
-            displayed: TOKYONIGHT,
-            target: TOKYONIGHT,
+            displayed: startup_theme(),
+            target: startup_theme(),
             fade: None,
         },
         status: "loading library…".to_string(),
@@ -532,11 +534,6 @@ async fn run_ui(
         chans.libdone.clone(),
     );
 
-    if app.playback.now.is_some() {
-        resume_source(&mut app, &chans.radio);
-        app.transport.playback_started = true;
-    }
-
     // Re-enrich the restored last-played track (cover / theme / lyrics).
     if let Some(uri) = app.session.restore_uri.take() {
         if let Some(id) = track_id_from_uri(&uri) {
@@ -561,6 +558,13 @@ async fn run_ui(
         }
     }
     let mut media_events_open = true;
+    // A restored track stays paused until the first play press resumes it.
+    if let (Some(now), Some(controls)) = (app.playback.now.as_ref(), app.media_controls.as_mut()) {
+        let _ = controls.set_playback(MediaPlayback::Paused {
+            progress: Some(MediaPosition(Duration::from_millis(now.position_ms as u64))),
+        });
+    }
+    let in_tmux = std::env::var_os("TMUX").is_some();
 
     let mut lib_attempts: u32 = 0;
     // A persistent interval must live OUTSIDE the select loop. Recreating a
@@ -682,8 +686,12 @@ async fn run_ui(
                     // Present the frame atomically. Without this the terminal
                     // renders whatever has arrived so far, and a recolour that
                     // touches every glyph on screen shows up half-applied.
-                    // Terminals that don't know the mode ignore it.
-                    let _ = execute!(io::stdout(), BeginSynchronizedUpdate);
+                    // Terminals that don't know the mode ignore it. tmux answers
+                    // its end by redrawing the whole pane and re-sending the
+                    // cover, which blinks it on every frame.
+                    if !in_tmux {
+                        let _ = execute!(io::stdout(), BeginSynchronizedUpdate);
+                    }
                     let repaint = app.art_repaint;
                     let drawn = terminal
                         .draw(|f| render(f, &app, &mut out, repaint))
@@ -704,7 +712,9 @@ async fn run_ui(
                     } else {
                         None
                     };
-                    let _ = execute!(io::stdout(), EndSynchronizedUpdate);
+                    if !in_tmux {
+                        let _ = execute!(io::stdout(), EndSynchronizedUpdate);
+                    }
                     drawn?;
                     app.art_repaint = app.art_repaint.advance();
                     if restore_art && !overlay_open {
@@ -762,7 +772,7 @@ async fn run_ui(
                     Ok(Event::Resize(..)) => {
                         app.art_repaint = ArtRepaint::Wipe;
                     }
-                    Ok(Event::FocusGained) if std::env::var_os("TMUX").is_some() => {
+                    Ok(Event::FocusGained) if in_tmux => {
                         restore_art = true;
                     }
                     _ => {}

@@ -22,14 +22,37 @@ pub(crate) struct ThemeState {
     pub(crate) fade: Option<ThemeFade>,
 }
 
+/// The palette before any cover has arrived, with the background as configured.
+pub(crate) fn startup_theme() -> Theme {
+    Theme {
+        transparent: myx::config::get().transparent,
+        ..TOKYONIGHT
+    }
+}
+
 impl ThemeState {
     pub(crate) fn start_fade(&mut self, to: Theme) {
+        // A cover's palette knows nothing of the config; the startup flag rides along.
+        let to = Theme {
+            transparent: self.target.transparent,
+            ..to
+        };
         self.fade = Some(ThemeFade::new(
             self.displayed,
             to,
             Duration::from_millis(FADE_MS),
         ));
         self.target = to;
+    }
+
+    /// Flip the background between the terminal's and the palette's. A running
+    /// fade is restarted towards the same palette so it lands with the new flag.
+    pub(crate) fn set_transparent(&mut self, on: bool) {
+        self.displayed.transparent = on;
+        self.target.transparent = on;
+        if self.fade.is_some() {
+            self.start_fade(self.target);
+        }
     }
 
     pub(crate) fn advance(&mut self) {

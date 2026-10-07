@@ -59,7 +59,7 @@ pub(crate) const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴",
 
 /// The startup screen: wordmark, spinner, and what we're waiting on.
 pub(crate) fn render_loading(f: &mut Frame, label: &str, frame: usize) {
-    let theme = TOKYONIGHT;
+    let theme = startup_theme();
     let area = f.area();
     f.render_widget(Block::default().style(theme.panel()), area);
 

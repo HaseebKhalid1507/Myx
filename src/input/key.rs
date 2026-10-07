@@ -207,6 +207,16 @@ pub(crate) fn handle_key(
         }
         // The frame loop notices the layout change and wipes the art box.
         KeyCode::Char('z') => app.view.zen = !app.view.zen,
+        // Shifted on purpose: a stray press repaints everything and rewrites
+        // config.toml.
+        KeyCode::Char('T') => {
+            let on = !app.theme.target.transparent;
+            app.theme.set_transparent(on);
+            app.status = match myx::config::Config::save_transparent(on) {
+                Ok(()) => format!("transparent background {}", if on { "on" } else { "off" }),
+                Err(e) => format!("background switched, but config.toml was not saved: {e}"),
+            };
+        }
         KeyCode::Down | KeyCode::Char('j') => app.move_sel(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_sel(-1),
         // Needs a terminal that reports modified Enter (kitty, WezTerm, foot).

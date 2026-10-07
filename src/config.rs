@@ -11,7 +11,8 @@ use std::sync::OnceLock;
 pub struct Config {
     /// Rows kept visible above and below the list cursor, like vim's `scrolloff`.
     pub scrolloff: usize,
-    /// Resume the locally saved track, source and position when Myx starts.
+    /// Show the locally saved track, source and position when Myx starts,
+    /// paused until the first play press.
     pub restore_on_startup: bool,
     /// Spotify app client id. `MYX_CLIENT_ID` takes precedence.
     pub client_id: Option<String>,
@@ -28,6 +29,11 @@ pub struct Config {
     /// Even out loudness across tracks, the equivalent of the official client's
     /// "Normalize volume". Off leaves each track's own dynamics alone.
     pub normalize_volume: bool,
+    /// Leave the background to the terminal instead of painting the
+    /// album-tinted one. Text and accents still follow the cover. Off when the
+    /// key is missing; the first-run template sets it, so new installs start
+    /// transparent. `T` in the app flips it and rewrites the line.
+    pub transparent: bool,
 }
 
 impl Default for Config {
@@ -39,6 +45,7 @@ impl Default for Config {
             protocol: None,
             bitrate: 160,
             normalize_volume: false,
+            transparent: false,
         }
     }
 }
@@ -51,14 +58,16 @@ pub fn get() -> &'static Config {
 }
 
 /// Written on first run so there is a file to edit instead of a path to guess.
-/// Every key is commented out, so it parses to exactly the defaults.
+/// Every key but `transparent` is commented out, so it parses to the defaults
+/// apart from the transparent background new installs start with.
 const TEMPLATE: &str = "\
 # myx settings. Every key is optional — uncomment one to change it.
 
 # Rows kept visible above and below the list cursor, like vim's scrolloff.
 #scrolloff = 3
 
-# Resume the locally saved track, source and position when Myx starts.
+# Show the locally saved track, source and position when Myx starts, paused
+# until you press play.
 #restore_on_startup = true
 
 # Spotify app client id. MYX_CLIENT_ID overrides this if it is set.
@@ -76,6 +85,11 @@ const TEMPLATE: &str = "\
 # Even out loudness across tracks, like the official client's \"Normalize
 # volume\". Leave it off to keep each track's own dynamics.
 #normalize_volume = false
+
+# Leave the background to the terminal — its own colour, opacity and blur —
+# instead of the album-tinted one. Text and accents still follow the cover.
+# Press T in myx to flip it; this line is rewritten when you do.
+transparent = true
 ";
 
 impl Config {
@@ -118,6 +132,25 @@ impl Config {
             }
         }
     }
+
+    /// Persist a flip of `transparent` by rewriting its one line, so the rest
+    /// of a hand-edited file — comments and all — survives.
+    pub fn save_transparent(on: bool) -> std::io::Result<()> {
+        let path = Self::path().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
+        })?;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
+            // A file we cannot read may still be one we could overwrite; the
+            // template must never clobber it.
+            Err(e) => return Err(e),
+        };
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, set_transparent(&text, on))
+    }
 }
 
 /// Best effort: a read-only home just means no file, never a failed start.
@@ -126,6 +159,39 @@ fn write_template(path: &Path) {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(path, TEMPLATE);
+}
+
+/// `text` with `transparent` set to `on`. An existing line, live or commented
+/// out, is replaced in place; otherwise one is added above the first table,
+/// since a bare key after a `[table]` header would belong to that table.
+fn set_transparent(text: &str, on: bool) -> String {
+    let is_key = |l: &str| {
+        l.trim_start()
+            .trim_start_matches('#')
+            .trim_start()
+            .strip_prefix("transparent")
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    };
+    let is_live = |l: &str| !l.trim_start().starts_with('#');
+    let is_table = |l: &str| l.trim_start().starts_with('[') && l.trim_end().ends_with(']');
+
+    let mut lines: Vec<String> = text.lines().map(String::from).collect();
+    let line = format!("transparent = {on}");
+    let existing = lines
+        .iter()
+        .position(|l| is_live(l) && is_key(l))
+        .or_else(|| lines.iter().position(|l| is_key(l)));
+    match existing {
+        Some(i) => lines[i] = line,
+        None => {
+            let at = lines
+                .iter()
+                .position(|l| is_table(l))
+                .unwrap_or(lines.len());
+            lines.insert(at, line);
+        }
+    }
+    lines.join("\n") + "\n"
 }
 
 #[cfg(test)]
@@ -140,6 +206,7 @@ mod tests {
         assert!(c.client_id.is_none());
         assert_eq!(c.bitrate, 160);
         assert!(!c.normalize_volume);
+        assert!(!c.transparent);
     }
 
     #[test]
@@ -152,6 +219,9 @@ mod tests {
 
         let c = Config::parse("normalize_volume = true").expect("valid toml");
         assert!(c.normalize_volume);
+
+        let c = Config::parse("transparent = true").expect("valid toml");
+        assert!(c.transparent);
     }
 
     #[test]
@@ -208,6 +278,49 @@ mod tests {
         assert!(c.protocol.is_none());
         assert_eq!(c.bitrate, d.bitrate);
         assert_eq!(c.normalize_volume, d.normalize_volume);
+        // The one live key: new installs start transparent, while a config
+        // without the line keeps the album background, which is the default.
+        assert!(c.transparent);
+        assert!(!d.transparent);
+    }
+
+    #[test]
+    fn flipping_transparency_rewrites_only_its_own_line() {
+        assert_eq!(
+            set_transparent("scrolloff = 5\ntransparent = false\n", true),
+            "scrolloff = 5\ntransparent = true\n"
+        );
+        // A commented-out line is taken over in place, next to its doc comment.
+        assert_eq!(
+            set_transparent("# doc\n#transparent = false\nbitrate = 320\n", true),
+            "# doc\ntransparent = true\nbitrate = 320\n"
+        );
+        // A lookalike key is not ours.
+        assert_eq!(
+            set_transparent("transparent_level = 3\n", false),
+            "transparent_level = 3\ntransparent = false\n"
+        );
+    }
+
+    #[test]
+    fn a_config_without_the_line_gets_one_toml_reads_back() {
+        let text = set_transparent("client_id = \"abc\"", true);
+        let c = Config::parse(&text).expect("valid toml");
+        assert!(c.transparent);
+        assert_eq!(c.client_id.as_deref(), Some("abc"));
+
+        // After a table header a bare key would belong to the table.
+        assert_eq!(
+            set_transparent("a = 1\n[x]\nb = 2\n", true),
+            "a = 1\ntransparent = true\n[x]\nb = 2\n"
+        );
+    }
+
+    #[test]
+    fn flipping_the_template_keeps_every_other_line() {
+        let off = set_transparent(TEMPLATE, false);
+        assert_eq!(off.lines().count(), TEMPLATE.lines().count());
+        assert!(!Config::parse(&off).expect("valid toml").transparent);
     }
 
     #[test]

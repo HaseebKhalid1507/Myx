@@ -152,9 +152,9 @@ pub(crate) fn render_library(
 
         let selected = idx == app.browse.selected;
         let bg = if selected {
-            theme.background_element.into()
+            theme.element_bg()
         } else {
-            theme.background_panel.into()
+            theme.panel_bg()
         };
         let block = left_bar_block(&theme, selected, bg);
         let style = if selected {

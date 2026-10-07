@@ -284,6 +284,7 @@ fn theme_from(c: &Colors) -> Theme {
         border_active: c.border_active.into(),
         border_subtle: c.border_subtle.into(),
         border_dimmest: c.border_dimmest.into(),
+        transparent: false,
     }
 }
 
