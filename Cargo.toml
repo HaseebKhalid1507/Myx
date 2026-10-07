@@ -41,6 +41,11 @@ souvlaki = { version = "0.8.3", default-features = false, features = ["pollster"
 toml = { version = "1", default-features = false, features = ["parse", "serde"], optional = true }
 log = { version = "0.4.33", features = ["std"] }
 
+# Waiting on stdin for the terminal's cell-size reply (term::query_cell_size).
+# Already in the tree via ratatui-image and crossterm.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["event", "time"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-win = "3.0.0"
 

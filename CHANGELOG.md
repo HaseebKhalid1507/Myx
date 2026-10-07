@@ -18,6 +18,13 @@ they are added to, never rewritten.
 
 ### Fixed
 
+- The album art no longer breaks when the terminal's font size changes while
+  myx is running. The cover was sized for the cell measured at startup, so a
+  bigger font left it too small and off-centre, and a smaller one cropped it.
+  After a resize settles (150 ms), myx measures the cell again — from tmux when
+  inside it, otherwise by asking the terminal — and redraws the cover for it;
+  until then the cover's spot stays blank rather than showing a wrong one.
+
 - macOS: launching myx no longer takes keyboard focus from the terminal. The
   media-key event loop activated its windowless app at launch, so keys went
   nowhere until you switched apps and back.
