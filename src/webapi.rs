@@ -43,21 +43,21 @@ fn scopes_tag() -> String {
     SCOPES.join(",")
 }
 
-/// Resolve the Spotify app client id: `MYX_CLIENT_ID`, else `client_id` in
+/// The configured Spotify app client id: `MYX_CLIENT_ID`, else `client_id` in
 /// `~/.config/myx/config.toml`, else the older bare `~/.config/myx/client_id`
 /// file (still honoured so upgrading doesn't log anyone out). No default is
-/// bundled — every user brings their own app.
-fn resolve_client_id() -> Result<String> {
+/// bundled — every user brings their own app. Never prompts.
+fn configured_client_id() -> Option<String> {
     if let Ok(id) = std::env::var("MYX_CLIENT_ID") {
         let id = id.trim().to_string();
         if !id.is_empty() {
-            return Ok(id);
+            return Some(id);
         }
     }
     if let Some(id) = crate::config::get().client_id.as_deref() {
         let id = id.trim().to_string();
         if !id.is_empty() {
-            return Ok(id);
+            return Some(id);
         }
     }
     if let Some(home) = crate::home_dir() {
@@ -65,18 +65,44 @@ fn resolve_client_id() -> Result<String> {
         if let Ok(s) = std::fs::read_to_string(&path) {
             let id = s.trim().to_string();
             if !id.is_empty() {
-                return Ok(id);
+                return Some(id);
             }
         }
     }
-    // No id in any of the usual places — walk the user through first-run
-    // setup so they never have to read the README to get started.
-    prompt_and_save_client_id()
+    None
+}
+
+/// The client id, asking for one on first run. Only [`WebApi::init`] calls
+/// this: the config is read once per process, so a second caller would not
+/// see the id just saved and would ask again.
+fn resolve_client_id() -> Result<String> {
+    match configured_client_id() {
+        Some(id) => Ok(id),
+        None => prompt_and_save_client_id(),
+    }
+}
+
+const NO_CLIENT_ID_HELP: &str = "\
+Create a free app at https://developer.spotify.com/dashboard
+(add redirect URI http://127.0.0.1:8989/login), then either:
+  export MYX_CLIENT_ID=<your-client-id>
+  or write client_id = \"<your-client-id>\" to ~/.config/myx/config.toml";
+
+/// A Spotify client id is 32 hex digits. Checking before saving means a typo
+/// is caught here, instead of being saved and failing every launch after.
+fn looks_like_client_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Interactive first-run helper: prints setup steps, reads a client id from
 /// stdin, and persists it to `config.toml` so future launches skip this.
 fn prompt_and_save_client_id() -> Result<String> {
+    use std::io::IsTerminal as _;
+    // Started from a launcher or a pipe, nobody can answer a prompt.
+    if !std::io::stdin().is_terminal() {
+        bail!("No Spotify client id found.\n{NO_CLIENT_ID_HELP}");
+    }
+
     eprintln!();
     eprintln!("  No Spotify Client ID found. Let's set one up (takes ~1 minute).");
     eprintln!();
@@ -85,66 +111,36 @@ fn prompt_and_save_client_id() -> Result<String> {
     eprintln!("  3. Set the Redirect URI to: {REDIRECT_URI}");
     eprintln!("  4. Save, then copy the Client ID shown on the app page.");
     eprintln!();
-    eprint!("  Paste your Client ID here: ");
-    std::io::stderr().flush().ok();
 
-    let mut buf = String::new();
-    std::io::stdin()
-        .read_line(&mut buf)
-        .context("failed to read from stdin")?;
-    let id = buf.trim().to_string();
-
-    if id.is_empty() {
-        bail!(
-            "No Client ID entered.\n\
-             Run myx again when you're ready, or set it manually:\n\
-             \x20 export MYX_CLIENT_ID=<your-client-id>\n\
-             \x20 or write client_id = \"<your-client-id>\" to ~/.config/myx/config.toml"
-        );
-    }
-
-    // Persist so the user is never asked again.
-    save_client_id_to_config(&id);
-    Ok(id)
-}
-
-/// Write `client_id = "…"` into `~/.config/myx/config.toml`. If the file
-/// already contains a (possibly commented-out) `client_id` line, replace it
-/// in place; otherwise append. Best-effort — a read-only home just means the
-/// user will be prompted again next launch.
-fn save_client_id_to_config(id: &str) {
-    let Some(path) = crate::config::Config::path() else { return };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-
-    let line = format!("client_id = \"{id}\"");
-    let contents = std::fs::read_to_string(&path).unwrap_or_default();
-
-    let updated = if contents.contains("client_id") {
-        // Replace the first (possibly commented) client_id line.
-        contents
-            .lines()
-            .map(|l| {
-                if l.trim_start().starts_with("client_id")
-                    || l.trim_start().starts_with("#client_id")
-                {
-                    line.as_str()
-                } else {
-                    l
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n"
-    } else {
-        format!("{contents}\n{line}\n")
+    let id = loop {
+        eprint!("  Paste your Client ID here: ");
+        std::io::stderr().flush().ok();
+        let mut buf = String::new();
+        let read = std::io::stdin()
+            .read_line(&mut buf)
+            .context("failed to read from stdin")?;
+        let id = buf.trim();
+        if read == 0 || id.is_empty() {
+            bail!("No Client ID entered.\n{NO_CLIENT_ID_HELP}");
+        }
+        if looks_like_client_id(id) {
+            break id.to_string();
+        }
+        eprintln!("  That doesn't look like a Client ID (32 letters and digits, 0-9 a-f).");
     };
 
-    if std::fs::write(&path, &updated).is_ok() {
-        eprintln!("  ✔ Saved to {}", path.display());
-        eprintln!();
+    // Persist so the user is never asked again. Failing to save still lets
+    // this launch go on; say so, since the next one will ask again.
+    match crate::config::Config::save_client_id(&id) {
+        Ok(()) => {
+            if let Some(path) = crate::config::Config::path() {
+                eprintln!("  ✔ Saved to {}", path.display());
+            }
+        }
+        Err(e) => eprintln!("  ! Could not save it to config.toml ({e}); you'll be asked again."),
     }
+    eprintln!();
+    Ok(id)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -170,8 +166,7 @@ impl WebApi {
     /// the caller can do the interactive part before a TUI takes the screen. An
     /// expired token still counts: refreshing it is silent.
     pub fn is_cached() -> bool {
-        resolve_client_id()
-            .ok()
+        configured_client_id()
             .and_then(|id| Self::from_cache(&id))
             .is_some()
     }
@@ -445,3 +440,18 @@ fn random_url_safe(n: usize) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_32_digit_hex_id_passes() {
+        assert!(looks_like_client_id("0123456789abcdef0123456789ABCDEF"));
+        assert!(!looks_like_client_id(""));
+        // One digit short, and one letter that isn't hex.
+        assert!(!looks_like_client_id("0123456789abcdef0123456789abcde"));
+        assert!(!looks_like_client_id("0123456789abcdef0123456789abcdeg"));
+        // A quote would break the TOML line it gets saved into.
+        assert!(!looks_like_client_id("0123456789abcdef0123456789abcd\"x"));
+    }
+}
