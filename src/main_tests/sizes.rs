@@ -68,6 +68,7 @@ pub(crate) fn test_app() -> App {
         view: ViewState {
             mode: RightView::NowPlaying,
             zen: false,
+            layout: LayoutMode::Full,
             lyrics: Vec::new(),
             lyrics_synced: false,
             actions: None,
@@ -183,11 +184,14 @@ fn sweep(mut app: App, label: &str) {
     // pixels per frame for nothing a crash test needs.
     app.svc.cell = ratatui_image::FontSize::new(1, 2);
     // Overlays sit over the right view; only Now Playing reshapes for them.
-    let combos: Vec<(RightView, Overlay)> = [RightView::Lyrics, RightView::Queue]
+    let combos: Vec<(LayoutMode, RightView, Overlay)> = [LayoutMode::Full, LayoutMode::Focus]
         .into_iter()
-        .map(|v| (v, Overlay::None))
-        .chain(
-            [
+        .flat_map(|layout| {
+            let views = [RightView::Library, RightView::Lyrics, RightView::Queue]
+                .into_iter()
+                .filter(move |v| layout == LayoutMode::Focus || *v != RightView::Library)
+                .map(move |v| (layout, v, Overlay::None));
+            let overlays = [
                 Overlay::None,
                 Overlay::Actions,
                 Overlay::Equalizer,
@@ -195,21 +199,25 @@ fn sweep(mut app: App, label: &str) {
                 Overlay::FindPrompt,
             ]
             .into_iter()
-            .map(|o| (RightView::NowPlaying, o)),
-        )
+            .map(move |o| (layout, RightView::NowPlaying, o));
+            views.chain(overlays)
+        })
         .collect();
     let mut term = Terminal::new(TestBackend::new(1, 1)).expect("test terminal");
     for (w, h) in sizes() {
         for zen in [false, true] {
             app.view.zen = zen;
-            for &(view, overlay) in &combos {
+            for &(layout, view, overlay) in &combos {
+                app.view.layout = layout;
                 app.view.mode = view;
                 with_overlay(&mut app, overlay);
                 let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     draw(&mut term, &app, w, h)
                 }));
                 if caught.is_err() {
-                    panic!("{label}: panicked at {w}x{h}, {view:?}, {overlay:?}, zen={zen}");
+                    panic!(
+                        "{label}: panicked at {w}x{h}, {layout:?}, {view:?}, {overlay:?}, zen={zen}"
+                    );
                 }
             }
         }
@@ -257,9 +265,19 @@ fn what_is_playing_survives_every_size() {
     let mut app = playing_app();
     app.svc.cell = ratatui_image::FontSize::new(1, 2);
     let mut term = Terminal::new(TestBackend::new(1, 1)).expect("test terminal");
+    let cases = [
+        (LayoutMode::Full, RightView::NowPlaying),
+        (LayoutMode::Full, RightView::Lyrics),
+        (LayoutMode::Full, RightView::Queue),
+        (LayoutMode::Focus, RightView::Library),
+        (LayoutMode::Focus, RightView::NowPlaying),
+        (LayoutMode::Focus, RightView::Lyrics),
+        (LayoutMode::Focus, RightView::Queue),
+    ];
     for zen in [false, true] {
         app.view.zen = zen;
-        for view in [RightView::NowPlaying, RightView::Lyrics, RightView::Queue] {
+        for (layout, view) in cases {
+            app.view.layout = layout;
             app.view.mode = view;
             for w in (24..=120).step_by(3) {
                 for h in 1..=50 {
@@ -267,11 +285,11 @@ fn what_is_playing_survives_every_size() {
                     let text = screen_text(&term);
                     assert!(
                         text.contains("RUNNING"),
-                        "no title at {w}x{h}, {view:?}, zen={zen}:\n{text}"
+                        "no title at {w}x{h}, {layout:?} {view:?}, zen={zen}:\n{text}"
                     );
                     assert!(
                         has_time(&text),
-                        "no time at {w}x{h}, {view:?}, zen={zen}:\n{text}"
+                        "no time at {w}x{h}, {layout:?} {view:?}, zen={zen}:\n{text}"
                     );
                 }
             }
@@ -323,5 +341,175 @@ fn the_footer_never_shows_a_hint_cut_short() {
                 "cut hint {piece:?} at width {w}: {footer:?}"
             );
         }
+    }
+}
+
+// ------------------------------------------------------------------ layouts
+
+#[test]
+fn full_when_it_fits_focus_when_it_doesnt() {
+    use LayoutMode::*;
+    assert_eq!(
+        choose_layout(FULL_MIN_COLS, FULL_MIN_ROWS, Focus, None),
+        Full
+    );
+    assert_eq!(choose_layout(FULL_MIN_COLS - 1, 40, Focus, None), Focus);
+    assert_eq!(choose_layout(200, FULL_MIN_ROWS - 1, Focus, None), Focus);
+    // A forced layout holds at any size.
+    assert_eq!(choose_layout(20, 5, Full, Some(Full)), Full);
+    assert_eq!(choose_layout(200, 60, Full, Some(Focus)), Focus);
+}
+
+#[test]
+fn a_size_on_the_edge_does_not_flip_the_layout() {
+    use LayoutMode::*;
+    // Wobbling a column either side of the threshold, as a drag or a zoom
+    // step does, keeps whichever layout it started in.
+    let mut layout = choose_layout(FULL_MIN_COLS, 30, Focus, None);
+    assert_eq!(layout, Full);
+    for cols in [
+        FULL_MIN_COLS - 1,
+        FULL_MIN_COLS,
+        FULL_MIN_COLS - 2,
+        FULL_MIN_COLS - 1,
+    ] {
+        layout = choose_layout(cols, 30, layout, None);
+        assert_eq!(layout, Full, "{cols} cols");
+    }
+    // Only well below it does Full give way — and coming back needs the full
+    // threshold again.
+    layout = choose_layout(FULL_MIN_COLS - 3, 30, layout, None);
+    assert_eq!(layout, Focus);
+    layout = choose_layout(FULL_MIN_COLS - 1, 30, layout, None);
+    assert_eq!(layout, Focus);
+}
+
+#[test]
+fn the_layout_setting_reads_leniently() {
+    assert_eq!(forced_layout("auto"), None);
+    assert_eq!(forced_layout(""), None);
+    assert_eq!(forced_layout(" Full "), Some(LayoutMode::Full));
+    assert_eq!(forced_layout("focus"), Some(LayoutMode::Focus));
+    assert_eq!(forced_layout("compact"), None, "unknown: auto");
+}
+
+#[test]
+fn library_is_a_view_only_in_focus_and_never_under_zen() {
+    let mut app = test_app();
+    assert_eq!(app.rotation(), RightView::VIEWS);
+    app.view.layout = LayoutMode::Focus;
+    assert_eq!(app.rotation(), RightView::WITH_LIBRARY);
+    app.view.zen = true;
+    assert_eq!(app.rotation(), RightView::VIEWS, "zen: no library anywhere");
+}
+
+#[test]
+fn leaving_focus_or_turning_zen_on_takes_you_off_the_library_view() {
+    let mut app = test_app();
+    app.view.layout = LayoutMode::Focus;
+    app.view.mode = RightView::Library;
+    app.settle_view();
+    assert_eq!(app.view.mode, RightView::Library, "still valid");
+    app.view.layout = LayoutMode::Full;
+    app.settle_view();
+    assert_eq!(app.view.mode, RightView::NowPlaying);
+
+    app.view.layout = LayoutMode::Focus;
+    app.view.mode = RightView::Library;
+    app.view.zen = true;
+    app.settle_view();
+    assert_eq!(app.view.mode, RightView::NowPlaying);
+}
+
+// ------------------------------------------------------------- keys in Focus
+
+fn chans() -> UiChannels {
+    UiChannels {
+        meta: flume::unbounded().0,
+        lib: flume::unbounded().0,
+        queue: flume::unbounded().0,
+        search: flume::unbounded().0,
+        lyrics: flume::unbounded().0,
+        detail: flume::unbounded().0,
+        menu: flume::unbounded().0,
+        astatus: flume::unbounded().0,
+        radio: flume::unbounded().0,
+        libdone: flume::unbounded().0,
+    }
+}
+
+fn press(app: &mut App, code: KeyCode) {
+    handle_key(app, code, KeyModifiers::empty(), &chans());
+}
+
+fn focus_app() -> App {
+    let mut app = playing_app();
+    app.transport.playback_started = false; // no spawned fetches in a unit test
+    app.view.layout = LayoutMode::Focus;
+    app.browse.section = Section::Liked;
+    app.browse.selected = 0;
+    app
+}
+
+#[test]
+fn arrows_step_through_the_library_view_in_focus() {
+    let mut app = focus_app();
+    app.view.mode = RightView::Queue;
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.view.mode, RightView::Library);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.view.mode, RightView::NowPlaying);
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.view.mode, RightView::Library);
+    // Full has no Library view: Queue wraps straight to Now Playing.
+    app.view.layout = LayoutMode::Full;
+    app.view.mode = RightView::Queue;
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.view.mode, RightView::NowPlaying);
+}
+
+#[test]
+fn library_keys_do_nothing_while_the_library_is_off_screen() {
+    let mut app = focus_app();
+    app.view.mode = RightView::NowPlaying;
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.browse.selected, 0, "moved a selection nobody can see");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.browse.section, Section::Liked);
+    press(&mut app, KeyCode::Char('f'));
+    assert!(!app.find.typing);
+    // On the Library view they work.
+    app.view.mode = RightView::Library;
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.browse.selected, 1);
+}
+
+#[test]
+fn search_brings_the_library_up_in_focus_but_not_under_zen() {
+    let mut app = focus_app();
+    app.view.mode = RightView::Lyrics;
+    press(&mut app, KeyCode::Char('/'));
+    assert_eq!(app.view.mode, RightView::Library);
+    assert!(app.search.input_mode, "the prompt is open");
+
+    let mut app = focus_app();
+    app.view.zen = true;
+    app.view.mode = RightView::NowPlaying;
+    press(&mut app, KeyCode::Char('/'));
+    assert_eq!(app.view.mode, RightView::NowPlaying);
+    assert!(!app.search.input_mode, "zen: no library, no search");
+}
+
+#[test]
+fn zen_in_focus_leaves_the_library_view_and_keeps_it_out() {
+    let mut app = focus_app();
+    app.view.mode = RightView::Library;
+    press(&mut app, KeyCode::Char('z'));
+    assert!(app.view.zen);
+    assert_eq!(app.view.mode, RightView::NowPlaying);
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Right);
+        assert_ne!(app.view.mode, RightView::Library);
     }
 }

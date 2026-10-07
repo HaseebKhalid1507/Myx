@@ -453,6 +453,7 @@ async fn boot(
         view: ViewState {
             mode: RightView::NowPlaying,
             zen: false,
+            layout: LayoutMode::Full,
             lyrics: Vec::new(),
             lyrics_synced: false,
             actions: None,
@@ -591,7 +592,8 @@ async fn run_ui(
     let mut last_sync = Instant::now();
     // Nothing is on screen yet, so the first tick must draw.
     let mut dirty = true;
-    let mut last_layout = (app.view.mode, app.view.zen);
+    let mut last_layout = (app.view.mode, app.view.zen, app.view.layout);
+    let forced_layout = forced_layout(&myx::config::get().layout);
     let mut overlay_open = app.view.actions.is_some();
     // A popup overwrites inline-image pixels. Replay the cached cover after the
     // popup-free frame instead of blanking it for one visible frame first.
@@ -693,8 +695,17 @@ async fn run_ui(
                 if app.art_repaint != ArtRepaint::Idle {
                     dirty = true;
                 }
-                if (app.view.mode, app.view.zen) != last_layout {
-                    last_layout = (app.view.mode, app.view.zen);
+                // The screen's size picks the layout, every frame.
+                if let Ok(size) = terminal.size() {
+                    let layout =
+                        choose_layout(size.width, size.height, app.view.layout, forced_layout);
+                    if layout != app.view.layout {
+                        app.view.layout = layout;
+                        app.settle_view();
+                    }
+                }
+                if (app.view.mode, app.view.zen, app.view.layout) != last_layout {
+                    last_layout = (app.view.mode, app.view.zen, app.view.layout);
                     app.art_repaint = ArtRepaint::Wipe;
                     dirty = true;
                 }

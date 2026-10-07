@@ -87,6 +87,23 @@ focused. On macOS and Linux, AirPods and headphone controls work from anywhere
 via the system's Now Playing integration. Mouse works too: click tabs, click a
 track, double-click to play.
 
+## Small screens
+
+myx arranges itself for the space it has, checked every frame, so zooming the
+terminal or resizing the window just works:
+
+- **Room for both** (80×14 and up): the library beside the active view.
+- **Less than that**: one pane at a time. The library becomes one of the views
+  that `←` `→` step through (Library · Now Playing · Lyrics · Queue), and `/`
+  brings it up to search in.
+- **Short screens**: spacing goes first, then the key hints, then the header.
+  The title and position stay to the last row.
+
+`z` (zen) means no library anywhere: it hides the sidebar, and in the
+one-pane layout it takes Library out of the `←` `→` views. To keep one
+arrangement whatever the size, set `layout = "full"` or `"focus"` in
+`config.toml` (the default is `"auto"`).
+
 ## Transparent background
 
 myx can leave the background to your terminal, so its own colour, opacity and
@@ -223,6 +240,11 @@ transparent = true
 # tokyonight, catppuccin, rosepine or gruvbox; "wal" for pywal's colours; or
 # the name of your own theme in ~/.config/myx/themes/ (see Themes above).
 #theme = "album"
+
+# Layout. "auto" fits the screen: the library beside the view when there's
+# room, one pane at a time (the library is one of the ←/→ views) when there
+# isn't. "full" or "focus" keeps one of them whatever the size.
+#layout = "auto"
 ```
 
 ## Credits
