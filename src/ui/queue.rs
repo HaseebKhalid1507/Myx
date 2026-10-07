@@ -2,11 +2,20 @@
 
 use crate::*;
 
-pub(crate) fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
+/// Draw the Queue view; returns whether the track's title was drawn.
+pub(crate) fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Rect) -> bool {
     let inner = area.inner(Margin::new(2, 1));
     if inner.height == 0 {
-        return;
+        return false;
     }
+    // The title is on the line under "NOW PLAYING", after the "PLAYING FROM"
+    // header and its gap when there is one.
+    let title_row: u16 = if app.transport.source_name.is_empty() {
+        1
+    } else {
+        3
+    };
+    let title_shown = app.playback.now.is_some() && inner.height > title_row;
     let max = inner.width as usize;
     let mut lines: Vec<Line> = Vec::new();
 
@@ -64,4 +73,5 @@ pub(crate) fn render_queue_view(f: &mut Frame, app: &App, theme: Theme, area: Re
         }
     }
     f.render_widget(Paragraph::new(lines), inner);
+    title_shown
 }

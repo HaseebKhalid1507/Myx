@@ -2,16 +2,21 @@
 
 use crate::*;
 
-pub(crate) fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
+/// Draw the Lyrics view; returns whether the track's title was drawn.
+pub(crate) fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) -> bool {
     let inner = area.inner(Margin::new(2, 0));
     if inner.height == 0 {
-        return;
+        return false;
     }
     let max = inner.width as usize;
 
-    // Header: current track title + "artist · album", above the lyrics.
+    // Header: current track title + "artist · album", above the lyrics — when
+    // there's room for it and some lyrics too. Below that the lyrics get every
+    // row and the strip shows the track instead.
     let mut lyrics_area = inner;
-    if let Some(n) = app.playback.now.as_ref() {
+    let mut title_shown = false;
+    if let Some(n) = app.playback.now.as_ref().filter(|_| inner.height >= 6) {
+        title_shown = true;
         let head = Layout::vertical([
             Constraint::Length(1), // title
             Constraint::Length(1), // artist / album
@@ -54,7 +59,7 @@ pub(crate) fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) 
                 .alignment(Alignment::Center),
             center_v(lyrics_area, 1),
         );
-        return;
+        return title_shown;
     }
 
     let cur = if app.view.lyrics_synced {
@@ -87,6 +92,7 @@ pub(crate) fn render_lyrics(f: &mut Frame, app: &App, theme: Theme, area: Rect) 
         Paragraph::new(lines).alignment(Alignment::Center),
         lyrics_area,
     );
+    title_shown
 }
 
 /// Most rows one lyric line may take. Past this it ends in `…`, so one long

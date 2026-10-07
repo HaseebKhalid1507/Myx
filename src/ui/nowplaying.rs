@@ -2,8 +2,85 @@
 
 use super::*;
 use crate::*;
+use unicode_width::UnicodeWidthStr;
 
-/// View ①: album art with track details directly beneath — centered as a group.
+/// Where Now Playing's parts go in a view `area` for cells of `cell` pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NpLayout {
+    /// The cover, square in pixels. `None` when there's no room for one.
+    pub(crate) art: Option<Rect>,
+    /// Title, artist, album — as many rows of those as fit (0 to 3).
+    pub(crate) info: Rect,
+    /// The spectrum. `None` when it would cost the cover its size.
+    pub(crate) visualizer: Option<Rect>,
+}
+
+/// Rows above the cover while there are rows to spare.
+const NP_INSET: u16 = 3;
+const NP_INFO: u16 = 3;
+const NP_ART_MAX: u16 = 14;
+const NP_ART_MIN: u16 = 3;
+/// The spectrum is kept only while the cover can still be this tall.
+const NP_ART_MIN_WITH_VIZ: u16 = 6;
+const NP_VIZ: u16 = 7;
+/// Rows under the spectrum, lifting it off the strip.
+const NP_VIZ_LIFT: u16 = 2;
+
+/// Lay out Now Playing. As rows run out the spectrum goes first, before the
+/// cover shrinks below [`NP_ART_MIN_WITH_VIZ`]; then the inset above the cover;
+/// then the cover itself, down to none; the title is the last row standing.
+/// Every part lies inside `area` and none overlaps another. The equalizer
+/// overlay places itself with this too, so the two can't disagree.
+pub(crate) fn np_layout(area: Rect, cell: ratatui_image::FontSize) -> NpLayout {
+    let h = area.height;
+    let viz_cost = NP_VIZ + NP_VIZ_LIFT;
+    // With the spectrum if the cover beside it can still be NP_ART_MIN_WITH_VIZ
+    // rows — which a narrow pane can deny it however tall it is — else without.
+    if h >= NP_ART_MIN_WITH_VIZ + 1 + NP_INFO + viz_cost {
+        let with = np_group(area, h - viz_cost, cell);
+        if with.art.is_some_and(|a| a.height >= NP_ART_MIN_WITH_VIZ) {
+            return NpLayout {
+                visualizer: Some(Rect::new(area.x, area.y + h - viz_cost, area.width, NP_VIZ)),
+                ..with
+            };
+        }
+    }
+    np_group(area, h, cell)
+}
+
+/// The cover and track info, centred as a group in the top `top_h` rows.
+fn np_group(area: Rect, top_h: u16, cell: ratatui_image::FontSize) -> NpLayout {
+    let (fw, fh) = (u32::from(cell.width.max(1)), u32::from(cell.height.max(1)));
+    let info_h = top_h.min(NP_INFO);
+
+    // The cover takes what's left over the info (and a row between them), up
+    // to its cap, but only as a whole cover: a sliver of one helps no one.
+    let room = top_h.saturating_sub(info_h + 1);
+    let mut art_h = room.min(NP_ART_MAX);
+    let mut art_w = (u32::from(art_h) * fh / fw) as u16;
+    if art_w > area.width {
+        art_w = area.width;
+        art_h = (u32::from(art_w) * fw / fh) as u16;
+    }
+    let art = (art_h >= NP_ART_MIN).then_some((art_w, art_h));
+
+    let group_h = info_h + art.map_or(0, |(_, ah)| ah + 1);
+    // Push the group down a little from the top, while rows allow.
+    let inset = top_h.saturating_sub(group_h).min(NP_INSET);
+    let free = top_h - group_h - inset;
+    let group_y = area.y + inset + free / 2;
+
+    let art = art.map(|(aw, ah)| Rect::new(area.x + (area.width - aw) / 2, group_y, aw, ah));
+    let info_y = art.map_or(group_y, |r| r.bottom() + 1);
+    NpLayout {
+        art,
+        info: Rect::new(area.x, info_y, area.width, info_h),
+        visualizer: None,
+    }
+}
+
+/// View ①: album art with track details directly beneath — centered as a
+/// group. Returns whether the title was drawn.
 pub(crate) fn render_nowplaying_view(
     f: &mut Frame,
     app: &App,
@@ -11,130 +88,141 @@ pub(crate) fn render_nowplaying_view(
     theme: Theme,
     area: Rect,
     repaint: ArtRepaint,
-) {
-    if app.playback.now.is_none() {
-        f.render_widget(
-            Paragraph::new("Nothing playing.\nBrowse ← and press Enter.")
-                .style(theme.muted())
-                .alignment(Alignment::Center),
-            center_v(area, 2),
-        );
-        return;
-    }
-
-    // Split: album art + track info on top, a compact spectrum below, lifted a
-    // little off the bottom.
-    let chunks = Layout::vertical([
-        Constraint::Min(6),    // art + text
-        Constraint::Length(7), // spectrum
-        Constraint::Length(2), // breathing room (lifts the spectrum up)
-    ])
-    .split(area);
-    let top = chunks[0];
-    // Push the art + info group down a little from the top.
-    let top = Rect {
-        x: top.x,
-        y: top.y + 3,
-        width: top.width,
-        height: top.height.saturating_sub(3),
-    };
-    let viz_area = chunks[1];
-
-    // Derive the cover's cell footprint from the terminal's font aspect so a
-    // square image renders square (and our centering math is exact).
-    let font = app.svc.cell;
-    let fw = font.width.max(1) as u32;
-    let fh = font.height.max(1) as u32;
-
-    // Reserve 3 rows for text (+1 gap). Cap the art so the group stays compact.
-    let avail_h = top.height.saturating_sub(4);
-    let mut art_h = avail_h.clamp(3, 14);
-    // Square image width in cells for this height: w = h * fh / fw.
-    let mut art_w = (art_h as u32 * fh / fw) as u16;
-    if art_w > top.width {
-        art_w = top.width;
-        art_h = (art_w as u32 * fw / fh) as u16;
-    }
-
-    let group_h = art_h + 4; // art + gap + title + artist + album
-    let art_y = top.y + top.height.saturating_sub(group_h) / 2;
-    let art_x = top.x + top.width.saturating_sub(art_w) / 2;
-    let art_rect = Rect {
-        x: art_x,
-        y: art_y,
-        width: art_w,
-        height: art_h,
-    };
-    out.art = Some(art_rect);
-
-    match app.playback.now.as_ref().and_then(|n| n.cover.as_ref()) {
-        _ if repaint == ArtRepaint::Wipe => wipe_area(f, art_rect),
-        // A resize hasn't settled, so the cell size — and with it the sharp
-        // cover's size — isn't known yet. The half-block one is made of cells
-        // and can't be wrong; it gives way to the sharp one once measured.
-        Some(cover) if app.view.cell_settling => cover.render_preview(f, art_rect, app.svc.cell),
-        // Writing the escape means transmitting the image, so only do it when
-        // something actually asked for it. A theme fade repaints every glyph on
-        // screen dozens of times, and re-sending the cover on each of those is
-        // what made it flicker.
-        Some(cover) if repaint == ArtRepaint::Draw || cover.needs_send(art_rect, app.svc.cell) => {
-            cover.render(f, art_rect, app.svc.cell)
+) -> bool {
+    let Some(n) = app.playback.now.as_ref() else {
+        if area.height > 0 {
+            f.render_widget(
+                Paragraph::new("Nothing playing.\nBrowse ← and press Enter.")
+                    .style(theme.muted())
+                    .alignment(Alignment::Center),
+                center_v(area, 2),
+            );
         }
-        // Already on screen: hold the cells so nothing overwrites the picture,
-        // and send nothing.
-        Some(_) => hold_area(f, art_rect),
-        None => wipe_area(f, art_rect),
+        return false;
+    };
+    let layout = np_layout(area, app.svc.cell);
+
+    if let Some(art_rect) = layout.art {
+        out.art = Some(art_rect);
+        match n.cover.as_ref() {
+            _ if repaint == ArtRepaint::Wipe => wipe_area(f, art_rect),
+            // A resize hasn't settled, so the cell size — and with it the sharp
+            // cover's size — isn't known yet. The half-block one is made of cells
+            // and can't be wrong; it gives way to the sharp one once measured.
+            Some(cover) if app.view.cell_settling => {
+                cover.render_preview(f, art_rect, app.svc.cell)
+            }
+            // Writing the escape means transmitting the image, so only do it when
+            // something actually asked for it. A theme fade repaints every glyph on
+            // screen dozens of times, and re-sending the cover on each of those is
+            // what made it flicker.
+            Some(cover)
+                if repaint == ArtRepaint::Draw || cover.needs_send(art_rect, app.svc.cell) =>
+            {
+                cover.render(f, art_rect, app.svc.cell)
+            }
+            // Already on screen: hold the cells so nothing overwrites the picture,
+            // and send nothing.
+            Some(_) => hold_area(f, art_rect),
+            None => wipe_area(f, art_rect),
+        }
     }
 
-    if let Some(n) = app.playback.now.as_ref() {
-        let text_rect = Rect {
-            x: top.x,
-            y: art_rect.y + art_h + 1,
-            width: top.width,
-            height: 3,
-        };
-        let lines = vec![
-            Line::from(Span::styled(
-                truncate(&n.title, top.width as usize),
-                Style::default()
-                    .fg(theme.text.into())
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                truncate(&n.artist, top.width as usize),
-                Style::default().fg(theme.primary.into()),
-            )),
-            Line::from(Span::styled(
-                truncate(&n.album, top.width as usize),
-                theme.muted(),
-            )),
-        ];
-        f.render_widget(
-            Paragraph::new(lines).alignment(Alignment::Center),
-            text_rect,
-        );
-    }
+    let width = layout.info.width as usize;
+    let lines = [
+        Line::from(Span::styled(
+            truncate(&n.title, width),
+            Style::default()
+                .fg(theme.text.into())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            truncate(&n.artist, width),
+            Style::default().fg(theme.primary.into()),
+        )),
+        Line::from(Span::styled(truncate(&n.album, width), theme.muted())),
+    ];
+    let shown = layout.info.height as usize;
+    f.render_widget(
+        Paragraph::new(lines.into_iter().take(shown).collect::<Vec<_>>())
+            .alignment(Alignment::Center),
+        layout.info,
+    );
 
-    render_visualizer(f, app, theme, viz_area);
+    if let Some(viz) = layout.visualizer {
+        render_visualizer(f, app, theme, viz);
+    }
+    shown > 0
 }
 
-/// Slim persistent bottom strip: play state + track, then the progress bar.
+/// Slim persistent bottom strip. Upper row: the volume meter, and the playing
+/// track whenever the view above isn't showing it (`out.title_shown`). Lower
+/// row: time and the progress bar. Either row may be `None` on a short screen;
+/// the progress row is the last to go.
 pub(crate) fn render_now_strip(
     f: &mut Frame,
     app: &App,
     out: &mut FrameOut,
     theme: Theme,
-    area: Rect,
+    top: Option<Rect>,
+    progress: Option<Rect>,
 ) {
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
+    out.hits.vol = None;
+    if let Some(top) = top {
+        let track = app.playback.now.as_ref().filter(|_| !out.title_shown);
+        // The meter is 13 cells; the track, when shown, keeps at least 12.
+        let meter = if track.is_some() { 13 + 2 + 12 } else { 13 };
+        if top.width >= meter {
+            render_volume(f, app, out, theme, top);
+        }
+        if let Some(n) = track {
+            let room = if out.hits.vol.is_some() {
+                top.width.saturating_sub(13 + 2)
+            } else {
+                top.width
+            };
+            let state = if n.is_playing { "▶ " } else { "❚❚ " };
+            let text = format!("{state}{} · {}", n.title, n.artist);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    truncate(&text, room as usize),
+                    Style::default().fg(theme.text.into()),
+                ))),
+                Rect::new(top.x, top.y, room, 1),
+            );
+            out.title_shown = true;
+        }
+    }
 
-    // Volume meter (top row, far right). Still honest in remote mode: +/- goes
-    // to the remote device's volume.
-    render_volume(f, app, out, theme, rows[0]);
-
-    // Seek/progress bar (bottom row). Record bar geometry for click-to-seek.
+    out.hits.bar = None;
+    let Some(row) = progress else {
+        return;
+    };
+    // Nothing above showed the track (a short screen): this row carries it,
+    // before the time, in up to half the width.
+    let track = app
+        .playback
+        .now
+        .as_ref()
+        .filter(|_| !out.title_shown)
+        .map(|n| {
+            let state = if n.is_playing { "▶ " } else { "❚❚ " };
+            let room = (row.width / 2).max(12).min(row.width) as usize;
+            format!(
+                "{}  ",
+                truncate(
+                    &format!("{state}{} · {}", n.title, n.artist),
+                    room.saturating_sub(2)
+                )
+            )
+        });
+    if track.is_some() {
+        out.title_shown = true;
+    }
+    let prefix_len = track.as_deref().map_or(0, |t| t.width() as u16);
+    // Seek/progress bar. Record bar geometry for click-to-seek.
     let pos = app.playback.position_ms();
-    let left_len = format!("{} ", fmt_ms(pos)).chars().count() as u16;
+    let left_len = prefix_len + format!("{} ", fmt_ms(pos)).chars().count() as u16;
     let right_len = format!(
         " {}",
         fmt_ms(
@@ -147,17 +235,25 @@ pub(crate) fn render_now_strip(
     )
     .chars()
     .count() as u16;
-    let bar_w = rows[1].width.saturating_sub(left_len + right_len);
-    out.hits.bar = Some(Rect {
-        x: rows[1].x + left_len,
-        y: rows[1].y,
-        width: bar_w,
-        height: 1,
-    });
-    render_progress(f, app, theme, rows[1]);
+    let bar_w = row.width.saturating_sub(left_len + right_len);
+    if bar_w > 0 {
+        out.hits.bar = Some(Rect {
+            x: row.x + left_len,
+            y: row.y,
+            width: bar_w,
+            height: 1,
+        });
+    }
+    render_progress(f, app, theme, row, track);
 }
 
-pub(crate) fn render_progress(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
+pub(crate) fn render_progress(
+    f: &mut Frame,
+    app: &App,
+    theme: Theme,
+    area: Rect,
+    track: Option<String>,
+) {
     let (pos, dur) = match &app.playback.now {
         Some(n) => (app.playback.position_ms(), n.duration_ms.max(1)),
         None => (0, 1),
@@ -166,11 +262,16 @@ pub(crate) fn render_progress(f: &mut Frame, app: &App, theme: Theme, area: Rect
     // flush against the right edge (aligned with the volume meter above it).
     let left = format!("{} ", fmt_ms(pos));
     let right = format!(" {}", fmt_ms(dur));
-    let reserve = left.chars().count() + right.chars().count();
+    let track_w = track.as_deref().map_or(0, |t| t.width());
+    let reserve = track_w + left.chars().count() + right.chars().count();
     let bar_w = (area.width as usize).saturating_sub(reserve);
     let filled = ((pos as f32 / dur as f32) * bar_w as f32) as usize;
 
-    let mut spans = vec![Span::styled(left, theme.muted())];
+    let mut spans = Vec::new();
+    if let Some(t) = track {
+        spans.push(Span::styled(t, Style::default().fg(theme.text.into())));
+    }
+    spans.push(Span::styled(left, theme.muted()));
     spans.extend(gradient_progress(
         bar_w,
         filled,
