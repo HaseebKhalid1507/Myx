@@ -37,7 +37,11 @@ pub(crate) fn handle_mouse(
                     let denom = sb.height.saturating_sub(1).max(1) as f32;
                     let frac = (m.row - sb.y) as f32 / denom;
                     let sel = (frac * (total - 1) as f32).round() as usize;
-                    app.browse.selected = sel.min(total - 1);
+                    // A position among the rows on screen, which a find may
+                    // have narrowed; the selection is an index into all rows.
+                    if let Some(&idx) = app.shown_rows().get(sel.min(total - 1)) {
+                        app.browse.selected = idx;
+                    }
                     app.normalize_selection();
                 }
             }
@@ -91,13 +95,9 @@ pub(crate) fn handle_mouse(
                     && m.row >= lr.y
                     && m.row < lr.y + lr.height
                 {
-                    let idx = out.lib_offset + (m.row - lr.y) as usize;
-                    let selectable = app
-                        .cur_items()
-                        .get(idx)
-                        .map(|it| !it.is_header())
-                        .unwrap_or(false);
-                    if selectable {
+                    let shown = out.lib_offset + (m.row - lr.y) as usize;
+                    let idx = app.shown_rows().get(shown).copied();
+                    if let Some(idx) = idx.filter(|&i| app.selectable(i)) {
                         app.browse.selected = idx;
                         let now = Instant::now();
                         let dbl = app

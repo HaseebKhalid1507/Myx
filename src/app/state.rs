@@ -99,6 +99,64 @@ pub(crate) struct BrowseState {
     pub(crate) details: Vec<Detail>,
 }
 
+/// Which list is on screen: a library section, the search results, or the page
+/// at some depth of the drill-in stack. Find remembers the one it was opened on.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum ListKey {
+    Section(Section),
+    Search,
+    Page(usize, String),
+}
+
+/// `f`: find in the list on screen. A lens, not an edit — rows that don't
+/// match are skipped like headers are, so picking a match plays exactly what
+/// it would have played unfiltered. It belongs to the list it was opened on
+/// and lapses the moment another list is on screen.
+#[derive(Default)]
+pub(crate) struct FindState {
+    /// The prompt is taking keys.
+    pub(crate) typing: bool,
+    pub(crate) input: tui_textarea::TextArea<'static>,
+    /// The list the query was typed for.
+    pub(crate) list: Option<ListKey>,
+}
+
+impl FindState {
+    /// The typed query (the prompt is single-line).
+    pub(crate) fn query(&self) -> &str {
+        self.input.lines().first().map_or("", String::as_str)
+    }
+
+    /// The query in force on list `key`: only the list it was typed for, and
+    /// only once there is something in it.
+    pub(crate) fn query_for(&self, key: &ListKey) -> Option<&str> {
+        let q = self.query().trim();
+        (self.list.as_ref() == Some(key) && !q.is_empty()).then_some(q)
+    }
+
+    /// Start typing on list `key`. Reopening on the same list edits the query
+    /// already there; on another list it starts empty.
+    pub(crate) fn open(&mut self, key: ListKey) {
+        if self.list.as_ref() != Some(&key) {
+            self.input = Default::default();
+            self.list = Some(key);
+        }
+        self.typing = true;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Drop a find whose list has left the screen, so coming back to that
+    /// list later shows all of it again.
+    pub(crate) fn forget_unless(&mut self, key: &ListKey) {
+        if self.list.as_ref().is_some_and(|l| l != key) {
+            self.clear();
+        }
+    }
+}
+
 /// The `/` search overlay: whether the prompt is capturing keys, the typed
 /// query, and the results that temporarily replace the library list.
 pub(crate) struct SearchState {

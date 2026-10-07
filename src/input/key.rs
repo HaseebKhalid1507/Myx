@@ -9,6 +9,11 @@ pub(crate) fn handle_key(
     mods: KeyModifiers,
     chans: &UiChannels,
 ) -> bool {
+    // A find belongs to the list it was typed for; once another list is on
+    // screen (a page opened, a section switched), it's gone.
+    let list = app.list_key();
+    app.find.forget_unless(&list);
+
     // --- Actions menu captures input while open ---
     // Double-press Ctrl-C to quit (works from anywhere). Single press arms it.
     if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
@@ -44,6 +49,9 @@ pub(crate) fn handle_key(
                 app.search.input_mode = false;
                 let q = app.search.query().trim().to_string();
                 if !q.is_empty() {
+                    // Results replace whatever list is open, pages included;
+                    // a page left on top would hide them.
+                    app.browse.details.clear();
                     app.search.searching = true;
                     app.search.in_flight = true;
                     app.browse.selected = 0;
@@ -67,6 +75,47 @@ pub(crate) fn handle_key(
         return false;
     }
 
+    // --- Find prompt: typing narrows the list; arrows still move ---
+    if app.find.typing {
+        match code {
+            KeyCode::Esc => {
+                app.find.clear();
+                app.normalize_selection();
+                return false;
+            }
+            KeyCode::Up => {
+                app.move_sel(-1);
+                return false;
+            }
+            KeyCode::Down => {
+                app.move_sel(1);
+                return false;
+            }
+            // Enter picks the highlighted match, the way it always does; the
+            // list stays narrowed until Esc.
+            KeyCode::Enter => {
+                app.find.typing = false;
+                if app.find_query().is_none() {
+                    app.find.clear();
+                    return false;
+                }
+            }
+            KeyCode::Char('u') if mods.contains(KeyModifiers::CONTROL) => {
+                app.find.input = Default::default();
+                app.browse.selected = app.first_selectable();
+                return false;
+            }
+            _ => {
+                app.find
+                    .input
+                    .input(crossterm::event::KeyEvent::new(code, mods));
+                // Like fzf: a new query puts the cursor on its first match.
+                app.browse.selected = app.first_selectable();
+                return false;
+            }
+        }
+    }
+
     // Zen hides the library, so the keys that drive one do nothing rather than
     // moving a selection nobody can see. Placed after the overlays above, which
     // stay usable if one was already open when zen came on.
@@ -82,7 +131,17 @@ pub(crate) fn handle_key(
             app.search.input_mode = true;
             app.search.clear();
         }
+        KeyCode::Char('f') => {
+            let list = app.list_key();
+            app.find.open(list);
+            app.normalize_selection();
+        }
         KeyCode::Char('q') => return true,
+        // Esc undoes one thing: a find first, then the page, then the search.
+        KeyCode::Esc if app.find_query().is_some() => {
+            app.find.clear();
+            app.normalize_selection();
+        }
         KeyCode::Esc => {
             if let Some(d) = app.browse.details.pop() {
                 app.browse.selected = d.parent_selected;
@@ -165,7 +224,7 @@ pub(crate) fn handle_key(
                     .filter(|n| !n.uri.is_empty())
                     .map(|n| LibItem::track(n.title.clone(), n.artist.clone(), n.uri.clone()))
             } else {
-                app.cur_items().get(app.browse.selected).cloned()
+                app.selected_item().cloned()
             };
             if let Some(item) = item {
                 if !item.is_header() && !item.is_play() {
@@ -268,6 +327,6 @@ pub(crate) fn drives_library(code: KeyCode) -> bool {
             | KeyCode::Down
             | KeyCode::Enter
             | KeyCode::Esc
-            | KeyCode::Char('/' | '[' | ']' | 'j' | 'k' | 'o' | 'r' | 'P' | 'S')
+            | KeyCode::Char('/' | 'f' | '[' | ']' | 'j' | 'k' | 'o' | 'r' | 'P' | 'S')
     )
 }

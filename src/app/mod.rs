@@ -50,6 +50,7 @@ pub(crate) struct App {
     pub(crate) browse: BrowseState,
     pub(crate) transport: Transport,
     pub(crate) search: SearchState,
+    pub(crate) find: FindState,
     pub(crate) view: ViewState,
     pub(crate) session: SessionState,
     // What the album art box owes the next frame. See ArtRepaint.
@@ -75,39 +76,61 @@ impl App {
             self.browse.library.items_mut(self.browse.section)
         }
     }
-    /// First non-header index (where a fresh selection should land).
+    /// Which list `cur_items` is showing.
+    pub(crate) fn list_key(&self) -> ListKey {
+        if let Some(d) = self.browse.details.last() {
+            ListKey::Page(self.browse.details.len(), d.context_uri.clone())
+        } else if self.search.searching {
+            ListKey::Search
+        } else {
+            ListKey::Section(self.browse.section)
+        }
+    }
+    /// The `f` query narrowing the list on screen, if any.
+    pub(crate) fn find_query(&self) -> Option<&str> {
+        self.find.query_for(&self.list_key())
+    }
+    /// The rows of the list on screen to draw, as indices into `cur_items`.
+    pub(crate) fn shown_rows(&self) -> Vec<usize> {
+        shown_rows(self.cur_items(), self.find_query())
+    }
+    /// Whether row `i` can take the cursor (not a header, and found).
+    pub(crate) fn selectable(&self, i: usize) -> bool {
+        row_selectable(self.cur_items(), i, self.find_query())
+    }
+    /// The row under the cursor, if the cursor is on one that can be picked —
+    /// never a header, and never a row the find query is hiding.
+    pub(crate) fn selected_item(&self) -> Option<&LibItem> {
+        let i = self.browse.selected;
+        self.selectable(i).then(|| &self.cur_items()[i])
+    }
+    /// First selectable index (where a fresh selection should land).
     pub(crate) fn first_selectable(&self) -> usize {
-        self.cur_items()
-            .iter()
-            .position(|i| !i.is_header())
+        (0..self.cur_items().len())
+            .find(|&i| self.selectable(i))
             .unwrap_or(0)
     }
-    /// Move the selection by `dir`, skipping header rows, clamped at the ends.
+    /// Move the selection by `dir`, skipping headers and rows find is hiding,
+    /// clamped at the ends.
     pub(crate) fn move_sel(&mut self, dir: isize) {
-        let items = self.cur_items();
-        let n = items.len() as isize;
-        if n == 0 {
-            return;
-        }
+        let n = self.cur_items().len() as isize;
         let mut i = self.browse.selected as isize;
         loop {
             i += dir;
             if i < 0 || i >= n {
                 return;
             }
-            if !items[i as usize].is_header() {
+            if self.selectable(i as usize) {
                 self.browse.selected = i as usize;
                 return;
             }
         }
     }
-    /// If the selection landed on a header (e.g. after data loads), bump it off.
+    /// If the selection landed on a header or a hidden row (data loaded, a
+    /// find narrowed the list), bump it to the first row that can be picked.
     pub(crate) fn normalize_selection(&mut self) {
-        if self
-            .cur_items()
-            .get(self.browse.selected)
-            .is_some_and(|i| i.is_header())
-        {
+        let i = self.browse.selected;
+        if i < self.cur_items().len() && !self.selectable(i) {
             self.browse.selected = self.first_selectable();
         }
     }
@@ -130,7 +153,7 @@ impl App {
     /// Play whatever's selected (in the current section, or in search results).
     /// Act on the selected item. Returns what the caller should do next.
     pub(crate) fn activate(&mut self) -> Activated {
-        let Some(item) = self.cur_items().get(self.browse.selected).cloned() else {
+        let Some(item) = self.selected_item().cloned() else {
             return Activated::None;
         };
         if item.is_header() {

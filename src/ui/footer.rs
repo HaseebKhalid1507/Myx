@@ -6,7 +6,7 @@ pub(crate) fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) 
     let on = |b: bool| if b { theme.success } else { theme.text_muted };
     let key = |k: &'static str| Span::styled(k, Style::default().fg(theme.primary.into()));
     let lbl = |t: &'static str| Span::styled(t, theme.muted());
-    let enter_lbl = enter_label(app.cur_items().get(app.browse.selected));
+    let enter_lbl = enter_label(app.selected_item());
     let play_lbl = if app.playback.now.as_ref().is_some_and(|n| n.is_playing) {
         " pause   "
     } else {
@@ -18,6 +18,7 @@ pub(crate) fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) 
         (true, key("⇥"), lbl(" section   ")),
         (false, key("←→"), lbl(" view   ")),
         (true, key("/"), lbl(" search   ")),
+        (true, key("f"), lbl(" find   ")),
         (
             true,
             key("⏎"),
