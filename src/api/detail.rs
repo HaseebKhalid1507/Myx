@@ -5,15 +5,50 @@ use crate::*;
 
 pub(crate) fn spawn_detail_fetch(
     webapi: Arc<Mutex<WebApi>>,
+    session: librespot_core::Session,
     uri: String,
     name: String,
     tx: flume::Sender<(String, String, Vec<LibItem>)>,
 ) {
-    tokio::task::spawn_blocking(move || {
-        if let Some(token) = token_of(&webapi) {
-            let (title, items) = fetch_detail_blocking(&token, &uri, &name);
-            let _ = tx.send((uri, title, items));
+    tokio::spawn(async move {
+        let web_uri = uri.clone();
+        let web_name = name.clone();
+        let web_result = tokio::task::spawn_blocking(move || {
+            let token = token_of(&webapi)?;
+            Some(fetch_detail_blocking(&token, &web_uri, &web_name))
+        })
+        .await
+        .ok()
+        .flatten();
+        let (title, mut items) = web_result.unwrap_or_else(|| {
+            (
+                name.clone(),
+                vec![LibItem::play(format!("▶︎ Play {name}"), uri.clone())],
+            )
+        });
+
+        // The Web API no longer returns items for public foreign playlists.
+        // Playback still resolves those contexts, so reuse that path here.
+        if uri.starts_with("spotify:playlist:") && !items.iter().any(|item| item.is_track()) {
+            match tokio::time::timeout(
+                Duration::from_secs(30),
+                engine::playlist_tracks(&session, &uri),
+            )
+            .await
+            {
+                Ok(Ok(tracks)) => {
+                    items.retain(|item| !item.is_header());
+                    for (order, track) in tracks.into_iter().enumerate() {
+                        let mut item = LibItem::track(track.name, track.artist, track.uri);
+                        item.order = order as u32;
+                        items.push(item);
+                    }
+                }
+                Ok(Err(error)) => liblog(format!("detail: playlist fallback failed: {error:#}")),
+                Err(_) => liblog("detail: playlist fallback timed out"),
+            }
         }
+        let _ = tx.send((uri, title, items));
     });
 }
 
@@ -141,15 +176,17 @@ pub(crate) fn fetch_detail_blocking(token: &str, uri: &str, name: &str) -> (Stri
         }
         "playlist" => {
             // Follow `next` instead of taking only the first page: playlists
-            // routinely exceed the 100-item page size, and the drill-in list
+            // routinely exceed one page, and the drill-in list
             // (plus "play from this track") was silently truncated.
             let before = items.len();
             items.extend(fetch_all_pages(
                 &client,
-                &format!("{API}/playlists/{id}/items?limit=100"),
+                // Spotify reduced this endpoint's maximum from 100 to 50 in
+                // February 2026. A larger limit makes the request fail.
+                &format!("{API}/playlists/{id}/items?limit=50"),
                 token,
                 None, // items[] is top-level on this endpoint
-                10,   // 1,000 tracks, matching the other sections' ceiling
+                20,   // 1,000 tracks, matching the other sections' ceiling
                 parse_playlist_track,
             ));
             if items.len() == before {

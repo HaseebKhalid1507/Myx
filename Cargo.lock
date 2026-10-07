@@ -2807,6 +2807,7 @@ dependencies = [
  "image",
  "librespot-connect",
  "librespot-core",
+ "librespot-metadata",
  "librespot-playback",
  "log",
  "open",
