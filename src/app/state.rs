@@ -20,17 +20,69 @@ pub(crate) struct ThemeState {
     pub(crate) displayed: Theme,
     pub(crate) target: Theme,
     pub(crate) fade: Option<ThemeFade>,
+    /// A palette picked in the config (`theme = "…"`) stays put; covers only
+    /// move the UI's colours when this is false.
+    pub(crate) fixed: bool,
+    /// What went wrong reading the configured theme, shown once in the status
+    /// line when the library has loaded — the first moment it won't be
+    /// overwritten straight away.
+    pub(crate) notice: Option<String>,
 }
 
-/// The palette before any cover has arrived, with the background as configured.
+/// `theme = "…"` from the config, resolved once: theme files and pywal's
+/// colours are read at startup, not on every frame.
+pub(crate) fn chosen_theme() -> &'static myx::user_theme::Resolved {
+    static CHOSEN: std::sync::OnceLock<myx::user_theme::Resolved> = std::sync::OnceLock::new();
+    CHOSEN.get_or_init(|| {
+        myx::user_theme::resolve(
+            &myx::config::get().theme,
+            &myx::user_theme::Sources::from_env(),
+        )
+    })
+}
+
+/// The palette before any cover has arrived — or for good, with a fixed theme —
+/// with the background as configured.
 pub(crate) fn startup_theme() -> Theme {
+    let palette = match chosen_theme().choice {
+        myx::user_theme::Choice::Fixed(theme) => theme,
+        myx::user_theme::Choice::Album => TOKYONIGHT,
+    };
     Theme {
         transparent: myx::config::get().transparent,
-        ..TOKYONIGHT
+        ..palette
     }
 }
 
 impl ThemeState {
+    pub(crate) fn at_startup() -> Self {
+        let chosen = chosen_theme();
+        for warning in &chosen.warnings {
+            liblog(warning);
+        }
+        let notice = chosen
+            .warnings
+            .first()
+            .map(|first| match chosen.warnings.len() {
+                1 => first.clone(),
+                n => format!("{first} (+{} more)", n - 1),
+            });
+        Self {
+            displayed: startup_theme(),
+            target: startup_theme(),
+            fade: None,
+            fixed: matches!(chosen.choice, myx::user_theme::Choice::Fixed(_)),
+            notice,
+        }
+    }
+
+    /// A new cover's palette: faded to, unless the config fixed the theme.
+    pub(crate) fn follow_cover(&mut self, to: Theme) {
+        if !self.fixed {
+            self.start_fade(to);
+        }
+    }
+
     pub(crate) fn start_fade(&mut self, to: Theme) {
         // A cover's palette knows nothing of the config; the startup flag rides along.
         let to = Theme {
