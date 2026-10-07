@@ -9,6 +9,10 @@ pub(crate) struct Services {
     pub(crate) engine: Engine,
     pub(crate) picker: Picker,
     pub(crate) webapi: Arc<Mutex<WebApi>>,
+    /// The terminal's cell size in pixels *now*. Starts as the picker's
+    /// startup measurement and is measured again after resizes, because a
+    /// font change mid-session changes it and the picker's copy can't be.
+    pub(crate) cell: ratatui_image::FontSize,
 }
 
 pub(crate) const FADE_MS: u64 = 1500;
@@ -251,6 +255,9 @@ pub(crate) struct ViewState {
     pub(crate) actions: Option<ActionMenu>,
     // Ten-band equalizer overlay (opened with `e`).
     pub(crate) equalizer: Option<EqualizerOverlay>,
+    // Between a resize and the cell measurement after it: the cover's size
+    // isn't known, and a blank slot beats a wrong cover.
+    pub(crate) cell_settling: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

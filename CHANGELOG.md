@@ -44,6 +44,12 @@ they are added to, never rewritten.
 - Album art no longer blinks inside tmux. Ending a synchronized update makes
   tmux redraw the whole pane and send the image again, every frame; inside
   tmux frames are now written without one.
+- The album art no longer breaks when the terminal's font size changes while
+  myx is running. The cover was sized for the cell measured at startup, so a
+  bigger font left it too small and off-centre, and a smaller one cropped it.
+  After a resize settles (150 ms), myx measures the cell again — from tmux when
+  inside it, otherwise by asking the terminal — and redraws the cover for it;
+  until then the cover's spot stays blank rather than showing a wrong one.
 
 
 ## [0.5.0] — 2026-09-09

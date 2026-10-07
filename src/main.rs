@@ -23,6 +23,7 @@ mod input;
 mod ui;
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -403,6 +404,7 @@ async fn boot(
     let app = App {
         svc: Services {
             engine,
+            cell: picker.font_size(),
             picker,
             webapi,
         },
@@ -455,6 +457,7 @@ async fn boot(
             lyrics_synced: false,
             actions: None,
             equalizer: None,
+            cell_settling: false,
         },
         session: SessionState {
             restore_uri,
@@ -494,15 +497,27 @@ async fn run_ui(
     ev_rx: flume::Receiver<EngineEvent>,
 ) -> Result<MxcHandle> {
     let (in_tx, in_rx) = flume::unbounded::<Event>();
-    std::thread::spawn(move || loop {
-        if matches!(event::poll(Duration::from_millis(200)), Ok(true)) {
-            if let Ok(ev) = event::read() {
-                if in_tx.send(ev).is_err() {
-                    break;
+    let input_gate = Arc::new(InputGate::default());
+    std::thread::spawn({
+        let gate = input_gate.clone();
+        move || loop {
+            // Parked while the UI asks the terminal something and reads the
+            // answer off stdin itself; see `measure_cell`.
+            if gate.pause.load(Ordering::Acquire) {
+                gate.parked.store(true, Ordering::Release);
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            if matches!(event::poll(Duration::from_millis(50)), Ok(true)) {
+                if let Ok(ev) = event::read() {
+                    if in_tx.send(ev).is_err() {
+                        break;
+                    }
                 }
             }
         }
     });
+    let mut cell_watch = myx::term::CellWatch::default();
 
     let (meta_tx, meta_rx) = flume::unbounded::<TrackMeta>();
     let (lib_tx, lib_rx) = flume::unbounded::<(Section, Vec<LibItem>)>();
@@ -663,6 +678,18 @@ async fn run_ui(
                     || (app.view.mode == RightView::Lyrics && app.view.lyrics_synced)
                     || (app.view.mode == RightView::NowPlaying
                         && app.svc.engine.bands.try_lock().map(|g| g.is_active).unwrap_or(false));
+                // A resize burst has gone quiet: measure the cell again, then
+                // draw the cover for it (the slot stayed blank meanwhile).
+                if cell_watch.due(Instant::now()) {
+                    if let Some(cell) = measure_cell(&app.svc.picker, &input_gate) {
+                        if !myx::cover::same_cell(cell, app.svc.cell) {
+                            liblog(format!("cell: {:?} -> {cell:?}", app.svc.cell));
+                            app.svc.cell = cell;
+                        }
+                    }
+                    app.view.cell_settling = false;
+                    app.art_repaint = ArtRepaint::Wipe;
+                }
                 if app.art_repaint != ArtRepaint::Idle {
                     dirty = true;
                 }
@@ -710,7 +737,9 @@ async fn run_ui(
                                     .as_ref()
                                     .and_then(|now| now.cover.as_ref()),
                             )
-                            .map(|(area, cover)| cover.render_direct(terminal.backend_mut(), area))
+                            .map(|(area, cover)| {
+                                cover.render_direct(terminal.backend_mut(), area, app.svc.cell)
+                            })
                     } else {
                         None
                     };
@@ -771,8 +800,12 @@ async fn run_ui(
                     // Resizes lose inline art. Focus only does so when tmux
                     // repaints a pane; compositor focus-follows-mouse events do
                     // not and must not make the cover flash.
+                    // A font change arrives as a resize too, so the cell may
+                    // have changed: keep the cover blank until it's measured.
                     Ok(Event::Resize(..)) => {
                         app.art_repaint = ArtRepaint::Wipe;
+                        cell_watch.resized(Instant::now());
+                        app.view.cell_settling = true;
                     }
                     Ok(Event::FocusGained) if in_tmux => {
                         restore_art = true;
@@ -985,6 +1018,42 @@ async fn with_loader<T>(
             }
         }
     }
+}
+
+/// Lets the UI borrow stdin from the input thread: set `pause`, wait for
+/// `parked`, read, clear `pause`. The UI clears `parked` before pausing, so a
+/// `parked` left over from last time can't be mistaken for this one.
+#[derive(Default)]
+struct InputGate {
+    pause: AtomicBool,
+    parked: AtomicBool,
+}
+
+/// The terminal's cell size now. tmux knows it exactly and can be asked
+/// without touching stdin. Anywhere else, ask the terminal (`CSI 16 t`) with
+/// the input thread parked so the answer isn't read as keys — but only if it
+/// answered at startup: halfblocks means it didn't, and asking again would
+/// just cost the timeout after every resize.
+fn measure_cell(picker: &Picker, gate: &InputGate) -> Option<ratatui_image::FontSize> {
+    if std::env::var_os("TMUX").is_some() {
+        return myx::term::tmux_cell_size();
+    }
+    if picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
+        return None;
+    }
+    gate.parked.store(false, Ordering::Release);
+    gate.pause.store(true, Ordering::Release);
+    let deadline = Instant::now() + Duration::from_millis(200);
+    while !gate.parked.load(Ordering::Acquire) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let cell = if gate.parked.load(Ordering::Acquire) {
+        myx::term::query_cell_size(Duration::from_millis(150))
+    } else {
+        None
+    };
+    gate.pause.store(false, Ordering::Release);
+    cell
 }
 
 // ------------------------------------------------------------------ tests
