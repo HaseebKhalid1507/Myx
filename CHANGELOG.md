@@ -16,7 +16,16 @@ they are added to, never rewritten.
   the album background until you press `T`, which rewrites that one line and
   leaves the rest of the file alone.
 
+- **Find in the list on screen** (#42): `f`, in a playlist, an album, Liked
+  Songs or search results. Typing narrows the list to rows with every word in
+  the title or artist; arrows pick, `⏎` plays — the whole list from that
+  track, as if unfiltered — and `Esc` clears it. Leaving the list drops it.
+
 ### Fixed
+
+- `/` inside an open playlist, album or artist page showed nothing: the
+  prompt was drawn behind the page title, and the results behind the page.
+  Both now show, and the results replace the page.
 
 - macOS: launching myx no longer takes keyboard focus from the terminal. The
   media-key event loop activated its windowless app at launch, so keys went

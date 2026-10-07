@@ -449,6 +449,7 @@ async fn boot(
             in_flight: false,
             search_results: Vec::new(),
         },
+        find: FindState::default(),
         view: ViewState {
             mode: RightView::NowPlaying,
             zen: false,
