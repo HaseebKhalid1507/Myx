@@ -97,6 +97,13 @@ fn main() -> Result<()> {
         saved.volume.min(100)
     };
 
+    // No output device means nothing can play, and librespot would find out by
+    // panicking once the player starts. Say so — and how to fix it — before
+    // anything else, logging in included.
+    if !myx::audio::output::output_available() {
+        anyhow::bail!(myx::audio::output::NO_AUDIO_OUTPUT);
+    }
+
     // OAuth may need to print a browser URL, including when a cached refresh
     // token has been revoked. Complete both auth flows before entering the
     // alternate screen so that recovery prompts can never be hidden by the TUI.

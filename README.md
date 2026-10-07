@@ -60,6 +60,22 @@ myx
 First launch opens your browser to log in (OAuth PKCE, no secret needed). Then
 browse with `↑↓` and hit `⏎` to play. After that, just `myx`.
 
+## Audio on Linux
+
+myx plays through ALSA, which on most desktops forwards to PipeWire or
+PulseAudio. If myx says there's **no audio output device**, ALSA has nothing to
+play to — usually PipeWire without its ALSA plugin. Install the plugin; you
+don't need PulseAudio or `alsa-plugins-pulseaudio`:
+
+| Distribution | |
+|---|---|
+| Arch, Debian, Ubuntu, Fedora | install `pipewire-alsa` |
+| Void | install `alsa-pipewire`, then link it in: `mkdir -p /etc/alsa/conf.d` and `ln -s /usr/share/alsa/alsa.conf.d/{50-pipewire,99-pipewire-default}.conf /etc/alsa/conf.d` |
+| NixOS | `services.pipewire.alsa.enable = true;` |
+
+`aplay -L` should then list a `default` device. If the device goes away while
+myx is running, it keeps going silently and says so in the status line.
+
 ## Keys
 
 ```

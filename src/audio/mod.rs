@@ -1,6 +1,7 @@
 //! Audio engine internals (streaming feature).
 
 pub mod equalizer;
+pub mod output;
 pub mod visualizer;
 
 pub use equalizer::{

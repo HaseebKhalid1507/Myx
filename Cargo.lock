@@ -2801,6 +2801,7 @@ dependencies = [
  "anyhow",
  "base64",
  "color-thief",
+ "cpal",
  "crossterm",
  "flume",
  "fs2",
