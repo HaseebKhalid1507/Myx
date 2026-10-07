@@ -136,6 +136,18 @@ impl Config {
     /// Persist a flip of `transparent` by rewriting its one line, so the rest
     /// of a hand-edited file — comments and all — survives.
     pub fn save_transparent(on: bool) -> std::io::Result<()> {
+        Self::save_key("transparent", &on.to_string())
+    }
+
+    /// Persist the client id typed at the first-run prompt, the same way. The
+    /// caller has checked it is a plain hex id, so it needs no TOML escaping.
+    pub fn save_client_id(id: &str) -> std::io::Result<()> {
+        Self::save_key("client_id", &format!("\"{id}\""))
+    }
+
+    /// Set one top-level `key = value` line in `config.toml`, leaving every
+    /// other line alone. A missing file starts from the template.
+    fn save_key(key: &str, value: &str) -> std::io::Result<()> {
         let path = Self::path().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
         })?;
@@ -149,7 +161,7 @@ impl Config {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&path, set_transparent(&text, on))
+        std::fs::write(&path, set_key(&text, key, value))
     }
 }
 
@@ -161,22 +173,22 @@ fn write_template(path: &Path) {
     let _ = std::fs::write(path, TEMPLATE);
 }
 
-/// `text` with `transparent` set to `on`. An existing line, live or commented
-/// out, is replaced in place; otherwise one is added above the first table,
-/// since a bare key after a `[table]` header would belong to that table.
-fn set_transparent(text: &str, on: bool) -> String {
+/// `text` with `key = value`. An existing line, live or commented out, is
+/// replaced in place; otherwise one is added above the first table, since a
+/// bare key after a `[table]` header would belong to that table.
+fn set_key(text: &str, key: &str, value: &str) -> String {
     let is_key = |l: &str| {
         l.trim_start()
             .trim_start_matches('#')
             .trim_start()
-            .strip_prefix("transparent")
+            .strip_prefix(key)
             .is_some_and(|rest| rest.trim_start().starts_with('='))
     };
     let is_live = |l: &str| !l.trim_start().starts_with('#');
     let is_table = |l: &str| l.trim_start().starts_with('[') && l.trim_end().ends_with(']');
 
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
-    let line = format!("transparent = {on}");
+    let line = format!("{key} = {value}");
     let existing = lines
         .iter()
         .position(|l| is_live(l) && is_key(l))
@@ -197,6 +209,30 @@ fn set_transparent(text: &str, on: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set_transparent(text: &str, on: bool) -> String {
+        set_key(text, "transparent", &on.to_string())
+    }
+
+    #[test]
+    fn saving_a_client_id_fills_the_template_line_and_reads_back() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let text = set_key(TEMPLATE, "client_id", &format!("\"{id}\""));
+        assert_eq!(text.lines().count(), TEMPLATE.lines().count());
+        let c = Config::parse(&text).expect("valid toml");
+        assert_eq!(c.client_id.as_deref(), Some(id));
+
+        // An empty live key and a commented one: only the live line changes,
+        // so the file never ends up with the key twice.
+        let text = set_key(
+            "#client_id = \"\"\nclient_id = \"\"\n",
+            "client_id",
+            &format!("\"{id}\""),
+        );
+        assert_eq!(text, format!("#client_id = \"\"\nclient_id = \"{id}\"\n"));
+        let c = Config::parse(&text).expect("valid toml");
+        assert_eq!(c.client_id.as_deref(), Some(id));
+    }
 
     #[test]
     fn empty_config_is_all_defaults() {

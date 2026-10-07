@@ -57,10 +57,8 @@ impl SavedState {
             // can't leave a truncated state.json behind — that would lose the
             // entire saved queue, position and equalizer curve.
             let tmp = path.with_extension("tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                if std::fs::rename(&tmp, &path).is_err() {
-                    let _ = std::fs::remove_file(&tmp);
-                }
+            if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+                let _ = std::fs::remove_file(&tmp);
             }
         }
     }
