@@ -435,6 +435,7 @@ async fn boot(
             queue,
             queue_uris,
             playback_started: startup_uri.is_some(),
+            resume_after_reconnect: false,
             source,
             source_name,
             equalizer,
@@ -729,7 +730,14 @@ async fn run_ui(
             }
             ev = ev_rx.recv_async() => {
                 let Ok(ev) = ev else { break };
+                let reconnected = matches!(ev, EngineEvent::Reconnected);
                 handle_engine_event(&mut app, ev, &chans.meta);
+                // The replacement Connect device starts empty; reload what was
+                // playing so a dropped access point costs a gap, not the track.
+                if reconnected && std::mem::take(&mut app.transport.resume_after_reconnect) {
+                    resume_source(&mut app, &chans.radio);
+                    app.transport.playback_started = true;
+                }
                 true
             }
             ev = in_rx.recv_async() => {
