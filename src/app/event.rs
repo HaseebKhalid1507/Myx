@@ -278,7 +278,7 @@ pub(crate) fn enter_label(item: Option<&LibItem>) -> &'static str {
 /// `P` / `S`: play the highlighted context from anywhere — library section,
 /// search results, or inside a drill-in (`cur_items` resolves all three).
 pub(crate) fn play_selected_context(app: &mut App, shuffle: bool) {
-    let Some(item) = app.cur_items().get(app.browse.selected).cloned() else {
+    let Some(item) = app.selected_item().cloned() else {
         return;
     };
     match context_target(&item) {
