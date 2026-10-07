@@ -45,7 +45,7 @@ pub(crate) fn render_equalizer_overlay(
 /// naturally select the compact controls.
 fn equalizer_rect(area: Rect, reserve_now_playing: bool, cell: ratatui_image::FontSize) -> Rect {
     let region = if reserve_now_playing {
-        let below_y = np_layout(area, cell).info.bottom().min(area.bottom());
+        let below_y = np_layout(area, cell, 0).group_bottom().min(area.bottom());
         Rect::new(area.x, below_y, area.width, area.bottom() - below_y)
     } else {
         area
@@ -362,13 +362,13 @@ mod tests {
     #[test]
     fn equalizer_sits_below_the_cover_when_the_pane_has_room() {
         let pane = Rect::new(80, 4, 180, 54);
-        let np = np_layout(pane, CELL);
+        let np = np_layout(pane, CELL, 0);
         let art = np.art.expect("a cover fits");
         let equalizer = equalizer_rect(pane, true, CELL);
 
         assert!(!equalizer.intersects(art));
         assert!(!equalizer.intersects(np.info));
-        assert!(equalizer.y >= np.info.bottom());
+        assert!(equalizer.y >= np.group_bottom());
         assert!(equalizer.width >= NORMAL_MIN_WIDTH);
         assert!(equalizer.height >= NORMAL_MIN_HEIGHT);
     }
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn compact_equalizer_still_avoids_art_on_a_small_pane() {
         let pane = Rect::new(0, 0, 40, 25);
-        let np = np_layout(pane, CELL);
+        let np = np_layout(pane, CELL, 0);
         let equalizer = equalizer_rect(pane, true, CELL);
 
         if let Some(art) = np.art {

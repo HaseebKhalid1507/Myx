@@ -13,6 +13,16 @@ pub(crate) struct NpLayout {
     pub(crate) info: Rect,
     /// The spectrum. `None` when it would cost the cover its size.
     pub(crate) visualizer: Option<Rect>,
+    /// The info sits beside the cover (left-aligned) rather than under it.
+    pub(crate) beside: bool,
+}
+
+impl NpLayout {
+    /// The row under the cover-and-info group.
+    pub(crate) fn group_bottom(&self) -> u16 {
+        self.art
+            .map_or(self.info.bottom(), |a| a.bottom().max(self.info.bottom()))
+    }
 }
 
 /// Rows above the cover while there are rows to spare.
@@ -25,19 +35,27 @@ const NP_ART_MIN_WITH_VIZ: u16 = 6;
 const NP_VIZ: u16 = 7;
 /// Rows under the spectrum, lifting it off the strip.
 const NP_VIZ_LIFT: u16 = 2;
+/// Beside the cover: the gap to the info, and the least room the info needs.
+const NP_SIDE_GAP: u16 = 2;
+const NP_SIDE_TEXT_MIN: u16 = 14;
 
-/// Lay out Now Playing. As rows run out the spectrum goes first, before the
-/// cover shrinks below [`NP_ART_MIN_WITH_VIZ`]; then the inset above the cover;
-/// then the cover itself, down to none; the title is the last row standing.
-/// Every part lies inside `area` and none overlaps another. The equalizer
-/// overlay places itself with this too, so the two can't disagree.
-pub(crate) fn np_layout(area: Rect, cell: ratatui_image::FontSize) -> NpLayout {
+/// Lay out Now Playing in a view `area`, for cells of `cell` pixels and info
+/// lines up to `text_w` columns wide (0 if unknown).
+///
+/// The cover goes above the info or beside it, whichever lets it be bigger: a
+/// tall or roomy pane keeps the familiar stack, a short wide one becomes a
+/// card. As rows run out the spectrum goes first, before the cover shrinks
+/// below [`NP_ART_MIN_WITH_VIZ`]; then the inset above the cover; then the
+/// cover itself, down to none; the title is the last row standing. Every part
+/// lies inside `area` and none overlaps another. The equalizer overlay places
+/// itself with this too, so the two can't disagree.
+pub(crate) fn np_layout(area: Rect, cell: ratatui_image::FontSize, text_w: u16) -> NpLayout {
     let h = area.height;
     let viz_cost = NP_VIZ + NP_VIZ_LIFT;
     // With the spectrum if the cover beside it can still be NP_ART_MIN_WITH_VIZ
     // rows — which a narrow pane can deny it however tall it is — else without.
     if h >= NP_ART_MIN_WITH_VIZ + 1 + NP_INFO + viz_cost {
-        let with = np_group(area, h - viz_cost, cell);
+        let with = np_group(area, h - viz_cost, cell, text_w);
         if with.art.is_some_and(|a| a.height >= NP_ART_MIN_WITH_VIZ) {
             return NpLayout {
                 visualizer: Some(Rect::new(area.x, area.y + h - viz_cost, area.width, NP_VIZ)),
@@ -45,11 +63,25 @@ pub(crate) fn np_layout(area: Rect, cell: ratatui_image::FontSize) -> NpLayout {
             };
         }
     }
-    np_group(area, h, cell)
+    np_group(area, h, cell, text_w)
 }
 
-/// The cover and track info, centred as a group in the top `top_h` rows.
-fn np_group(area: Rect, top_h: u16, cell: ratatui_image::FontSize) -> NpLayout {
+fn art_rows(layout: &NpLayout) -> u16 {
+    layout.art.map_or(0, |a| a.height)
+}
+
+/// The cover and info in the top `top_h` rows: stacked or side by side,
+/// whichever shows the bigger cover (stacked on a tie).
+fn np_group(area: Rect, top_h: u16, cell: ratatui_image::FontSize, text_w: u16) -> NpLayout {
+    let stacked = np_stacked(area, top_h, cell);
+    match np_beside(area, top_h, cell, text_w) {
+        Some(beside) if art_rows(&beside) > art_rows(&stacked) => beside,
+        _ => stacked,
+    }
+}
+
+/// Cover above, info centred under it, the group centred in the rows.
+fn np_stacked(area: Rect, top_h: u16, cell: ratatui_image::FontSize) -> NpLayout {
     let (fw, fh) = (u32::from(cell.width.max(1)), u32::from(cell.height.max(1)));
     let info_h = top_h.min(NP_INFO);
 
@@ -65,8 +97,13 @@ fn np_group(area: Rect, top_h: u16, cell: ratatui_image::FontSize) -> NpLayout {
     let art = (art_h >= NP_ART_MIN).then_some((art_w, art_h));
 
     let group_h = info_h + art.map_or(0, |(_, ah)| ah + 1);
-    // Push the group down a little from the top, while rows allow.
-    let inset = top_h.saturating_sub(group_h).min(NP_INSET);
+    // Push a cover down a little from the top, while rows allow; info alone is
+    // simply centred.
+    let inset = if art.is_some() {
+        top_h.saturating_sub(group_h).min(NP_INSET)
+    } else {
+        0
+    };
     let free = top_h - group_h - inset;
     let group_y = area.y + inset + free / 2;
 
@@ -76,7 +113,50 @@ fn np_group(area: Rect, top_h: u16, cell: ratatui_image::FontSize) -> NpLayout {
         art,
         info: Rect::new(area.x, info_y, area.width, info_h),
         visualizer: None,
+        beside: false,
     }
+}
+
+/// Cover on the left, info beside it, the pair centred: a mini player's card.
+/// `None` when no whole cover fits next to readable info.
+fn np_beside(
+    area: Rect,
+    top_h: u16,
+    cell: ratatui_image::FontSize,
+    text_w: u16,
+) -> Option<NpLayout> {
+    let (fw, fh) = (u32::from(cell.width.max(1)), u32::from(cell.height.max(1)));
+    let mut art_h = top_h.min(NP_ART_MAX);
+    let mut art_w = (u32::from(art_h) * fh / fw) as u16;
+    let max_w = area.width.saturating_sub(NP_SIDE_GAP + NP_SIDE_TEXT_MIN);
+    if art_w > max_w {
+        art_w = max_w;
+        art_h = (u32::from(art_w) * fw / fh) as u16;
+    }
+    if art_h < NP_ART_MIN || art_w == 0 {
+        return None;
+    }
+    let room = area.width - art_w - NP_SIDE_GAP;
+    let want = if text_w == 0 {
+        NP_SIDE_TEXT_MIN
+    } else {
+        text_w
+    };
+    let info_w = want.min(room);
+    let info_h = NP_INFO.min(art_h);
+    let x0 = area.x + (area.width - (art_w + NP_SIDE_GAP + info_w)) / 2;
+    let y0 = area.y + (top_h - art_h) / 2;
+    Some(NpLayout {
+        art: Some(Rect::new(x0, y0, art_w, art_h)),
+        info: Rect::new(
+            x0 + art_w + NP_SIDE_GAP,
+            y0 + (art_h - info_h) / 2,
+            info_w,
+            info_h,
+        ),
+        visualizer: None,
+        beside: true,
+    })
 }
 
 /// View ①: album art with track details directly beneath — centered as a
@@ -100,7 +180,12 @@ pub(crate) fn render_nowplaying_view(
         }
         return false;
     };
-    let layout = np_layout(area, app.svc.cell);
+    let text_w = [&n.title, &n.artist, &n.album]
+        .iter()
+        .map(|t| t.width() as u16)
+        .max()
+        .unwrap_or(0);
+    let layout = np_layout(area, app.svc.cell, text_w);
 
     if let Some(art_rect) = layout.art {
         out.art = Some(art_rect);
@@ -144,8 +229,13 @@ pub(crate) fn render_nowplaying_view(
     ];
     let shown = layout.info.height as usize;
     f.render_widget(
-        Paragraph::new(lines.into_iter().take(shown).collect::<Vec<_>>())
-            .alignment(Alignment::Center),
+        Paragraph::new(lines.into_iter().take(shown).collect::<Vec<_>>()).alignment(
+            if layout.beside {
+                Alignment::Left
+            } else {
+                Alignment::Center
+            },
+        ),
         layout.info,
     );
 
@@ -321,4 +411,69 @@ pub(crate) fn render_volume(
         width: VLEV.len() as u16,
         height: 1,
     });
+}
+
+#[cfg(test)]
+mod np_shape_tests {
+    use super::*;
+
+    const ZOOMED: ratatui_image::FontSize = ratatui_image::FontSize::new(14, 32);
+    const NORMAL: ratatui_image::FontSize = ratatui_image::FontSize::new(10, 22);
+
+    #[test]
+    fn a_short_wide_pane_puts_the_cover_beside_the_info() {
+        // Haseeb's zoomed-in widget: 30 columns, 6 rows for the view. Stacked,
+        // a cover can't fit over three lines of info at all.
+        let area = Rect::new(1, 1, 30, 6);
+        let np = np_layout(area, ZOOMED, 9);
+        assert!(np.beside);
+        let art = np.art.expect("a cover");
+        assert_eq!(art.height, 6);
+        assert_eq!(np.info.x, art.right() + 2, "info right of the cover");
+        assert_eq!(np.info.height, 3);
+        assert!(
+            np.info.y > art.y && np.info.bottom() < art.bottom(),
+            "centred on it"
+        );
+    }
+
+    #[test]
+    fn a_tall_or_roomy_pane_keeps_the_stack() {
+        for (area, cell) in [
+            (Rect::new(0, 0, 30, 40), NORMAL),
+            (Rect::new(0, 0, 120, 40), NORMAL),
+            (Rect::new(0, 0, 80, 30), ZOOMED),
+        ] {
+            let np = np_layout(area, cell, 20);
+            assert!(!np.beside, "{area:?}");
+            assert!(np.art.is_some(), "{area:?}");
+        }
+    }
+
+    #[test]
+    fn the_arrangement_shown_has_the_bigger_cover() {
+        for cell in [NORMAL, ZOOMED] {
+            for w in 1..=120u16 {
+                for h in 0..=40u16 {
+                    let area = Rect::new(0, 0, w, h);
+                    let stacked = art_rows(&np_stacked(area, h, cell));
+                    let beside = np_beside(area, h, cell, 20).map_or(0, |l| art_rows(&l));
+                    let chosen = art_rows(&np_group(area, h, cell, 20));
+                    assert_eq!(chosen, stacked.max(beside), "{w}x{h} {cell:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn info_alone_is_centred_not_pushed_down() {
+        // Too short for any cover: the three lines sit in the middle, not
+        // under an inset meant for a cover.
+        // 10x5: no cover fits above three lines, nor beside them. The old
+        // inset put the lines on rows 2-4, flush against the bottom.
+        let area = Rect::new(0, 0, 10, 5);
+        let np = np_layout(area, NORMAL, 9);
+        assert!(np.art.is_none());
+        assert_eq!(np.info.y, 1);
+    }
 }

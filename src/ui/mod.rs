@@ -459,7 +459,7 @@ mod layout_tests {
             for w in 1..=120u16 {
                 for h in 0..=60u16 {
                     let area = Rect::new(5, 3, w, h);
-                    let np = np_layout(area, cell);
+                    let np = np_layout(area, cell, 20);
                     let parts: Vec<Rect> = [np.art, Some(np.info), np.visualizer]
                         .into_iter()
                         .flatten()
