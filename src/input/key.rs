@@ -168,7 +168,7 @@ pub(crate) fn handle_key(
                 app.cur_items().get(app.browse.selected).cloned()
             };
             if let Some(item) = item {
-                if !item.is_header && !item.is_play {
+                if !item.is_header() && !item.is_play() {
                     // Instant menu (no network), then enrich when the API returns.
                     app.view.actions = Some(build_action_menu(None, &item));
                     spawn_action_menu(app.svc.webapi.clone(), item, chans.menu.clone());

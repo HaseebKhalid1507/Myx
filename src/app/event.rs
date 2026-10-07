@@ -262,13 +262,13 @@ fn publish_theme(app: &App, theme: &Theme) {
 /// test. `enter_label` shares this predicate so Enter opens exactly the rows
 /// `P` plays.
 pub(crate) fn context_target(item: &LibItem) -> Option<(String, String)> {
-    (!item.is_header && !item.is_track).then(|| (item.uri.clone(), item.name.clone()))
+    (!item.is_header() && !item.is_track()).then(|| (item.uri.clone(), item.name.clone()))
 }
 
 /// Enter opens context rows and plays everything else.
 pub(crate) fn enter_label(item: Option<&LibItem>) -> &'static str {
     match item {
-        Some(i) if !i.is_track && !i.is_header => "open",
+        Some(i) if !i.is_track() && !i.is_header() => "open",
         _ => "select",
     }
 }

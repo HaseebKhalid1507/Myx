@@ -95,7 +95,7 @@ pub(crate) fn handle_mouse(
                     let selectable = app
                         .cur_items()
                         .get(idx)
-                        .map(|it| !it.is_header)
+                        .map(|it| !it.is_header())
                         .unwrap_or(false);
                     if selectable {
                         app.browse.selected = idx;
