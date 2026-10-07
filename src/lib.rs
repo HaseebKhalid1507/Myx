@@ -31,6 +31,8 @@ pub mod engine;
 #[cfg(feature = "streaming")]
 pub mod term;
 #[cfg(feature = "streaming")]
+pub mod user_theme;
+#[cfg(feature = "streaming")]
 pub mod webapi;
 
 /// Cross-platform home directory. Uses `HOME` on Unix, `USERPROFILE` on Windows.
