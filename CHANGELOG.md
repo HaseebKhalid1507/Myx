@@ -15,6 +15,15 @@ they are added to, never rewritten.
   follow the cover. New installs start transparent. An existing config keeps
   the album background until you press `T`, which rewrites that one line and
   leaves the rest of the file alone.
+- **Themes** (#54), `theme` in `config.toml`. `album` (the default) keeps
+  following each cover; `tokyonight`, `catppuccin`, `rosepine` or `gruvbox`
+  keep that palette whatever plays. Your own theme is a file in
+  `~/.config/myx/themes/`: start from a palette (`base`) and set any of the 16
+  colours, or give a few `seed` colours and let myx build the rest the way it
+  does for album art. `wal` uses pywal's current colours, and a base16 scheme
+  dropped in as `<name>.yaml` works as a theme or a base. A theme that can't be
+  read falls back to the album's colours and says why in the status line; a
+  bad colour or unknown key costs only that line.
 
 ### Fixed
 
