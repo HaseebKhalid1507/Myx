@@ -35,6 +35,10 @@ const NP_ART_MIN_WITH_VIZ: u16 = 6;
 const NP_VIZ: u16 = 7;
 /// Rows under the spectrum, lifting it off the strip.
 const NP_VIZ_LIFT: u16 = 2;
+/// The cover stays above the info while it can be at least this tall there;
+/// only a shorter pane moves it beside the info. The stack is the familiar
+/// look, so it holds on until the cover over the info would be a thumbnail.
+const NP_STACK_MIN: u16 = 4;
 /// Beside the cover: the gap to the info, and the least room the info needs.
 const NP_SIDE_GAP: u16 = 2;
 const NP_SIDE_TEXT_MIN: u16 = 14;
@@ -42,9 +46,9 @@ const NP_SIDE_TEXT_MIN: u16 = 14;
 /// Lay out Now Playing in a view `area`, for cells of `cell` pixels and info
 /// lines up to `text_w` columns wide (0 if unknown).
 ///
-/// The cover goes above the info or beside it, whichever lets it be bigger: a
-/// tall or roomy pane keeps the familiar stack, a short wide one becomes a
-/// card. As rows run out the spectrum goes first, before the cover shrinks
+/// The cover goes above the info while it can be [`NP_STACK_MIN`] rows there;
+/// in a pane too short for that it goes beside the info, if that fits a bigger
+/// one — a mini player's card. As rows run out the spectrum goes first, before the cover shrinks
 /// below [`NP_ART_MIN_WITH_VIZ`]; then the inset above the cover; then the
 /// cover itself, down to none; the title is the last row standing. Every part
 /// lies inside `area` and none overlaps another. The equalizer overlay places
@@ -70,10 +74,13 @@ fn art_rows(layout: &NpLayout) -> u16 {
     layout.art.map_or(0, |a| a.height)
 }
 
-/// The cover and info in the top `top_h` rows: stacked or side by side,
-/// whichever shows the bigger cover (stacked on a tie).
+/// The cover and info in the top `top_h` rows: stacked while the cover there
+/// can be [`NP_STACK_MIN`] rows, else side by side if that shows a bigger one.
 fn np_group(area: Rect, top_h: u16, cell: ratatui_image::FontSize, text_w: u16) -> NpLayout {
     let stacked = np_stacked(area, top_h, cell);
+    if art_rows(&stacked) >= NP_STACK_MIN {
+        return stacked;
+    }
     match np_beside(area, top_h, cell, text_w) {
         Some(beside) if art_rows(&beside) > art_rows(&stacked) => beside,
         _ => stacked,
@@ -451,18 +458,36 @@ mod np_shape_tests {
     }
 
     #[test]
-    fn the_arrangement_shown_has_the_bigger_cover() {
+    fn the_stack_holds_until_its_cover_would_be_a_thumbnail() {
+        // Over every size and two cell shapes: stacked whenever the cover
+        // above can be NP_STACK_MIN rows; below that, whichever cover is bigger.
         for cell in [NORMAL, ZOOMED] {
             for w in 1..=120u16 {
                 for h in 0..=40u16 {
                     let area = Rect::new(0, 0, w, h);
                     let stacked = art_rows(&np_stacked(area, h, cell));
                     let beside = np_beside(area, h, cell, 20).map_or(0, |l| art_rows(&l));
-                    let chosen = art_rows(&np_group(area, h, cell, 20));
-                    assert_eq!(chosen, stacked.max(beside), "{w}x{h} {cell:?}");
+                    let chosen = np_group(area, h, cell, 20);
+                    if stacked >= NP_STACK_MIN {
+                        assert!(!chosen.beside, "{w}x{h} {cell:?}: left the stack early");
+                    } else {
+                        assert_eq!(art_rows(&chosen), stacked.max(beside), "{w}x{h} {cell:?}");
+                    }
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_moderately_short_pane_keeps_the_cover_on_top() {
+        // 60 wide, 9 rows: beside would fit a 9-row cover, but a 5-row one
+        // above the info is still a cover, so the stack stays.
+        let np = np_layout(Rect::new(0, 0, 60, 9), NORMAL, 9);
+        assert!(!np.beside);
+        assert_eq!(np.art.map(|a| a.height), Some(5));
+        // One row shorter than the stack can hold a 4-row cover: beside.
+        let np = np_layout(Rect::new(0, 0, 60, 7), NORMAL, 9);
+        assert!(np.beside);
     }
 
     #[test]
