@@ -29,7 +29,7 @@ pub(crate) fn spawn_detail_fetch(
 
         // The Web API no longer returns items for public foreign playlists.
         // Playback still resolves those contexts, so reuse that path here.
-        if uri.starts_with("spotify:playlist:") && !items.iter().any(|item| item.is_track) {
+        if uri.starts_with("spotify:playlist:") && !items.iter().any(|item| item.is_track()) {
             match tokio::time::timeout(
                 Duration::from_secs(30),
                 engine::playlist_tracks(&session, &uri),
@@ -37,7 +37,7 @@ pub(crate) fn spawn_detail_fetch(
             .await
             {
                 Ok(Ok(tracks)) => {
-                    items.retain(|item| !item.is_header);
+                    items.retain(|item| !item.is_header());
                     for (order, track) in tracks.into_iter().enumerate() {
                         let mut item = LibItem::track(track.name, track.artist, track.uri);
                         item.order = order as u32;
