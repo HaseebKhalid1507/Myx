@@ -34,6 +34,8 @@ pub struct Cover {
     /// aliasing. That guarantee is a runtime panic rather than a compile error,
     /// so moving rendering off this thread would have to move the cache too.
     cached: RefCell<Option<(Rect, FontSize, Protocol)>>,
+    /// The half-block stand-in drawn while a resize settles, cached the same way.
+    preview: RefCell<Option<(Rect, FontSize, Protocol)>>,
 }
 
 impl Cover {
@@ -102,6 +104,7 @@ impl Cover {
             img,
             picker,
             cached: RefCell::new(None),
+            preview: RefCell::new(None),
         }
     }
 
@@ -139,6 +142,33 @@ impl Cover {
         }
         let cached = self.cached.borrow();
         if let Some((_, _, protocol)) = &*cached {
+            frame.render_widget(Image::new(protocol), area);
+        }
+    }
+
+    /// Draw a rough, half-block version of the cover into `area`: coloured
+    /// `▀` characters, two pixels per cell. Made of cells rather than pixels,
+    /// so unlike the real cover it can't come out the wrong size when the
+    /// terminal's cell size isn't known — shown while a resize settles, until
+    /// the sharp cover can be drawn for the new cell. Leaves the sharp cover's
+    /// cache alone.
+    pub fn render_preview(&self, frame: &mut Frame, area: Rect, cell: FontSize) {
+        if area.width == 0 || area.height == 0 || cell.width == 0 || cell.height == 0 {
+            return;
+        }
+        let mut preview = self.preview.borrow_mut();
+        let stale = preview
+            .as_ref()
+            .map(|(a, c, _)| *a != area || !same_cell(*c, cell))
+            .unwrap_or(true);
+        if stale {
+            let mut halfblocks = self.picker.clone();
+            halfblocks.set_protocol_type(ProtocolType::Halfblocks);
+            *preview = encode(&self.img, &halfblocks, cell, area)
+                .ok()
+                .map(|p| (area, cell, p));
+        }
+        if let Some((_, _, protocol)) = &*preview {
             frame.render_widget(Image::new(protocol), area);
         }
     }
@@ -449,6 +479,34 @@ mod tests {
             let proto = encode(&cover.img, &cover.picker, cell, area).expect("encode");
             assert_eq!(proto.size(), want, "{cell:?}");
         }
+    }
+
+    #[test]
+    fn the_preview_is_half_blocks_and_leaves_the_sharp_cover_alone() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            640,
+            640,
+            image::Rgb([200, 60, 40]),
+        ));
+        let cover = Cover::from_image(img, picker);
+        let (area, cell) = (Rect::new(2, 1, 12, 6), FontSize::new(10, 20));
+        let mut term = Terminal::new(TestBackend::new(16, 8)).expect("terminal");
+        term.draw(|f| cover.render_preview(f, area, cell))
+            .expect("draw");
+        let buf = term.backend().buffer();
+        // Half blocks paint the cover's colours into the cells themselves (a
+        // solid image needs no `▀`, just the colour as the cell background).
+        let cover_red = ratatui::style::Color::Rgb(200, 60, 40);
+        let painted = (area.top()..area.bottom())
+            .flat_map(|y| (area.left()..area.right()).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].bg == cover_red || buf[(x, y)].fg == cover_red)
+            .count();
+        assert!(painted >= 12 * 5, "only {painted} cells painted");
+        // The kitty cover was never encoded: it still has to be sent.
+        assert!(cover.needs_send(area, cell));
     }
 
     #[test]
