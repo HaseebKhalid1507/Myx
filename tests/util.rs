@@ -3,8 +3,11 @@
 //! These lock in the behavior the helpers have TODAY, quirks included.
 //! If one of these fails, someone changed behavior — deliberately or not.
 
-use myx::util::{center_v, fmt_ms, track_id_from_uri, truncate, uri_to_url, urlencode, vol_u16};
+use myx::util::{
+    center_v, fmt_ms, track_id_from_uri, truncate, uri_to_url, urlencode, vol_u16, wrap_balanced,
+};
 use ratatui::layout::Rect;
+use unicode_width::UnicodeWidthStr;
 
 // ---------------------------------------------------------------- truncate
 
@@ -341,4 +344,86 @@ fn urlencode_realistic_search_query() {
         urlencode("Sigur Rós - Hoppípolla"),
         "Sigur%20R%C3%B3s%20-%20Hopp%C3%ADpolla"
     );
+}
+
+// --------------------------------------------------------- wrap_balanced
+
+const LONG: &str = "Y de ahora en adelante, toda' las decisiones de mi vida las voy a hacer pensando en mí y solamente en mí";
+
+#[test]
+fn wrap_leaves_a_line_that_fits_alone() {
+    assert_eq!(
+        wrap_balanced("Nadie sabe lo que va a pasar mañana", 80, 3),
+        ["Nadie sabe lo que va a pasar mañana"]
+    );
+}
+
+#[test]
+fn wrap_splits_into_even_rows_not_a_full_row_and_a_stray_word() {
+    // The line from #37. Greedy wrapping at 100 leaves "en mí" on its own.
+    assert_eq!(
+        wrap_balanced(LONG, 100, 3),
+        [
+            "Y de ahora en adelante, toda' las decisiones de mi",
+            "vida las voy a hacer pensando en mí y solamente en mí",
+        ]
+    );
+}
+
+#[test]
+fn wrap_keeps_every_word_and_every_row_within_width() {
+    // From 10, the longest word: below that a word has to break inside itself.
+    for width in 10..=110 {
+        let rows = wrap_balanced(LONG, width, usize::MAX);
+        assert_eq!(rows.join(" "), LONG, "width {width}");
+        for r in &rows {
+            assert!(r.width() <= width, "width {width}: {r:?}");
+        }
+    }
+}
+
+#[test]
+fn wrap_uses_no_more_rows_than_greedy_would() {
+    // Balancing narrows the rows, never adds one.
+    assert_eq!(wrap_balanced(LONG, 60, 3).len(), 2);
+    assert_eq!(wrap_balanced(LONG, 40, 3).len(), 3);
+}
+
+#[test]
+fn wrap_past_max_rows_ends_in_an_ellipsis() {
+    let rows = wrap_balanced(LONG, 30, 3);
+    assert_eq!(rows.len(), 3);
+    assert!(rows[2].ends_with('…'), "{rows:?}");
+    assert!(rows.iter().all(|r| r.width() <= 30), "{rows:?}");
+    assert!(LONG.starts_with(rows[0].as_str()));
+}
+
+#[test]
+fn wrap_measures_columns_so_cjk_fits() {
+    // 20 double-width characters, 40 columns, no spaces to break at.
+    let jp = "夜に駆けるあの日の約束を忘れないで欲しい";
+    let rows = wrap_balanced(jp, 20, 3);
+    assert_eq!(rows.concat(), jp);
+    assert!(rows.iter().all(|r| r.width() <= 20), "{rows:?}");
+    // 40 columns into rows of 20: two even rows.
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].width(), rows[1].width());
+}
+
+#[test]
+fn wrap_breaks_a_word_wider_than_the_row() {
+    let rows = wrap_balanced("Supercalifragilisticexpialidocious yes", 12, 5);
+    assert!(rows.iter().all(|r| r.width() <= 12), "{rows:?}");
+    assert_eq!(
+        rows.concat().replace(' ', ""),
+        "Supercalifragilisticexpialidociousyes"
+    );
+}
+
+#[test]
+fn wrap_degenerate_sizes() {
+    assert!(wrap_balanced(LONG, 0, 3).is_empty());
+    assert!(wrap_balanced(LONG, 10, 0).is_empty());
+    // A wide character can't fit in one column; it must not loop or vanish.
+    assert_eq!(wrap_balanced("夜に駆ける", 1, 1), ["…"]);
 }

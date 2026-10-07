@@ -2823,6 +2823,7 @@ dependencies = [
  "tokio",
  "toml",
  "tui-textarea-2",
+ "unicode-width",
  "vergen",
  "windows-win",
  "winit",
