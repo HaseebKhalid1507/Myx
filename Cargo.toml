@@ -24,6 +24,10 @@ color-thief = "0.2"
 librespot-core = { version = "0.8.0", optional = true }
 librespot-connect = { version = "0.8.0", optional = true }
 librespot-playback = { version = "0.8.0", optional = true, default-features = false, features = ["native-tls", "rodio-backend"] }
+# The audio host librespot's rodio sink plays through (same version rodio
+# pulls in), asked directly so a missing output device is an explanation, not
+# a panic. See audio::output.
+cpal = { version = "0.16", optional = true }
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 flume = { version = "0.12", optional = true }
 rustfft = { version = "6", optional = true }
@@ -63,6 +67,7 @@ streaming = [
     "dep:librespot-core",
     "dep:librespot-connect",
     "dep:librespot-playback",
+    "dep:cpal",
     "dep:tokio",
     "dep:flume",
     "dep:rustfft",

@@ -26,6 +26,11 @@ they are added to, never rewritten.
 - Album art no longer blinks inside tmux. Ending a synchronized update makes
   tmux redraw the whole pane and send the image again, every frame; inside
   tmux frames are now written without one.
+- With no audio output device — typically PipeWire without its ALSA plugin —
+  myx crashed once the player started (`rodio.rs … NoDeviceAvailable`, #53).
+  It now says so before logging in, with the plugin to install for each
+  distribution (#17: no PulseAudio needed). If the device disappears mid-
+  session, playback carries on silently and the status line explains.
 
 
 ## [0.5.0] — 2026-09-09

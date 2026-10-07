@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
                     EngineEvent::Stopped => println!("⏹ stopped"),
                     EngineEvent::Reconnecting => println!("⟳ access point lost, reconnecting"),
                     EngineEvent::Reconnected => println!("⟳ reconnected"),
+                    EngineEvent::NoAudioOutput => println!("∅ no audio output device"),
                     EngineEvent::PositionCorrection { uri, position_ms } => {
                         println!("↔ position  {uri} @ {position_ms}ms")
                     }

@@ -81,6 +81,11 @@ pub(crate) fn handle_engine_event(
                 let _ = controls.set_playback(playback);
             }
         }
+        EngineEvent::NoAudioOutput => {
+            app.status =
+                "no audio output device: playing silently (see the README's Audio section)"
+                    .to_string();
+        }
         EngineEvent::Reconnecting => {
             // The old player is gone with the old connection, so the audio has
             // already stopped. Stop the progress bar with it instead of letting
