@@ -79,7 +79,8 @@ struct Link {
 /// and read `bands` for the live visualizer.
 pub struct Engine {
     pub bands: Arc<Mutex<VisBands>>,
-    inner: Arc<Inner>,
+    /// `None` only for [`Engine::detached`]: no connection, every command a no-op.
+    inner: Option<Arc<Inner>>,
 }
 
 /// The half of the engine the reconnect watchdog needs to hold, so it can swap
@@ -130,10 +131,28 @@ impl Inner {
 }
 
 impl Engine {
+    /// An engine with no connection: commands fail softly, nothing plays. For
+    /// tests that need a whole `App` (drawing every screen at every size)
+    /// without logging in to Spotify.
+    #[cfg(feature = "test-support")]
+    pub fn detached() -> Self {
+        Self {
+            bands: Arc::new(Mutex::new(VisBands::new())),
+            inner: None,
+        }
+    }
+
+    fn link(&self) -> Result<Arc<Link>> {
+        self.inner
+            .as_ref()
+            .map(|inner| inner.link())
+            .ok_or_else(|| anyhow!("not connected"))
+    }
+
     /// Fetch a fresh Web API access token off the librespot session (login5).
     /// Used for track metadata + cover art lookups.
     pub async fn web_token(&self) -> Result<String> {
-        let session = self.inner.link().session.clone();
+        let session = self.link()?.session.clone();
         let fut = session.login5().auth_token();
         let token = tokio::time::timeout(Duration::from_secs(5), fut)
             .await
@@ -150,7 +169,7 @@ impl Engine {
         what: &'static str,
         f: impl FnOnce(&Spirc) -> Result<T, librespot_core::Error>,
     ) -> Result<T> {
-        let link = self.inner.link();
+        let link = self.link()?;
         f(&link.spirc).map_err(|e| {
             if link.session.is_invalid() {
                 anyhow!("connection dropped — reconnecting, try again in a moment")
@@ -170,7 +189,9 @@ impl Engine {
         what: &'static str,
         f: impl FnOnce(&Spirc) -> Result<T, librespot_core::Error>,
     ) -> Result<T> {
-        let _ = self.inner.link().spirc.activate();
+        if let Ok(link) = self.link() {
+            let _ = link.spirc.activate();
+        }
         self.command(what, f)
     }
 
@@ -247,7 +268,9 @@ impl Engine {
         self.active_command("pause", Spirc::pause)
     }
     pub fn stop(&self) {
-        self.inner.link().player.stop()
+        if let Ok(link) = self.link() {
+            link.player.stop()
+        }
     }
     pub fn toggle(&self) -> Result<()> {
         self.active_command("toggle", Spirc::play_pause)
@@ -267,18 +290,21 @@ impl Engine {
     /// Set volume in librespot's 0..=65535 range.
     pub fn set_volume(&self, vol: u16) -> Result<()> {
         // Apply to the local software mixer immediately (no network round-trip).
-        self.inner.mixer.set_volume(vol);
+        if let Some(inner) = &self.inner {
+            inner.mixer.set_volume(vol);
+        }
         // Sync the volume to Spotify Connect in the background.
         self.command("set volume", |spirc| spirc.set_volume(vol))
     }
     /// Replace the complete local equalizer curve. The audio sink observes the
     /// snapshot between packets, so this never waits on or interrupts playback.
     pub fn set_equalizer(&self, settings: EqualizerSettings) {
-        *self
-            .inner
-            .equalizer
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = settings.normalized();
+        if let Some(inner) = &self.inner {
+            *inner
+                .equalizer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = settings.normalized();
+        }
     }
     /// Seek to an absolute position in the current track.
     pub fn seek(&self, position_ms: u32) -> Result<()> {
@@ -286,11 +312,19 @@ impl Engine {
     }
     /// This device's Spotify Connect id — used to transfer playback back to myx.
     pub fn device_id(&self) -> String {
-        self.inner.link().session.device_id().to_string()
+        self.link()
+            .map(|link| link.session.device_id().to_string())
+            .unwrap_or_default()
     }
     /// A cheap clone of the session (for off-thread mercury calls like radio).
+    ///
+    /// # Panics
+    /// On a [`Engine::detached`] one, which only tests can make.
     pub fn session(&self) -> Session {
-        self.inner.link().session.clone()
+        self.link()
+            .expect("a detached engine has no session")
+            .session
+            .clone()
     }
 }
 
@@ -438,7 +472,10 @@ pub async fn run(
     });
     spawn_watchdog(&inner);
 
-    Ok(Engine { bands, inner })
+    Ok(Engine {
+        bands,
+        inner: Some(inner),
+    })
 }
 
 /// Bring up a session, a player and a Connect device, and bridge the player's

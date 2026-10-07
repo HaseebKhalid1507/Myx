@@ -65,6 +65,10 @@ default = ["streaming", "mxc"]
 # The Myx Color Protocol: pure data types + color math, usable without the
 # streaming backend so consumers can depend on the protocol half alone.
 mxc = ["dep:serde", "dep:serde_json"]
+# Test-only constructors (`Engine::detached`, `WebApi::offline`) so the binary's
+# tests can build a whole `App` and draw it. `cargo test --all-features` turns
+# it on, as CI does.
+test-support = []
 streaming = [
     "dep:librespot-core",
     "dep:librespot-connect",

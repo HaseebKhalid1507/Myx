@@ -1,6 +1,6 @@
 //! The library browser's data: sections, rows, sort order, and drill-ins.
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum RightView {
     NowPlaying,
     Lyrics,

@@ -50,6 +50,9 @@ they are added to, never rewritten.
   After a resize settles (150 ms), myx measures the cell again — from tmux when
   inside it, otherwise by asking the terminal — and redraws the cover for it;
   until then the cover's spot stays blank rather than showing a wrong one.
+- Opening the actions menu (`a`) in a terminal shorter than 8 rows crashed
+  myx. The menu now fits whatever space there is. A test draws every screen at
+  every size, so a crash like it can't come back unnoticed.
 
 
 ## [0.5.0] — 2026-09-09

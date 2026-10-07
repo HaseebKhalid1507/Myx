@@ -162,6 +162,18 @@ pub struct WebApi {
 }
 
 impl WebApi {
+    /// A Web API that never logged in: every call fails. For tests that need a
+    /// whole `App` without a network.
+    #[cfg(feature = "test-support")]
+    pub fn offline() -> Self {
+        Self {
+            client_id: String::new(),
+            access_token: String::new(),
+            refresh_token: None,
+            expires_at: u64::MAX,
+        }
+    }
+
     /// Whether [`WebApi::init`] can start from cache instead of prompting, so
     /// the caller can do the interactive part before a TUI takes the screen. An
     /// expired token still counts: refreshing it is silent.
