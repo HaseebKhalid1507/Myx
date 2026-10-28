@@ -175,7 +175,9 @@ impl App {
             return Activated::None;
         }
         if item.is_track() {
-            if self.search.searching {
+            // Only on the results list itself — `searching` stays set while
+            // drilled into an artist/album opened from search.
+            if self.search.searching && self.browse.details.is_empty() {
                 // A search-result song starts that song's radio (seed + similar).
                 self.transport.source = PlaySource::Radio(item.uri.clone());
                 self.transport.source_name = format!("Radio · {}", item.name);
@@ -187,12 +189,31 @@ impl App {
                 self.transport.source = PlaySource::Context(ctx.clone());
                 self.transport.source_name = d.title.clone();
                 self.status = format!("starting {}…", item.name);
-                if let Err(e) = self.svc.engine.play_context_at(
-                    ctx,
-                    Some(item.uri.clone()),
-                    0,
-                    self.transport.shuffle,
-                ) {
+                // An artist context is Spotify's own track list, not the
+                // search-built Popular rows shown here, so the picked track may
+                // not be in it — play the rows as shown instead.
+                let result = if ctx.starts_with("spotify:artist:") {
+                    let uris = d
+                        .items
+                        .iter()
+                        .filter(|i| i.is_track())
+                        .map(|i| i.uri.clone())
+                        .collect();
+                    self.svc.engine.play_tracks(
+                        uris,
+                        Some(item.uri.clone()),
+                        0,
+                        self.transport.shuffle,
+                    )
+                } else {
+                    self.svc.engine.play_context_at(
+                        ctx,
+                        Some(item.uri.clone()),
+                        0,
+                        self.transport.shuffle,
+                    )
+                };
+                if let Err(e) = result {
                     self.status = format!("couldn't play: {e:#}");
                 }
                 return Activated::None;
