@@ -169,12 +169,18 @@ pub(crate) fn scroll_offset(
 /// symbols, and a blank cell compares equal to the blank that was already there
 /// — so an ordinary `Clear` writes nothing and the picture survives it.
 /// `AlwaysUpdate` is what makes the diff emit them anyway.
+///
+/// The background already painted under the art (the pane's) is kept: a plain
+/// reset falls back to the terminal's default, which with a translucent
+/// terminal is a see-through hole where the cover was.
 pub(crate) fn wipe_area(f: &mut Frame, area: Rect) {
     let buf = f.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
+                let bg = cell.bg;
                 cell.reset();
+                cell.bg = bg;
                 cell.set_diff_option(CellDiffOption::AlwaysUpdate);
             }
         }

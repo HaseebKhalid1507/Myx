@@ -185,9 +185,11 @@ pub(crate) fn apply_meta(
     });
 
     if let Some(theme) = meta.theme {
-        app.theme.start_fade(theme);
+        app.theme.follow_cover(theme);
         // Same instant, same palette: whatever the UI is fading towards is
-        // exactly what subscribers are told to fade towards.
+        // exactly what subscribers are told to fade towards. With a fixed
+        // theme the UI stays put, but subscribers still get the cover's
+        // colours: following the album is what they connected for.
         #[cfg(all(feature = "mxc", unix))]
         publish_theme(app, &theme);
     }

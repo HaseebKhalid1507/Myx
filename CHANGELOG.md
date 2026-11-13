@@ -15,6 +15,15 @@ they are added to, never rewritten.
   follow the cover. New installs start transparent. An existing config keeps
   the album background until you press `T`, which rewrites that one line and
   leaves the rest of the file alone.
+- **Themes** (#54), `theme` in `config.toml`. `album` (the default) keeps
+  following each cover; `tokyonight`, `catppuccin`, `rosepine` or `gruvbox`
+  keep that palette whatever plays. Your own theme is a file in
+  `~/.config/myx/themes/`: start from a palette (`base`) and set any of the 16
+  colours, or give a few `seed` colours and let myx build the rest the way it
+  does for album art. `wal` uses pywal's current colours, and a base16 scheme
+  dropped in as `<name>.yaml` works as a theme or a base. A theme that can't be
+  read falls back to the album's colours and says why in the status line; a
+  bad colour or unknown key costs only that line.
 
 - **Find in the list on screen** (#42): `f`, in a playlist, an album, Liked
   Songs or search results. Typing narrows the list to rows with every word in
@@ -35,6 +44,12 @@ they are added to, never rewritten.
 - Album art no longer blinks inside tmux. Ending a synchronized update makes
   tmux redraw the whole pane and send the image again, every frame; inside
   tmux frames are now written without one.
+- The album art no longer breaks when the terminal's font size changes while
+  myx is running. The cover was sized for the cell measured at startup, so a
+  bigger font left it too small and off-centre, and a smaller one cropped it.
+  After a resize settles (150 ms), myx measures the cell again — from tmux when
+  inside it, otherwise by asking the terminal — and redraws the cover for it;
+  until then the cover's spot stays blank rather than showing a wrong one.
 
 
 ## [0.5.0] — 2026-09-09

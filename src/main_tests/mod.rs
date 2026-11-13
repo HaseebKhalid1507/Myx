@@ -2,6 +2,7 @@
 //! exercise items that are private to `main.rs`.
 
 mod find;
+mod lyrics;
 mod nav;
 mod playlist;
 mod search;

@@ -42,7 +42,7 @@ pub(crate) fn render_nowplaying_view(
 
     // Derive the cover's cell footprint from the terminal's font aspect so a
     // square image renders square (and our centering math is exact).
-    let font = app.svc.picker.font_size();
+    let font = app.svc.cell;
     let fw = font.width.max(1) as u32;
     let fh = font.height.max(1) as u32;
 
@@ -69,12 +69,16 @@ pub(crate) fn render_nowplaying_view(
 
     match app.playback.now.as_ref().and_then(|n| n.cover.as_ref()) {
         _ if repaint == ArtRepaint::Wipe => wipe_area(f, art_rect),
+        // A resize hasn't settled, so the cell size — and with it the sharp
+        // cover's size — isn't known yet. The half-block one is made of cells
+        // and can't be wrong; it gives way to the sharp one once measured.
+        Some(cover) if app.view.cell_settling => cover.render_preview(f, art_rect, app.svc.cell),
         // Writing the escape means transmitting the image, so only do it when
         // something actually asked for it. A theme fade repaints every glyph on
         // screen dozens of times, and re-sending the cover on each of those is
         // what made it flicker.
-        Some(cover) if repaint == ArtRepaint::Draw || cover.needs_send(art_rect) => {
-            cover.render(f, art_rect)
+        Some(cover) if repaint == ArtRepaint::Draw || cover.needs_send(art_rect, app.svc.cell) => {
+            cover.render(f, art_rect, app.svc.cell)
         }
         // Already on screen: hold the cells so nothing overwrites the picture,
         // and send nothing.
