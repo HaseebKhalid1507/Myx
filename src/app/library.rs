@@ -1,30 +1,46 @@
 //! The library browser's data: sections, rows, sort order, and drill-ins.
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum RightView {
+    /// The library as a view of its own: the Focus layout's stand-in for the
+    /// sidebar it has no room for.
+    Library,
     NowPlaying,
     Lyrics,
     Queue,
 }
 
 impl RightView {
-    pub(crate) const ALL: [RightView; 3] =
+    /// The views ←/→ rotate through when the library has its own panel, or
+    /// zen hides it.
+    pub(crate) const VIEWS: [RightView; 3] =
         [RightView::NowPlaying, RightView::Lyrics, RightView::Queue];
+    /// …and in the Focus layout, where the library is one of the views.
+    pub(crate) const WITH_LIBRARY: [RightView; 4] = [
+        RightView::Library,
+        RightView::NowPlaying,
+        RightView::Lyrics,
+        RightView::Queue,
+    ];
+
     pub(crate) fn label(self) -> &'static str {
         match self {
+            RightView::Library => "Library",
             RightView::NowPlaying => "Now Playing",
             RightView::Lyrics => "Lyrics",
             RightView::Queue => "Queue",
         }
     }
-    pub(crate) fn shift(self, delta: isize) -> RightView {
-        let i = RightView::ALL.iter().position(|&v| v == self).unwrap_or(0) as isize;
-        let n = RightView::ALL.len() as isize;
-        RightView::ALL[(i + delta).rem_euclid(n) as usize]
+
+    /// The view `delta` steps along `rotation`, wrapping round.
+    pub(crate) fn shift_in(self, rotation: &[RightView], delta: isize) -> RightView {
+        let i = rotation.iter().position(|&v| v == self).unwrap_or(0) as isize;
+        let n = rotation.len() as isize;
+        rotation[(i + delta).rem_euclid(n) as usize]
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Section {
     Home,
     Recent,
@@ -140,6 +156,41 @@ impl LibItem {
     pub(crate) fn is_play(&self) -> bool {
         self.kind == ItemKind::Play
     }
+}
+
+/// Whether `item` matches an `f` find query: every word of the query appears,
+/// in any case and any order, somewhere in the row's title or subtitle (the
+/// artist, for a track). Headers and "▶ Play …" rows never match — a found
+/// list is just the rows you can pick.
+pub(crate) fn find_matches(item: &LibItem, query: &str) -> bool {
+    if item.is_header() || item.is_play() {
+        return false;
+    }
+    let hay = format!("{} {}", item.name, item.subtitle).to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|word| hay.contains(word))
+}
+
+/// The rows of `items` to draw, in order: every row, or with a find query only
+/// the matches. Indices into `items`, so the selection and what plays are
+/// those of the whole list — finding hides rows, it never changes the list.
+pub(crate) fn shown_rows(items: &[LibItem], query: Option<&str>) -> Vec<usize> {
+    match query {
+        None => (0..items.len()).collect(),
+        Some(q) => (0..items.len())
+            .filter(|&i| find_matches(&items[i], q))
+            .collect(),
+    }
+}
+
+/// Whether row `i` can take the cursor: it exists, isn't a header, and matches
+/// the find query if there is one.
+pub(crate) fn row_selectable(items: &[LibItem], i: usize, query: Option<&str>) -> bool {
+    items
+        .get(i)
+        .is_some_and(|item| !item.is_header() && query.is_none_or(|q| find_matches(item, q)))
 }
 
 /// Sort order for browsable lists.

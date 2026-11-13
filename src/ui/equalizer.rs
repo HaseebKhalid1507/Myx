@@ -5,10 +5,6 @@ use crate::*;
 
 const NORMAL_MIN_WIDTH: u16 = 62;
 const NORMAL_MIN_HEIGHT: u16 = 16;
-const NOW_PLAYING_BOTTOM_ROWS: u16 = 9;
-const NOW_PLAYING_TOP_INSET: u16 = 3;
-const MAX_ART_HEIGHT: u16 = 14;
-const ART_METADATA_ROWS: u16 = 4;
 
 pub(crate) fn render_equalizer_overlay(
     f: &mut Frame,
@@ -23,7 +19,7 @@ pub(crate) fn render_equalizer_overlay(
     out.hits.eq_toggle = None;
     out.hits.eq_presets.clear();
     out.hits.eq_bands.clear();
-    let rect = equalizer_rect(area, app.view.mode == RightView::NowPlaying);
+    let rect = equalizer_rect(area, app.view.mode == RightView::NowPlaying, app.svc.cell);
 
     f.render_widget(Clear, rect);
     f.render_widget(Block::default().style(theme.element()), rect);
@@ -43,30 +39,17 @@ pub(crate) fn render_equalizer_overlay(
     force_area(f, rect);
 }
 
-/// Prefer the free area below the complete cover/metadata group, replacing the
-/// visualizer while the editor is open. The constants mirror the Now Playing
-/// layout without coupling this feature to its renderer; that keeps the two
-/// independently mergeable. Short panes naturally select the compact controls.
-fn equalizer_rect(area: Rect, reserve_now_playing: bool) -> Rect {
+/// Prefer the free area below the cover and track info, replacing the
+/// visualizer while the editor is open. Where that is comes from Now Playing's
+/// own layout (`np_layout`), so the two can't drift apart. Short panes
+/// naturally select the compact controls.
+fn equalizer_rect(area: Rect, reserve_now_playing: bool, cell: ratatui_image::FontSize) -> Rect {
     let region = if reserve_now_playing {
-        let top_height = area
-            .height
-            .saturating_sub(NOW_PLAYING_BOTTOM_ROWS)
-            .saturating_sub(NOW_PLAYING_TOP_INSET);
-        let art_height = top_height
-            .saturating_sub(ART_METADATA_ROWS)
-            .clamp(3, MAX_ART_HEIGHT);
-        let group_height = art_height.saturating_add(ART_METADATA_ROWS);
-        let group_y = area
-            .y
-            .saturating_add(NOW_PLAYING_TOP_INSET)
-            .saturating_add(top_height.saturating_sub(group_height) / 2);
-        let below_y = group_y.saturating_add(group_height).min(area.bottom());
+        let below_y = np_layout(area, cell, 0).group_bottom().min(area.bottom());
         Rect::new(area.x, below_y, area.width, area.bottom() - below_y)
     } else {
         area
     };
-
     let width = (region.width.saturating_mul(9) / 10)
         .clamp(1, 100)
         .min(region.width);
@@ -374,14 +357,18 @@ mod tests {
         assert_eq!(format_frequency(16_000.0), "16k");
     }
 
+    const CELL: ratatui_image::FontSize = ratatui_image::FontSize::new(10, 22);
+
     #[test]
     fn equalizer_sits_below_the_cover_when_the_pane_has_room() {
         let pane = Rect::new(80, 4, 180, 54);
-        let art = Rect::new(154, 19, 32, 14);
-        let equalizer = equalizer_rect(pane, true);
+        let np = np_layout(pane, CELL, 0);
+        let art = np.art.expect("a cover fits");
+        let equalizer = equalizer_rect(pane, true, CELL);
 
         assert!(!equalizer.intersects(art));
-        assert!(equalizer.y >= art.bottom() + ART_METADATA_ROWS);
+        assert!(!equalizer.intersects(np.info));
+        assert!(equalizer.y >= np.group_bottom());
         assert!(equalizer.width >= NORMAL_MIN_WIDTH);
         assert!(equalizer.height >= NORMAL_MIN_HEIGHT);
     }
@@ -389,10 +376,13 @@ mod tests {
     #[test]
     fn compact_equalizer_still_avoids_art_on_a_small_pane() {
         let pane = Rect::new(0, 0, 40, 25);
-        let art = Rect::new(10, 3, 20, 9);
-        let equalizer = equalizer_rect(pane, true);
+        let np = np_layout(pane, CELL, 0);
+        let equalizer = equalizer_rect(pane, true, CELL);
 
-        assert!(!equalizer.intersects(art));
+        if let Some(art) = np.art {
+            assert!(!equalizer.intersects(art));
+        }
+        assert!(!equalizer.intersects(np.info));
         assert!(equalizer.width > 0);
         assert!(equalizer.height > 0);
     }

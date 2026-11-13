@@ -78,7 +78,14 @@ pub(crate) fn handle_action_key(
             app.view.actions = None;
         }
         ActionKind::Open { uri, name } => {
-            spawn_detail_fetch(app.svc.webapi.clone(), uri, name, detail_tx.clone());
+            app.status = format!("loading {name}…");
+            spawn_detail_fetch(
+                app.svc.webapi.clone(),
+                app.svc.engine.session(),
+                uri,
+                name,
+                detail_tx.clone(),
+            );
             app.view.actions = None;
         }
         ActionKind::CopyLink { uri } => {

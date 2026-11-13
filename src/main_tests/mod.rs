@@ -1,9 +1,12 @@
 //! The binary's unit tests, kept in the crate (not `tests/`) because they
 //! exercise items that are private to `main.rs`.
 
+mod find;
+mod lyrics;
 mod nav;
 mod playlist;
 mod search;
+mod sizes;
 mod theme;
 
 /// Live-API tests, `#[ignore]`d so `cargo test` stays offline:
