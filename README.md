@@ -86,7 +86,7 @@ myx is running, it keeps going silently and says so in the status line.
 f          find in this list
 space      play · pause          n / b    next · prev
 ⇧ ← →      seek                  s        shuffle
-+ / -      volume                R        repeat
++ / -      volume                R        repeat: off · all · one
 o          sort                  r        reload
 z          hide sidebar          e        equalizer
 q          quit                  T        transparent background

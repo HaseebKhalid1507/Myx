@@ -79,6 +79,15 @@ they are added to, never rewritten.
   It now says so before logging in, with the plugin to install for each
   distribution (#17: no PulseAudio needed). If the device disappears mid-
   session, playback carries on silently and the status line explains.
+- `R` didn't repeat the song (#68). It only set repeat for the playlist,
+  which shows once the whole list has played; nothing on screen changed when
+  it was pressed; and starting anything new turned repeat off again while myx
+  still took it to be on. `R` now steps off → all → one like Spotify's button:
+  all starts the list over, one plays the track again until you skip (a skip
+  drops back to all). The status line says which, the footer's
+  `R` lights up, and every playlist, album, track and radio starts in that
+  mode. A terminal that sends Shift+letter as a kitty escape code no longer
+  turns `R` into `r` (reload).
 
 
 ## [0.5.0] — 2026-09-09
