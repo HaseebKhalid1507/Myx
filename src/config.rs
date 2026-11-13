@@ -34,6 +34,13 @@ pub struct Config {
     /// key is missing; the first-run template sets it, so new installs start
     /// transparent. `T` in the app flips it and rewrites the line.
     pub transparent: bool,
+    /// The palette: "album" follows each cover; a built-in name, "wal", or a
+    /// file in `~/.config/myx/themes/` stays put. A string on purpose: a bad
+    /// value is a warning at startup, not a reason to lose this whole file.
+    pub theme: String,
+    /// "auto" fits the screen; "full" or "focus" keeps one arrangement
+    /// whatever the size. A string for the same reason as `theme`.
+    pub layout: String,
 }
 
 impl Default for Config {
@@ -46,6 +53,8 @@ impl Default for Config {
             bitrate: 160,
             normalize_volume: false,
             transparent: false,
+            theme: "album".to_string(),
+            layout: "auto".to_string(),
         }
     }
 }
@@ -90,6 +99,16 @@ const TEMPLATE: &str = "\
 # instead of the album-tinted one. Text and accents still follow the cover.
 # Press T in myx to flip it; this line is rewritten when you do.
 transparent = true
+
+# Colours. \"album\" follows each cover. To keep one palette instead, use
+# tokyonight, catppuccin, rosepine or gruvbox; \"wal\" for pywal's colours; or
+# the name of your own theme in ~/.config/myx/themes/ (see the README).
+#theme = \"album\"
+
+# Layout. \"auto\" fits the screen: the library beside the view when there's
+# room, one pane at a time (the library is one of the ←/→ views) when there
+# isn't. \"full\" or \"focus\" keeps one of them whatever the size.
+#layout = \"auto\"
 ";
 
 impl Config {
@@ -243,6 +262,7 @@ mod tests {
         assert_eq!(c.bitrate, 160);
         assert!(!c.normalize_volume);
         assert!(!c.transparent);
+        assert_eq!(c.theme, "album");
     }
 
     #[test]
@@ -258,6 +278,9 @@ mod tests {
 
         let c = Config::parse("transparent = true").expect("valid toml");
         assert!(c.transparent);
+
+        let c = Config::parse("theme = \"gruvbox\"").expect("valid toml");
+        assert_eq!(c.theme, "gruvbox");
     }
 
     #[test]
@@ -314,6 +337,7 @@ mod tests {
         assert!(c.protocol.is_none());
         assert_eq!(c.bitrate, d.bitrate);
         assert_eq!(c.normalize_volume, d.normalize_volume);
+        assert_eq!(c.theme, d.theme);
         // The one live key: new installs start transparent, while a config
         // without the line keeps the album background, which is the default.
         assert!(c.transparent);

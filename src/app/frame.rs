@@ -50,6 +50,9 @@ pub(crate) struct FrameOut {
     /// stores the result back, which is what makes scrolling sticky. Owned by
     /// `run_ui` so it survives across frames.
     pub(crate) lib_offset: usize,
+    /// Whether the view drew the playing track's title this frame. When it
+    /// couldn't (squeezed, or a view without one), the strip shows it instead.
+    pub(crate) title_shown: bool,
 }
 
 /// What the album art box owes the next frame.

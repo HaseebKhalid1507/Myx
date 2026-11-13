@@ -9,6 +9,11 @@ pub(crate) fn handle_key(
     mods: KeyModifiers,
     chans: &UiChannels,
 ) -> bool {
+    // A find belongs to the list it was typed for; once another list is on
+    // screen (a page opened, a section switched), it's gone.
+    let list = app.list_key();
+    app.find.forget_unless(&list);
+
     // --- Actions menu captures input while open ---
     // Double-press Ctrl-C to quit (works from anywhere). Single press arms it.
     if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
@@ -44,6 +49,9 @@ pub(crate) fn handle_key(
                 app.search.input_mode = false;
                 let q = app.search.query().trim().to_string();
                 if !q.is_empty() {
+                    // Results replace whatever list is open, pages included;
+                    // a page left on top would hide them.
+                    app.browse.details.clear();
                     app.search.searching = true;
                     app.search.in_flight = true;
                     app.browse.selected = 0;
@@ -67,11 +75,59 @@ pub(crate) fn handle_key(
         return false;
     }
 
-    // Zen hides the library, so the keys that drive one do nothing rather than
-    // moving a selection nobody can see. Placed after the overlays above, which
-    // stay usable if one was already open when zen came on.
-    if app.view.zen && drives_library(code) {
-        return false;
+    // --- Find prompt: typing narrows the list; arrows still move ---
+    if app.find.typing {
+        match code {
+            KeyCode::Esc => {
+                app.find.clear();
+                app.normalize_selection();
+                return false;
+            }
+            KeyCode::Up => {
+                app.move_sel(-1);
+                return false;
+            }
+            KeyCode::Down => {
+                app.move_sel(1);
+                return false;
+            }
+            // Enter picks the highlighted match, the way it always does; the
+            // list stays narrowed until Esc.
+            KeyCode::Enter => {
+                app.find.typing = false;
+                if app.find_query().is_none() {
+                    app.find.clear();
+                    return false;
+                }
+            }
+            KeyCode::Char('u') if mods.contains(KeyModifiers::CONTROL) => {
+                app.find.input = Default::default();
+                app.browse.selected = app.first_selectable();
+                return false;
+            }
+            _ => {
+                app.find
+                    .input
+                    .input(crossterm::event::KeyEvent::new(code, mods));
+                // Like fzf: a new query puts the cursor on its first match.
+                app.browse.selected = app.first_selectable();
+                return false;
+            }
+        }
+    }
+
+    // Keys that drive the library do nothing while it isn't on screen — under
+    // zen, or in the Focus layout on another view — rather than moving a
+    // selection nobody can see. Except `/` in Focus: search results go in the
+    // library, so it brings the Library view up to search in. Placed after the
+    // overlays above, which stay usable if one was already open.
+    if !app.library_visible() && drives_library(code) {
+        let search_brings_it_up =
+            code == KeyCode::Char('/') && app.rotation().contains(&RightView::Library);
+        if !search_brings_it_up {
+            return false;
+        }
+        app.view.mode = RightView::Library;
     }
 
     match code {
@@ -82,7 +138,17 @@ pub(crate) fn handle_key(
             app.search.input_mode = true;
             app.search.clear();
         }
+        KeyCode::Char('f') => {
+            let list = app.list_key();
+            app.find.open(list);
+            app.normalize_selection();
+        }
         KeyCode::Char('q') => return true,
+        // Esc undoes one thing: a find first, then the page, then the search.
+        KeyCode::Esc if app.find_query().is_some() => {
+            app.find.clear();
+            app.normalize_selection();
+        }
         KeyCode::Esc => {
             if let Some(d) = app.browse.details.pop() {
                 app.browse.selected = d.parent_selected;
@@ -158,14 +224,14 @@ pub(crate) fn handle_key(
             // Zen hides the library, so the menu belongs to what is playing —
             // acting on a selection nobody can see is how it ends up offering
             // "remove from Liked" for the wrong track.
-            let item = if app.view.zen {
+            let item = if !app.library_visible() {
                 app.playback
                     .now
                     .as_ref()
                     .filter(|n| !n.uri.is_empty())
                     .map(|n| LibItem::track(n.title.clone(), n.artist.clone(), n.uri.clone()))
             } else {
-                app.cur_items().get(app.browse.selected).cloned()
+                app.selected_item().cloned()
             };
             if let Some(item) = item {
                 if !item.is_header() && !item.is_play() {
@@ -194,19 +260,23 @@ pub(crate) fn handle_key(
             app.playback.seek_step(-SEEK_STEP_MS)
         }
         KeyCode::Right => {
-            app.view.mode = app.view.mode.shift(1);
+            app.view.mode = app.view.mode.shift_in(app.rotation(), 1);
             if app.view.mode == RightView::Queue && app.transport.playback_started {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         KeyCode::Left => {
-            app.view.mode = app.view.mode.shift(-1);
+            app.view.mode = app.view.mode.shift_in(app.rotation(), -1);
             if app.view.mode == RightView::Queue && app.transport.playback_started {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         // The frame loop notices the layout change and wipes the art box.
-        KeyCode::Char('z') => app.view.zen = !app.view.zen,
+        KeyCode::Char('z') => {
+            app.view.zen = !app.view.zen;
+            // In Focus, zen takes the Library view out of the rotation.
+            app.settle_view();
+        }
         // Shifted on purpose: a stray press repaints everything and rewrites
         // config.toml.
         KeyCode::Char('T') => {
@@ -223,7 +293,14 @@ pub(crate) fn handle_key(
         KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) => play_selected_context(app, false),
         KeyCode::Enter => match app.activate() {
             Activated::Open(uri, name) => {
-                spawn_detail_fetch(app.svc.webapi.clone(), uri, name, chans.detail.clone());
+                app.status = format!("loading {name}…");
+                spawn_detail_fetch(
+                    app.svc.webapi.clone(),
+                    app.svc.engine.session(),
+                    uri,
+                    name,
+                    chans.detail.clone(),
+                );
             }
             Activated::Radio(uri) => {
                 app.status = "starting radio…".to_string();
@@ -268,6 +345,6 @@ pub(crate) fn drives_library(code: KeyCode) -> bool {
             | KeyCode::Down
             | KeyCode::Enter
             | KeyCode::Esc
-            | KeyCode::Char('/' | '[' | ']' | 'j' | 'k' | 'o' | 'r' | 'P' | 'S')
+            | KeyCode::Char('/' | 'f' | '[' | ']' | 'j' | 'k' | 'o' | 'r' | 'P' | 'S')
     )
 }

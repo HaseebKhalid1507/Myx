@@ -9,6 +9,10 @@ pub(crate) struct Services {
     pub(crate) engine: Engine,
     pub(crate) picker: Picker,
     pub(crate) webapi: Arc<Mutex<WebApi>>,
+    /// The terminal's cell size in pixels *now*. Starts as the picker's
+    /// startup measurement and is measured again after resizes, because a
+    /// font change mid-session changes it and the picker's copy can't be.
+    pub(crate) cell: ratatui_image::FontSize,
 }
 
 pub(crate) const FADE_MS: u64 = 1500;
@@ -20,17 +24,69 @@ pub(crate) struct ThemeState {
     pub(crate) displayed: Theme,
     pub(crate) target: Theme,
     pub(crate) fade: Option<ThemeFade>,
+    /// A palette picked in the config (`theme = "…"`) stays put; covers only
+    /// move the UI's colours when this is false.
+    pub(crate) fixed: bool,
+    /// What went wrong reading the configured theme, shown once in the status
+    /// line when the library has loaded — the first moment it won't be
+    /// overwritten straight away.
+    pub(crate) notice: Option<String>,
 }
 
-/// The palette before any cover has arrived, with the background as configured.
+/// `theme = "…"` from the config, resolved once: theme files and pywal's
+/// colours are read at startup, not on every frame.
+pub(crate) fn chosen_theme() -> &'static myx::user_theme::Resolved {
+    static CHOSEN: std::sync::OnceLock<myx::user_theme::Resolved> = std::sync::OnceLock::new();
+    CHOSEN.get_or_init(|| {
+        myx::user_theme::resolve(
+            &myx::config::get().theme,
+            &myx::user_theme::Sources::from_env(),
+        )
+    })
+}
+
+/// The palette before any cover has arrived — or for good, with a fixed theme —
+/// with the background as configured.
 pub(crate) fn startup_theme() -> Theme {
+    let palette = match chosen_theme().choice {
+        myx::user_theme::Choice::Fixed(theme) => theme,
+        myx::user_theme::Choice::Album => TOKYONIGHT,
+    };
     Theme {
         transparent: myx::config::get().transparent,
-        ..TOKYONIGHT
+        ..palette
     }
 }
 
 impl ThemeState {
+    pub(crate) fn at_startup() -> Self {
+        let chosen = chosen_theme();
+        for warning in &chosen.warnings {
+            liblog(warning);
+        }
+        let notice = chosen
+            .warnings
+            .first()
+            .map(|first| match chosen.warnings.len() {
+                1 => first.clone(),
+                n => format!("{first} (+{} more)", n - 1),
+            });
+        Self {
+            displayed: startup_theme(),
+            target: startup_theme(),
+            fade: None,
+            fixed: matches!(chosen.choice, myx::user_theme::Choice::Fixed(_)),
+            notice,
+        }
+    }
+
+    /// A new cover's palette: faded to, unless the config fixed the theme.
+    pub(crate) fn follow_cover(&mut self, to: Theme) {
+        if !self.fixed {
+            self.start_fade(to);
+        }
+    }
+
     pub(crate) fn start_fade(&mut self, to: Theme) {
         // A cover's palette knows nothing of the config; the startup flag rides along.
         let to = Theme {
@@ -99,6 +155,64 @@ pub(crate) struct BrowseState {
     pub(crate) details: Vec<Detail>,
 }
 
+/// Which list is on screen: a library section, the search results, or the page
+/// at some depth of the drill-in stack. Find remembers the one it was opened on.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum ListKey {
+    Section(Section),
+    Search,
+    Page(usize, String),
+}
+
+/// `f`: find in the list on screen. A lens, not an edit — rows that don't
+/// match are skipped like headers are, so picking a match plays exactly what
+/// it would have played unfiltered. It belongs to the list it was opened on
+/// and lapses the moment another list is on screen.
+#[derive(Default)]
+pub(crate) struct FindState {
+    /// The prompt is taking keys.
+    pub(crate) typing: bool,
+    pub(crate) input: tui_textarea::TextArea<'static>,
+    /// The list the query was typed for.
+    pub(crate) list: Option<ListKey>,
+}
+
+impl FindState {
+    /// The typed query (the prompt is single-line).
+    pub(crate) fn query(&self) -> &str {
+        self.input.lines().first().map_or("", String::as_str)
+    }
+
+    /// The query in force on list `key`: only the list it was typed for, and
+    /// only once there is something in it.
+    pub(crate) fn query_for(&self, key: &ListKey) -> Option<&str> {
+        let q = self.query().trim();
+        (self.list.as_ref() == Some(key) && !q.is_empty()).then_some(q)
+    }
+
+    /// Start typing on list `key`. Reopening on the same list edits the query
+    /// already there; on another list it starts empty.
+    pub(crate) fn open(&mut self, key: ListKey) {
+        if self.list.as_ref() != Some(&key) {
+            self.input = Default::default();
+            self.list = Some(key);
+        }
+        self.typing = true;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Drop a find whose list has left the screen, so coming back to that
+    /// list later shows all of it again.
+    pub(crate) fn forget_unless(&mut self, key: &ListKey) {
+        if self.list.as_ref().is_some_and(|l| l != key) {
+            self.clear();
+        }
+    }
+}
+
 /// The `/` search overlay: whether the prompt is capturing keys, the typed
 /// query, and the results that temporarily replace the library list.
 pub(crate) struct SearchState {
@@ -126,6 +240,63 @@ impl SearchState {
     }
 }
 
+/// How the screen is arranged, picked from its size every frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayoutMode {
+    /// The library sidebar beside the active view.
+    Full,
+    /// One pane at a time; the library is one of the ←/→ views.
+    Focus,
+}
+
+/// The least room the Full layout needs: below this the sidebar is a strip of
+/// cut-off titles and the view beside it too narrow to read.
+pub(crate) const FULL_MIN_COLS: u16 = 80;
+pub(crate) const FULL_MIN_ROWS: u16 = 14;
+/// How far below those Full holds on once it's up, so a size sitting right on
+/// the edge (a drag, a zoom step) doesn't flip the layout back and forth —
+/// each flip is a full redraw and a cover re-sent.
+const LAYOUT_HYSTERESIS: u16 = 2;
+
+/// The layout for a `cols`×`rows` terminal: `forced` when the config picks one,
+/// else Full when it fits, else Focus.
+pub(crate) fn choose_layout(
+    cols: u16,
+    rows: u16,
+    current: LayoutMode,
+    forced: Option<LayoutMode>,
+) -> LayoutMode {
+    if let Some(layout) = forced {
+        return layout;
+    }
+    let slack = if current == LayoutMode::Full {
+        LAYOUT_HYSTERESIS
+    } else {
+        0
+    };
+    if cols + slack >= FULL_MIN_COLS && rows + slack >= FULL_MIN_ROWS {
+        LayoutMode::Full
+    } else {
+        LayoutMode::Focus
+    }
+}
+
+/// `layout = "…"` from the config: a layout to keep whatever the size, or
+/// `None` for "auto" (and anything unrecognised, which is logged).
+pub(crate) fn forced_layout(setting: &str) -> Option<LayoutMode> {
+    match setting.trim().to_ascii_lowercase().as_str() {
+        "full" => Some(LayoutMode::Full),
+        "focus" => Some(LayoutMode::Focus),
+        "" | "auto" => None,
+        other => {
+            liblog(format!(
+                "config: layout = {other:?} isn't auto, full or focus; using auto"
+            ));
+            None
+        }
+    }
+}
+
 /// What the user is looking at: the right pane's mode, the zen (sidebar
 /// hidden) toggle, the lyrics backing the Lyrics view, and the actions
 /// overlay drawn on top of everything.
@@ -133,7 +304,11 @@ pub(crate) struct ViewState {
     // Which view fills the right pane.
     pub(crate) mode: RightView,
     // Sidebar hidden, so the right view (and its cover) gets the whole width.
+    // In the Focus layout it takes the library out of the ←/→ views instead:
+    // zen means no library anywhere, whatever the layout.
     pub(crate) zen: bool,
+    // The arrangement the screen's size picked (see `choose_layout`).
+    pub(crate) layout: LayoutMode,
     // Lyrics: (timestamp_ms, line). Synced when timestamps are non-zero.
     pub(crate) lyrics: Vec<(u32, String)>,
     pub(crate) lyrics_synced: bool,
@@ -141,6 +316,9 @@ pub(crate) struct ViewState {
     pub(crate) actions: Option<ActionMenu>,
     // Ten-band equalizer overlay (opened with `e`).
     pub(crate) equalizer: Option<EqualizerOverlay>,
+    // Between a resize and the cell measurement after it: the cover's size
+    // isn't known, and a blank slot beats a wrong cover.
+    pub(crate) cell_settling: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

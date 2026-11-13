@@ -8,6 +8,12 @@ they are added to, never rewritten.
 
 ### Added
 
+- **Layouts for every size.** With room for both, the library sits beside the
+  view as before; below that (80×14) myx shows one pane at a time and the
+  library becomes one of the views `←` `→` step through, with `/` bringing it
+  up to search in. Zoom in or shrink the window and it rearranges itself;
+  `layout = "full"` or `"focus"` in `config.toml` keeps one. Zen still means
+  no library anywhere.
 - **Transparent background**, `transparent` in `config.toml` and `T` to flip
   it. The screen and panel backgrounds are left to the terminal — its own
   colour, opacity and blur — instead of the album-tinted fill; the selected row
@@ -15,8 +21,26 @@ they are added to, never rewritten.
   follow the cover. New installs start transparent. An existing config keeps
   the album background until you press `T`, which rewrites that one line and
   leaves the rest of the file alone.
+- **Themes** (#54), `theme` in `config.toml`. `album` (the default) keeps
+  following each cover; `tokyonight`, `catppuccin`, `rosepine` or `gruvbox`
+  keep that palette whatever plays. Your own theme is a file in
+  `~/.config/myx/themes/`: start from a palette (`base`) and set any of the 16
+  colours, or give a few `seed` colours and let myx build the rest the way it
+  does for album art. `wal` uses pywal's current colours, and a base16 scheme
+  dropped in as `<name>.yaml` works as a theme or a base. A theme that can't be
+  read falls back to the album's colours and says why in the status line; a
+  bad colour or unknown key costs only that line.
+
+- **Find in the list on screen** (#42): `f`, in a playlist, an album, Liked
+  Songs or search results. Typing narrows the list to rows with every word in
+  the title or artist; arrows pick, `⏎` plays — the whole list from that
+  track, as if unfiltered — and `Esc` clears it. Leaving the list drops it.
 
 ### Fixed
+
+- `/` inside an open playlist, album or artist page showed nothing: the
+  prompt was drawn behind the page title, and the results behind the page.
+  Both now show, and the results replace the page.
 
 - macOS: launching myx no longer takes keyboard focus from the terminal. The
   media-key event loop activated its windowless app at launch, so keys went
@@ -26,6 +50,26 @@ they are added to, never rewritten.
 - Album art no longer blinks inside tmux. Ending a synchronized update makes
   tmux redraw the whole pane and send the image again, every frame; inside
   tmux frames are now written without one.
+- The album art no longer breaks when the terminal's font size changes while
+  myx is running. The cover was sized for the cell measured at startup, so a
+  bigger font left it too small and off-centre, and a smaller one cropped it.
+  After a resize settles (150 ms), myx measures the cell again — from tmux when
+  inside it, otherwise by asking the terminal — and redraws the cover for it;
+  until then the cover's spot stays blank rather than showing a wrong one.
+- Opening the actions menu (`a`) in a terminal shorter than 8 rows crashed
+  myx. The menu now fits whatever space there is. A test draws every screen at
+  every size, so a crash like it can't come back unnoticed.
+- Small terminals keep what matters. The screen used to be laid out by
+  ratatui's constraint solver, which squeezes fixed-height rows first, so on a
+  short terminal the now-playing strip vanished before anything else. Now:
+  - the title, artist and position stay on screen at every size (down to one
+    row, where the progress bar carries them);
+  - the key hints show only whole hints that fit, most useful first, instead of
+    a row cut off mid-word at almost every width;
+  - the view tabs never run into the status text; when space is tight they
+    shrink to `◀ Now Playing ▶`;
+  - the visualizer makes way before the album art shrinks, and nothing on the
+    Now Playing screen overlaps anything else.
 - Killing myx (`kill`, closing its terminal window, `kill -INT`) no longer
   leaves the terminal in raw mode on the alternate screen, or loses the last
   half-minute of saved state. SIGTERM, SIGHUP and SIGINT now quit the way `q`

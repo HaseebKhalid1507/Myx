@@ -12,6 +12,8 @@ fn a_cover_palette_keeps_the_configured_transparent_background() {
         displayed: transparent,
         target: transparent,
         fade: None,
+        fixed: false,
+        notice: None,
     };
 
     state.start_fade(myx::theme::GRUVBOX);
@@ -28,6 +30,8 @@ fn flipping_transparency_mid_fade_sticks_when_the_fade_lands() {
         displayed: TOKYONIGHT,
         target: TOKYONIGHT,
         fade: None,
+        fixed: false,
+        notice: None,
     };
     state.start_fade(myx::theme::GRUVBOX);
 
@@ -38,4 +42,26 @@ fn flipping_transparency_mid_fade_sticks_when_the_fade_lands() {
         .fade
         .as_ref()
         .is_some_and(|f| f.current().transparent && f.target().transparent));
+}
+
+#[test]
+fn a_fixed_theme_ignores_covers_and_the_album_theme_follows_them() {
+    let mut fixed = ThemeState {
+        displayed: TOKYONIGHT,
+        target: TOKYONIGHT,
+        fade: None,
+        fixed: true,
+        notice: None,
+    };
+    fixed.follow_cover(myx::theme::GRUVBOX);
+    assert!(fixed.fade.is_none());
+    assert_eq!(fixed.target.name, "tokyonight");
+
+    let mut album = ThemeState {
+        fixed: false,
+        ..fixed
+    };
+    album.follow_cover(myx::theme::GRUVBOX);
+    assert!(album.fade.is_some());
+    assert_eq!(album.target.name, "gruvbox");
 }

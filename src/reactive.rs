@@ -31,6 +31,14 @@ pub fn derive_theme(img: &DynamicImage, name: &'static str) -> Theme {
     theme_from_swatches(&swatches, name)
 }
 
+/// Derive a theme from a handful of colours the way a cover's palette is
+/// turned into one: the most vibrant becomes `primary`, the most hue-distant
+/// `accent`, and the surfaces take the most saturated colour's hue. For
+/// `seed = [...]` in a theme file and for pywal's colours. `None` if empty.
+pub fn theme_from_colors(colors: &[Rgb], name: &'static str) -> Option<Theme> {
+    (!colors.is_empty()).then(|| theme_from_swatches(colors, name))
+}
+
 /// Pick the palette swatch whose hue is nearest `target_hue`. Returns the
 /// dark-normalized swatch if one lands within `max_dist` degrees, else `None`.
 fn nearest_hue(swatches: &[Rgb], target_hue: f32, max_dist: f32) -> Option<Rgb> {

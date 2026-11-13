@@ -185,9 +185,11 @@ pub(crate) fn apply_meta(
     });
 
     if let Some(theme) = meta.theme {
-        app.theme.start_fade(theme);
+        app.theme.follow_cover(theme);
         // Same instant, same palette: whatever the UI is fading towards is
-        // exactly what subscribers are told to fade towards.
+        // exactly what subscribers are told to fade towards. With a fixed
+        // theme the UI stays put, but subscribers still get the cover's
+        // colours: following the album is what they connected for.
         #[cfg(all(feature = "mxc", unix))]
         publish_theme(app, &theme);
     }
@@ -276,7 +278,7 @@ pub(crate) fn enter_label(item: Option<&LibItem>) -> &'static str {
 /// `P` / `S`: play the highlighted context from anywhere — library section,
 /// search results, or inside a drill-in (`cur_items` resolves all three).
 pub(crate) fn play_selected_context(app: &mut App, shuffle: bool) {
-    let Some(item) = app.cur_items().get(app.browse.selected).cloned() else {
+    let Some(item) = app.selected_item().cloned() else {
         return;
     };
     match context_target(&item) {

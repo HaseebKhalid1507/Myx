@@ -9,8 +9,13 @@ pub(crate) fn render_actions_overlay(f: &mut Frame, app: &App, theme: Theme, are
     let Some(menu) = &app.view.actions else {
         return;
     };
-    let w = (area.width * 5 / 10).clamp(28, 52);
-    let h = (menu.items.len() as u16 + 4).clamp(6, area.height.saturating_sub(2));
+    // Never bigger than the screen: a clamp to `height - 2` panicked (min >
+    // max) on a terminal under 8 rows.
+    let w = (area.width / 2).clamp(28, 52).min(area.width);
+    let h = (menu.items.len() as u16 + 4)
+        .max(6)
+        .min(area.height.saturating_sub(2).max(1))
+        .min(area.height);
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
     let rect = Rect {
