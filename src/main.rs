@@ -812,7 +812,7 @@ async fn run_ui(
             ev = in_rx.recv_async() => {
                 match ev {
                     Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        let quit = handle_key(&mut app, key.code, key.modifiers, &chans);
+                        let quit = handle_key(&mut app, typed_key(key), key.modifiers, &chans);
                         if quit {
                             save_state(&app);
                             break;
