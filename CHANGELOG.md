@@ -53,6 +53,17 @@ they are added to, never rewritten.
 - Opening the actions menu (`a`) in a terminal shorter than 8 rows crashed
   myx. The menu now fits whatever space there is. A test draws every screen at
   every size, so a crash like it can't come back unnoticed.
+- Small terminals keep what matters. The screen used to be laid out by
+  ratatui's constraint solver, which squeezes fixed-height rows first, so on a
+  short terminal the now-playing strip vanished before anything else. Now:
+  - the title, artist and position stay on screen at every size (down to one
+    row, where the progress bar carries them);
+  - the key hints show only whole hints that fit, most useful first, instead of
+    a row cut off mid-word at almost every width;
+  - the view tabs never run into the status text; when space is tight they
+    shrink to `◀ Now Playing ▶`;
+  - the visualizer makes way before the album art shrinks, and nothing on the
+    Now Playing screen overlaps anything else.
 
 
 ## [0.5.0] — 2026-09-09

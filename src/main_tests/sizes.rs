@@ -225,3 +225,103 @@ fn nothing_playing_never_panics_at_any_size() {
 fn playing_never_panics_at_any_size() {
     sweep(playing_app(), "playing");
 }
+
+/// The whole screen as text, row by row.
+fn screen_text(term: &Terminal<TestBackend>) -> String {
+    let buf = term.backend().buffer();
+    let area = buf.area;
+    (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Somewhere in `text` an `m:ss` time — the position moves while a track plays.
+fn has_time(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.windows(4).any(|w| {
+        w[0].is_ascii_digit() && w[1] == b':' && w[2].is_ascii_digit() && w[3].is_ascii_digit()
+    })
+}
+
+#[test]
+fn what_is_playing_survives_every_size() {
+    // However small the screen, if a track is playing you can see which, and
+    // where in it you are: the view shows the title, else the strip does, else
+    // the progress row carries it. (Below 24 columns there's no room to promise
+    // a readable title.)
+    let mut app = playing_app();
+    app.svc.cell = ratatui_image::FontSize::new(1, 2);
+    let mut term = Terminal::new(TestBackend::new(1, 1)).expect("test terminal");
+    for zen in [false, true] {
+        app.view.zen = zen;
+        for view in [RightView::NowPlaying, RightView::Lyrics, RightView::Queue] {
+            app.view.mode = view;
+            for w in (24..=120).step_by(3) {
+                for h in 1..=50 {
+                    draw(&mut term, &app, w, h);
+                    let text = screen_text(&term);
+                    assert!(
+                        text.contains("RUNNING"),
+                        "no title at {w}x{h}, {view:?}, zen={zen}:\n{text}"
+                    );
+                    assert!(
+                        has_time(&text),
+                        "no time at {w}x{h}, {view:?}, zen={zen}:\n{text}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_footer_never_shows_a_hint_cut_short() {
+    let mut app = playing_app();
+    app.svc.cell = ratatui_image::FontSize::new(1, 2);
+    let mut term = Terminal::new(TestBackend::new(1, 1)).expect("test terminal");
+    // Every hint the footer can show, whole. Hints are separated by three
+    // spaces, so each three-space-separated piece must be one of these.
+    let whole = [
+        "⇥ section",
+        "←→ view",
+        "/ search",
+        "f find",
+        "⏎ select",
+        "⏎ open",
+        "⇧⏎ play",
+        "S shuffle",
+        "␣ play",
+        "␣ pause",
+        "n/b skip",
+        "⇧←→ seek",
+        "o sort",
+        "+/- vol",
+        "s shuffle",
+        "a actions",
+        "e eq",
+        "z zen",
+        "q quit",
+    ];
+    for w in 10..=200u16 {
+        draw(&mut term, &app, w, 30);
+        let text = screen_text(&term);
+        // The last row with anything on it (an outer margin row may follow).
+        let footer = text
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .expect("a footer row")
+            .trim();
+        for piece in footer.split("   ").map(str::trim).filter(|p| !p.is_empty()) {
+            assert!(
+                whole.contains(&piece),
+                "cut hint {piece:?} at width {w}: {footer:?}"
+            );
+        }
+    }
+}
