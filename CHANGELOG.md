@@ -36,6 +36,13 @@ they are added to, never rewritten.
   the title or artist; arrows pick, `⏎` plays — the whole list from that
   track, as if unfiltered — and `Esc` clears it. Leaving the list drops it.
 
+- **Startup timing in the debug log** (#72). With `MYX_LOG` set, each step
+  between launch and the first frame — credentials, Web API token, terminal
+  query, connecting to Spotify, the first frame itself — is a `startup:` line
+  in `~/.cache/myx/myx.log` saying when it began and how long it took, so a
+  slow start names its step. A rate-limited request that waits before
+  retrying now says so too. The README has a Debug log section.
+
 ### Fixed
 
 - `/` inside an open playlist, album or artist page showed nothing: the

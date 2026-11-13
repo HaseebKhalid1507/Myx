@@ -80,6 +80,12 @@ pub(crate) fn get_json(
                 ));
                 return None;
             };
+            // Short waits add up over a long Liked Songs; without this line a
+            // throttled library looks like a slow network.
+            liblog(format!(
+                "api: {url} -> 429, retry-after {after:?}s, waiting {}s",
+                wait.as_secs()
+            ));
             std::thread::sleep(wait);
             continue;
         }

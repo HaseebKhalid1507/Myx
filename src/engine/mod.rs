@@ -33,6 +33,7 @@ use librespot_playback::player::{self, Player};
 use crate::audio::equalizer::{shared_equalizer, EqualizerControl, EqualizerSink};
 use crate::audio::output::{output_available, SilentSink};
 use crate::audio::{EqualizerSettings, VisBands, VisualizationSink};
+use crate::liblog::Step;
 pub use playlist::{playlist_tracks, PlaylistTrack};
 
 /// A normalized playback event surfaced to the rest of the app.
@@ -577,6 +578,9 @@ async fn connect(
         volume_steps: 64,
     };
 
+    // Client token, access point and login5, none of them under a deadline of
+    // librespot's: where a slow start or reconnect is likeliest to wait (#72).
+    let login = Step::start("engine: log in to Spotify");
     let (spirc, spirc_task) = Spirc::new(
         connect_config,
         session.clone(),
@@ -586,6 +590,7 @@ async fn connect(
     )
     .await
     .context("initialize spirc")?;
+    drop(login);
     tokio::spawn(spirc_task);
 
     Ok(Link {
