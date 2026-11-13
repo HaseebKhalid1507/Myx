@@ -53,7 +53,7 @@ use myx::components::{gradient_line, gradient_progress, left_bar_block};
 use myx::cover::Cover;
 use myx::engine::{self, Engine, EngineEvent, Repeat};
 use myx::gradient::{self};
-use myx::liblog::{install_librespot_log, liblog};
+use myx::liblog::{install_librespot_log, liblog, timed, Step};
 use myx::lyrics::parse::parse_lrc;
 use myx::reactive::derive_theme;
 use myx::term::{acquire_single_instance_lock, init_terminal, restore_terminal, QuitSignals, Term};
@@ -86,6 +86,13 @@ fn main() -> Result<()> {
     }
 
     install_librespot_log();
+    // Each step below that can keep the user waiting is a `startup:` line in
+    // myx.log, so a slow start (#72) names its step.
+    liblog(format!(
+        "startup: myx {} on {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS
+    ));
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Refuse to start a second instance — two myx's racing on the shared Web API
@@ -93,7 +100,7 @@ fn main() -> Result<()> {
     let _instance_lock = acquire_single_instance_lock();
 
     // Restore last session first, so the engine starts at the saved volume.
-    let saved = SavedState::load();
+    let saved = timed("startup: saved state", SavedState::load);
     let init_vol = if saved.volume == 0 {
         80
     } else {
@@ -103,7 +110,10 @@ fn main() -> Result<()> {
     // No output device means nothing can play, and librespot would find out by
     // panicking once the player starts. Say so — and how to fix it — before
     // anything else, logging in included.
-    if !myx::audio::output::output_available() {
+    if !timed(
+        "startup: audio output",
+        myx::audio::output::output_available,
+    ) {
         anyhow::bail!(myx::audio::output::NO_AUDIO_OUTPUT);
     }
 
@@ -115,11 +125,12 @@ fn main() -> Result<()> {
     }
     let ((creds, webapi), terminal) = auth_then_terminal(
         || {
-            let creds = engine::credentials()?;
-            let webapi = WebApi::init().context("authorize web api")?;
+            let creds = timed("startup: streaming credentials", engine::credentials)?;
+            let webapi =
+                timed("startup: web api token", WebApi::init).context("authorize web api")?;
             Ok((creds, webapi))
         },
-        init_terminal,
+        || timed("startup: terminal", init_terminal),
     )?;
 
     // Query the terminal for its graphics protocol before anything else is
@@ -127,7 +138,9 @@ fn main() -> Result<()> {
     // safe without concurrent readers. Hence the hand-built runtime below rather
     // than `#[tokio::main]`, which would already have spawned its workers by the
     // time this line ran.
-    let picker = Cover::make_picker(myx::config::get().protocol.as_deref());
+    let picker = timed("startup: terminal graphics query", || {
+        Cover::make_picker(myx::config::get().protocol.as_deref())
+    });
     // Halfblocks here means the graphics query got no answer — the art will look
     // like a 25×26 mosaic. MYX_PROTOCOL overrides it.
     liblog(format!(
@@ -342,6 +355,7 @@ async fn boot(
     // terminal restored.
     let mut signals = QuitSignals::install();
     let (ev_tx, ev_rx) = flume::unbounded::<EngineEvent>();
+    let connecting = Step::start("startup: connect to Spotify");
     let engine = with_loader(
         terminal,
         &mut signals,
@@ -350,6 +364,7 @@ async fn boot(
     )
     .await?
     .context("start engine")?;
+    drop(connecting);
     let equalizer = saved.equalizer.normalized();
     engine.set_equalizer(equalizer);
 
@@ -401,11 +416,13 @@ async fn boot(
     #[cfg(windows)]
     let hwnd = Some(unsafe { windows_win::sys::GetConsoleWindow() });
 
-    let media_controls = optional_integration(media_platform_ready, || {
-        MediaControls::new(PlatformConfig {
-            dbus_name: "myx",
-            display_name: "Myx",
-            hwnd,
+    let media_controls = timed("startup: media controls", || {
+        optional_integration(media_platform_ready, || {
+            MediaControls::new(PlatformConfig {
+                dbus_name: "myx",
+                display_name: "Myx",
+                hwnd,
+            })
         })
     });
     if media_platform_ready && media_controls.is_none() {
@@ -421,7 +438,7 @@ async fn boot(
         },
         media_controls,
         #[cfg(all(feature = "mxc", unix))]
-        mxc: bind_publisher(),
+        mxc: timed("startup: colour socket", bind_publisher),
         playback: PlaybackState {
             now,
             seek_target: None,
@@ -508,6 +525,9 @@ async fn run_ui(
     ev_rx: flume::Receiver<EngineEvent>,
     mut signals: QuitSignals,
 ) -> Result<MxcHandle> {
+    // Ends with the first frame on screen: the library fetch and media keys
+    // below start before it, and the first fetch may refresh the token.
+    let mut first_frame = Some(Step::start("startup: first frame"));
     let (in_tx, in_rx) = flume::unbounded::<Event>();
     let input_gate = Arc::new(InputGate::default());
     std::thread::spawn({
@@ -775,6 +795,7 @@ async fn run_ui(
                         let _ = execute!(io::stdout(), EndSynchronizedUpdate);
                     }
                     drawn?;
+                    drop(first_frame.take());
                     app.art_repaint = app.art_repaint.advance();
                     if restore_art && !overlay_open {
                         restore_art = false;

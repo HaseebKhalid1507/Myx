@@ -36,7 +36,23 @@ they are added to, never rewritten.
   the title or artist; arrows pick, `⏎` plays — the whole list from that
   track, as if unfiltered — and `Esc` clears it. Leaving the list drops it.
 
+- **Startup timing in the debug log** (#72). With `MYX_LOG` set, each step
+  between launch and the first frame — credentials, Web API token, terminal
+  query, connecting to Spotify, the first frame itself — is a `startup:` line
+  in `~/.cache/myx/myx.log` saying when it began and how long it took, so a
+  slow start names its step. A rate-limited request that waits before
+  retrying now says so too. The README has a Debug log section.
+
 ### Fixed
+
+- A network that silently drops Spotify's preferred access-point port (4070)
+  no longer holds startup on "connecting to Spotify" for minutes (possibly
+  #72).
+  librespot waits out the operating system on each unanswered access point —
+  about two minutes on Linux, twice per access point — before trying the
+  next. A login that hasn't finished after 20 seconds now starts over on the
+  port-443 access points, which such networks let through. Reconnects do the
+  same.
 
 - `/` inside an open playlist, album or artist page showed nothing: the
   prompt was drawn behind the page title, and the results behind the page.

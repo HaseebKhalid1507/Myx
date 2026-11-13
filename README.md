@@ -263,6 +263,18 @@ transparent = true
 #layout = "auto"
 ```
 
+## Debug log
+
+```bash
+MYX_LOG=debug myx
+```
+
+writes `~/.cache/myx/myx.log` (any value turns it on; `debug` adds librespot's
+connection details, `warn` keeps only problems). Each line starts with a Unix
+timestamp, and every step of startup is a `startup:` line with how long it took,
+so `grep startup: ~/.cache/myx/myx.log` shows where a slow start spends its
+time. It names your Spotify account; look it over before posting it.
+
 ## Credits
 
 Streaming adapts pieces of [spotify-player](https://github.com/aome510/spotify-player)
