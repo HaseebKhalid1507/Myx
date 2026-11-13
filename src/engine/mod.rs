@@ -12,6 +12,7 @@
 pub mod auth;
 mod playlist;
 
+use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -33,7 +34,7 @@ use librespot_playback::player::{self, Player};
 use crate::audio::equalizer::{shared_equalizer, EqualizerControl, EqualizerSink};
 use crate::audio::output::{output_available, SilentSink};
 use crate::audio::{EqualizerSettings, VisBands, VisualizationSink};
-use crate::liblog::Step;
+use crate::liblog::{liblog, Step};
 pub use playlist::{playlist_tracks, PlaylistTrack};
 
 /// A normalized playback event surfaced to the rest of the app.
@@ -485,9 +486,80 @@ pub async fn run(
     })
 }
 
-/// Bring up a session, a player and a Connect device, and bridge the player's
-/// events onto `events`. This is what a reconnect rebuilds.
+/// How long the first login may take before myx stops waiting on the access
+/// points Spotify listed first.
+///
+/// A login normally takes a second or two. One whose access point never
+/// answers takes minutes (the suspect in #72): librespot's 5-second limit on reaching an
+/// access point only covers the handshake, because its `connect` awaits the
+/// TCP connection before it builds the `timeout`. A dropped SYN waits out
+/// the OS instead — about two minutes on Linux — and librespot tries each
+/// access point twice before the next.
+const FIRST_LOGIN_DEADLINE: Duration = Duration::from_secs(20);
+
+/// The only port the second login tries. Spotify lists each access point on
+/// 4070, 443 and 80, in that order; 4070 is the one a firewall is likely to
+/// drop, and 443 the one it is likely to let through.
+const FALLBACK_AP_PORT: u16 = 443;
+
+/// Bring up a session, a player and a Connect device. This is what a
+/// reconnect rebuilds.
+///
+/// A login still waiting after [`FIRST_LOGIN_DEADLINE`] is dropped and tried
+/// again on [`FALLBACK_AP_PORT`] only. The second try has no deadline: it is
+/// what myx always did, minus the access points that didn't answer.
 async fn connect(
+    first_login: &Credentials,
+    mixer: &Arc<SoftMixer>,
+    bands: &Arc<Mutex<VisBands>>,
+    equalizer: &EqualizerControl,
+    events: &flume::Sender<EngineEvent>,
+) -> Result<Link> {
+    first_within(
+        FIRST_LOGIN_DEADLINE,
+        connect_via(None, first_login, mixer, bands, equalizer, events),
+        move || {
+            liblog(format!(
+                "engine: no login after {}s; trying access points on port {FALLBACK_AP_PORT} only",
+                FIRST_LOGIN_DEADLINE.as_secs()
+            ));
+            connect_via(
+                Some(FALLBACK_AP_PORT),
+                first_login,
+                mixer,
+                bands,
+                equalizer,
+                events,
+            )
+        },
+    )
+    .await
+}
+
+/// `first`, unless it is still running after `deadline`: then it is dropped,
+/// and only then is `fallback` started. A `first` that fails in time is not
+/// retried — a refusal is an answer; only silence earns the second try.
+///
+/// The order matters: a dropped login takes its player with it, and the
+/// player holds the audio device the next one opens.
+async fn first_within<T, F, R, G>(deadline: Duration, first: F, fallback: R) -> T
+where
+    F: Future<Output = T>,
+    R: FnOnce() -> G,
+    G: Future<Output = T>,
+{
+    let first = tokio::time::timeout(deadline, first).await;
+    match first {
+        Ok(done) => done,
+        Err(_) => fallback().await,
+    }
+}
+
+/// [`connect`] once: a session, a player and a Connect device, with the
+/// player's events bridged onto `events`. `ap_port` limits the access points
+/// to that port (librespot's `ap_port`); `None` takes Spotify's list as is.
+async fn connect_via(
+    ap_port: Option<u16>,
     first_login: &Credentials,
     mixer: &Arc<SoftMixer>,
     bands: &Arc<Mutex<VisBands>>,
@@ -499,7 +571,13 @@ async fn connect(
     // `first_login` may be the one-shot OAuth token from a first run, which
     // Spotify would refuse hours later.
     let creds = cache.credentials().unwrap_or_else(|| first_login.clone());
-    let session = Session::new(SessionConfig::default(), Some(cache));
+    let session = Session::new(
+        SessionConfig {
+            ap_port,
+            ..SessionConfig::default()
+        },
+        Some(cache),
+    );
 
     let backend = audio_backend::find(None).expect("an audio backend should be available");
     let cfg = crate::config::get();
@@ -580,7 +658,10 @@ async fn connect(
 
     // Client token, access point and login5, none of them under a deadline of
     // librespot's: where a slow start or reconnect is likeliest to wait (#72).
-    let login = Step::start("engine: log in to Spotify");
+    let login = Step::start(match ap_port {
+        None => "engine: log in to Spotify".to_string(),
+        Some(port) => format!("engine: log in to Spotify on port {port}"),
+    });
     let (spirc, spirc_task) = Spirc::new(
         connect_config,
         session.clone(),
@@ -652,6 +733,56 @@ fn spawn_watchdog(inner: &Arc<Inner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_login_in_time_is_kept() {
+        let got = first_within(Duration::from_secs(5), async { "first" }, || async {
+            "fallback"
+        })
+        .await;
+        assert_eq!(got, "first");
+    }
+
+    #[tokio::test]
+    async fn a_login_that_fails_in_time_is_not_retried() {
+        let got: Result<(), &str> = first_within(
+            Duration::from_secs(5),
+            async { Err("bad credentials") },
+            || async { Ok(()) },
+        )
+        .await;
+        assert_eq!(got, Err("bad credentials"));
+    }
+
+    /// Clears its flag when dropped: the player a login builds, which holds
+    /// the audio device until that login is gone.
+    struct Device(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for Device {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_silent_login_is_dropped_before_the_fallback_starts() {
+        let open = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let device = Device(Arc::clone(&open));
+        // An access point that never answers: librespot waiting on a SYN.
+        let silent = async move {
+            let _device = device;
+            std::future::pending::<&str>().await
+        };
+        let got = first_within(Duration::from_millis(20), silent, move || async move {
+            if open.load(std::sync::atomic::Ordering::SeqCst) {
+                "fallback, with the first login still holding the device"
+            } else {
+                "fallback"
+            }
+        })
+        .await;
+        assert_eq!(got, "fallback");
+    }
 
     #[test]
     fn a_failing_reconnect_backs_off_up_to_the_cap() {

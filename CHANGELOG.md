@@ -45,6 +45,15 @@ they are added to, never rewritten.
 
 ### Fixed
 
+- A network that silently drops Spotify's preferred access-point port (4070)
+  no longer holds startup on "connecting to Spotify" for minutes (possibly
+  #72).
+  librespot waits out the operating system on each unanswered access point —
+  about two minutes on Linux, twice per access point — before trying the
+  next. A login that hasn't finished after 20 seconds now starts over on the
+  port-443 access points, which such networks let through. Reconnects do the
+  same.
+
 - `/` inside an open playlist, album or artist page showed nothing: the
   prompt was drawn behind the page title, and the results behind the page.
   Both now show, and the results replace the page.
