@@ -6,8 +6,10 @@ they are added to, never rewritten.
 
 ## [Unreleased]
 
-### Added
 
+## [0.6.0] — 2026-11-13
+
+### Added
 - **Layouts for every size.** With room for both, the library sits beside the
   view as before; below that (80×14) myx shows one pane at a time and the
   library becomes one of the views `←` `→` step through, with `/` bringing it
@@ -30,21 +32,23 @@ they are added to, never rewritten.
   dropped in as `<name>.yaml` works as a theme or a base. A theme that can't be
   read falls back to the album's colours and says why in the status line; a
   bad colour or unknown key costs only that line.
-
 - **Find in the list on screen** (#42): `f`, in a playlist, an album, Liked
   Songs or search results. Typing narrows the list to rows with every word in
   the title or artist; arrows pick, `⏎` plays — the whole list from that
   track, as if unfiltered — and `Esc` clears it. Leaving the list drops it.
-
 - **Startup timing in the debug log** (#72). With `MYX_LOG` set, each step
   between launch and the first frame — credentials, Web API token, terminal
   query, connecting to Spotify, the first frame itself — is a `startup:` line
   in `~/.cache/myx/myx.log` saying when it began and how long it took, so a
   slow start names its step. A rate-limited request that waits before
   retrying now says so too. The README has a Debug log section.
+- **A first-run Client ID prompt** instead of an error. With no Spotify Client
+  ID configured, myx walks you through creating one (four steps, about a
+  minute) and saves what you paste to `config.toml`, rather than stopping with
+  "No Spotify client id found" and leaving you to write the file by hand. It
+  asks once, and checks the id before saving it (#50, #55).
 
 ### Fixed
-
 - A network that silently drops Spotify's preferred access-point port (4070)
   no longer holds startup on "connecting to Spotify" for minutes (possibly
   #72).
@@ -53,11 +57,9 @@ they are added to, never rewritten.
   next. A login that hasn't finished after 20 seconds now starts over on the
   port-443 access points, which such networks let through. Reconnects do the
   same.
-
 - `/` inside an open playlist, album or artist page showed nothing: the
   prompt was drawn behind the page title, and the results behind the page.
   Both now show, and the results replace the page.
-
 - macOS: launching myx no longer takes keyboard focus from the terminal. The
   media-key event loop activated its windowless app at launch, so keys went
   nowhere until you switched apps and back.
@@ -104,6 +106,31 @@ they are added to, never rewritten.
   `R` lights up, and every playlist, album, track and radio starts in that
   mode. A terminal that sends Shift+letter as a kitty escape code no longer
   turns `R` into `r` (reload).
+- Large and public playlists open again (#45). Spotify's February 2026 Web API
+  changes cut playlist pages to 50 items and stopped listing the tracks of
+  playlists you don't own or follow, so those showed `no tracks — empty or
+  restricted` even though they play. myx now pages 50 at a time up to 1,000
+  tracks, falls back to Spotify Connect's own resolver for public playlists the
+  Web API won't list, looks track names up a few at a time so a big playlist
+  doesn't hit the rate limit, and says it's loading while it does.
+- Long lyric lines wrap instead of being cut off with `…` (#37). A line splits
+  into rows of about the same width, at most three of them, and the line being
+  sung stays mid-pane. Double-width (CJK) lyrics are measured by display width.
+- Picking a track from an artist's Popular list plays from that track down the
+  list as shown, like Spotify does (#69). It used to start that song's radio,
+  or play Spotify's own artist list, which isn't the one on screen.
+- Sound no longer stops for good when Spotify drops the connection mid-song
+  (#46). myx reconnected, but the new player sat idle: the audio went silent
+  while the progress bar kept moving, and play, pause and next did nothing. A
+  dropped connection now costs a short gap: the same track resumes at the
+  same position.
+- A crash or power cut while myx saves its state can no longer leave a
+  half-written `state.json`. It's written to a temporary file and renamed
+  into place.
+
+Thanks to @odiumuniverse, @robler43, @AndersonVanzo, @Xclipsen and
+@rosscondie for their pull requests in this release, and to everyone who
+filed the issues they fixed.
 
 
 ## [0.5.0] — 2026-09-09
