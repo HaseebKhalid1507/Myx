@@ -24,7 +24,7 @@ impl RightView {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Section {
     Home,
     Recent,
@@ -140,6 +140,41 @@ impl LibItem {
     pub(crate) fn is_play(&self) -> bool {
         self.kind == ItemKind::Play
     }
+}
+
+/// Whether `item` matches an `f` find query: every word of the query appears,
+/// in any case and any order, somewhere in the row's title or subtitle (the
+/// artist, for a track). Headers and "▶ Play …" rows never match — a found
+/// list is just the rows you can pick.
+pub(crate) fn find_matches(item: &LibItem, query: &str) -> bool {
+    if item.is_header() || item.is_play() {
+        return false;
+    }
+    let hay = format!("{} {}", item.name, item.subtitle).to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|word| hay.contains(word))
+}
+
+/// The rows of `items` to draw, in order: every row, or with a find query only
+/// the matches. Indices into `items`, so the selection and what plays are
+/// those of the whole list — finding hides rows, it never changes the list.
+pub(crate) fn shown_rows(items: &[LibItem], query: Option<&str>) -> Vec<usize> {
+    match query {
+        None => (0..items.len()).collect(),
+        Some(q) => (0..items.len())
+            .filter(|&i| find_matches(&items[i], q))
+            .collect(),
+    }
+}
+
+/// Whether row `i` can take the cursor: it exists, isn't a header, and matches
+/// the find query if there is one.
+pub(crate) fn row_selectable(items: &[LibItem], i: usize, query: Option<&str>) -> bool {
+    items
+        .get(i)
+        .is_some_and(|item| !item.is_header() && query.is_none_or(|q| find_matches(item, q)))
 }
 
 /// Sort order for browsable lists.

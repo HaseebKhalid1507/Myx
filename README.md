@@ -66,7 +66,8 @@ browse with `↑↓` and hit `⏎` to play. After that, just `myx`.
 ⇥ / [ ]    switch section        ← →      switch view
 ↑↓ / j k   move                  ⏎        play / open
 ⇧ ⏎        play the highlighted album, playlist or artist
-/          search                a        actions
+/          search Spotify        a        actions
+f          find in this list
 space      play · pause          n / b    next · prev
 ⇧ ← →      seek                  s        shuffle
 + / -      volume                R        repeat
@@ -74,6 +75,12 @@ o          sort                  r        reload
 z          hide sidebar          e        equalizer
 q          quit                  T        transparent background
 ```
+
+`f` finds in whatever list is on screen — a playlist, an album, Liked Songs,
+search results. Type to narrow it (every word has to appear in the title or
+the artist), `↑`/`↓` to pick, `⏎` to play: the whole list plays from that
+track, exactly as it would without the find. `Esc` clears it, and the next
+`Esc` goes back as usual.
 
 Media keys (Play/Pause, Stop, Next, Prev, Volume) work when the terminal is
 focused. On macOS and Linux, AirPods and headphone controls work from anywhere

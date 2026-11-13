@@ -16,17 +16,11 @@ pub(crate) fn render_library(
         return;
     }
 
-    // Header line: drill-in title, search input/results, or section indicator.
-    let head: Line = if let Some(d) = app.browse.details.last() {
-        Line::from(vec![
-            Span::styled("‹ ", Style::default().fg(theme.primary.into())),
-            Span::styled(
-                truncate(&d.title, inner.width.saturating_sub(8) as usize),
-                theme.heading(),
-            ),
-            Span::styled("  Esc", theme.muted()),
-        ])
-    } else if app.search.input_mode {
+    // Header line, most immediate first: the `/` prompt (it used to sit behind
+    // an open page's title, so typing there showed nothing), an `f` find, then
+    // the page title, search results or section.
+    let find_query = app.find_query();
+    let head: Line = if app.search.input_mode {
         let (before, after) = split_at_cursor(app.search.query(), app.search.input.cursor().1);
         Line::from(vec![
             Span::styled("search: ", theme.heading()),
@@ -34,6 +28,40 @@ pub(crate) fn render_library(
                 format!("{before}▏{after}"),
                 Style::default().fg(theme.text.into()),
             ),
+        ])
+    } else if app.find.typing || find_query.is_some() {
+        let items = app.cur_items();
+        let total = items
+            .iter()
+            .filter(|i| !i.is_header() && !i.is_play())
+            .count();
+        let found = match find_query {
+            Some(q) => items.iter().filter(|i| find_matches(i, q)).count(),
+            None => total,
+        };
+        let query = if app.find.typing {
+            let (before, after) = split_at_cursor(app.find.query(), app.find.input.cursor().1);
+            format!("{before}▏{after}")
+        } else {
+            app.find.query().to_string()
+        };
+        let mut spans = vec![
+            Span::styled("find: ", theme.heading()),
+            Span::styled(query, Style::default().fg(theme.text.into())),
+            Span::styled(format!("  {found} of {total}"), theme.muted()),
+        ];
+        if !app.find.typing {
+            spans.push(Span::styled("  Esc", theme.muted()));
+        }
+        Line::from(spans)
+    } else if let Some(d) = app.browse.details.last() {
+        Line::from(vec![
+            Span::styled("‹ ", Style::default().fg(theme.primary.into())),
+            Span::styled(
+                truncate(&d.title, inner.width.saturating_sub(8) as usize),
+                theme.heading(),
+            ),
+            Span::styled("  Esc", theme.muted()),
         ])
     } else if app.search.searching {
         Line::from(vec![
@@ -82,17 +110,23 @@ pub(crate) fn render_library(
         return;
     }
     let cap = (inner.bottom() - list_top) as usize;
-    let total_items = app.cur_items().len();
+    // Indices into `cur_items`: every row, or just the ones a find matches.
+    let rows = app.shown_rows();
+    let total_items = rows.len();
 
     if total_items == 0 {
         out.hits.scroll = None;
         out.hits.lib = None;
-        let label = empty_list_label(
-            !app.browse.details.is_empty(),
-            app.search.searching,
-            app.search.in_flight,
-            app.browse.library.is_loaded(app.browse.section),
-        );
+        let label = if find_query.is_some() {
+            "no matches"
+        } else {
+            empty_list_label(
+                !app.browse.details.is_empty(),
+                app.search.searching,
+                app.search.in_flight,
+                app.browse.library.is_loaded(app.browse.section),
+            )
+        };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(label, theme.muted())))
                 .block(Block::default().style(theme.panel())),
@@ -106,9 +140,14 @@ pub(crate) fn render_library(
         return;
     }
 
+    // The viewport works in shown rows; the cursor is an index into all of them.
+    let cursor = rows
+        .iter()
+        .position(|&i| i == app.browse.selected)
+        .unwrap_or(0);
     let offset = scroll_offset(
         out.lib_offset,
-        app.browse.selected,
+        cursor,
         cap,
         total_items,
         myx::config::get().scrolloff,
@@ -125,8 +164,8 @@ pub(crate) fn render_library(
     let max = inner.width.saturating_sub(if overflow { 3 } else { 2 }) as usize;
 
     let items = app.cur_items();
-    for (row, item) in items.iter().skip(offset).take(cap).enumerate() {
-        let idx = offset + row;
+    for (row, &idx) in rows.iter().skip(offset).take(cap).enumerate() {
+        let item = &items[idx];
         let y = list_top + row as u16;
         let rect = Rect {
             x: inner.x,
