@@ -38,6 +38,9 @@ pub struct Config {
     /// file in `~/.config/myx/themes/` stays put. A string on purpose: a bad
     /// value is a warning at startup, not a reason to lose this whole file.
     pub theme: String,
+    /// "auto" fits the screen; "full" or "focus" keeps one arrangement
+    /// whatever the size. A string for the same reason as `theme`.
+    pub layout: String,
 }
 
 impl Default for Config {
@@ -51,6 +54,7 @@ impl Default for Config {
             normalize_volume: false,
             transparent: false,
             theme: "album".to_string(),
+            layout: "auto".to_string(),
         }
     }
 }
@@ -100,6 +104,11 @@ transparent = true
 # tokyonight, catppuccin, rosepine or gruvbox; \"wal\" for pywal's colours; or
 # the name of your own theme in ~/.config/myx/themes/ (see the README).
 #theme = \"album\"
+
+# Layout. \"auto\" fits the screen: the library beside the view when there's
+# room, one pane at a time (the library is one of the ←/→ views) when there
+# isn't. \"full\" or \"focus\" keeps one of them whatever the size.
+#layout = \"auto\"
 ";
 
 impl Config {

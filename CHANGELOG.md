@@ -8,6 +8,12 @@ they are added to, never rewritten.
 
 ### Added
 
+- **Layouts for every size.** With room for both, the library sits beside the
+  view as before; below that (80×14) myx shows one pane at a time and the
+  library becomes one of the views `←` `→` step through, with `/` bringing it
+  up to search in. Zoom in or shrink the window and it rearranges itself;
+  `layout = "full"` or `"focus"` in `config.toml` keeps one. Zen still means
+  no library anywhere.
 - **Transparent background**, `transparent` in `config.toml` and `T` to flip
   it. The screen and panel backgrounds are left to the terminal — its own
   colour, opacity and blur — instead of the album-tinted fill; the selected row

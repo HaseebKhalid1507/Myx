@@ -116,11 +116,18 @@ pub(crate) fn handle_key(
         }
     }
 
-    // Zen hides the library, so the keys that drive one do nothing rather than
-    // moving a selection nobody can see. Placed after the overlays above, which
-    // stay usable if one was already open when zen came on.
-    if app.view.zen && drives_library(code) {
-        return false;
+    // Keys that drive the library do nothing while it isn't on screen — under
+    // zen, or in the Focus layout on another view — rather than moving a
+    // selection nobody can see. Except `/` in Focus: search results go in the
+    // library, so it brings the Library view up to search in. Placed after the
+    // overlays above, which stay usable if one was already open.
+    if !app.library_visible() && drives_library(code) {
+        let search_brings_it_up =
+            code == KeyCode::Char('/') && app.rotation().contains(&RightView::Library);
+        if !search_brings_it_up {
+            return false;
+        }
+        app.view.mode = RightView::Library;
     }
 
     match code {
@@ -217,7 +224,7 @@ pub(crate) fn handle_key(
             // Zen hides the library, so the menu belongs to what is playing —
             // acting on a selection nobody can see is how it ends up offering
             // "remove from Liked" for the wrong track.
-            let item = if app.view.zen {
+            let item = if !app.library_visible() {
                 app.playback
                     .now
                     .as_ref()
@@ -253,19 +260,23 @@ pub(crate) fn handle_key(
             app.playback.seek_step(-SEEK_STEP_MS)
         }
         KeyCode::Right => {
-            app.view.mode = app.view.mode.shift(1);
+            app.view.mode = app.view.mode.shift_in(app.rotation(), 1);
             if app.view.mode == RightView::Queue && app.transport.playback_started {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         KeyCode::Left => {
-            app.view.mode = app.view.mode.shift(-1);
+            app.view.mode = app.view.mode.shift_in(app.rotation(), -1);
             if app.view.mode == RightView::Queue && app.transport.playback_started {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         // The frame loop notices the layout change and wipes the art box.
-        KeyCode::Char('z') => app.view.zen = !app.view.zen,
+        KeyCode::Char('z') => {
+            app.view.zen = !app.view.zen;
+            // In Focus, zen takes the Library view out of the rotation.
+            app.settle_view();
+        }
         // Shifted on purpose: a stray press repaints everything and rewrites
         // config.toml.
         KeyCode::Char('T') => {

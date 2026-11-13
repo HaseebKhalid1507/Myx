@@ -2,25 +2,41 @@
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum RightView {
+    /// The library as a view of its own: the Focus layout's stand-in for the
+    /// sidebar it has no room for.
+    Library,
     NowPlaying,
     Lyrics,
     Queue,
 }
 
 impl RightView {
-    pub(crate) const ALL: [RightView; 3] =
+    /// The views ←/→ rotate through when the library has its own panel, or
+    /// zen hides it.
+    pub(crate) const VIEWS: [RightView; 3] =
         [RightView::NowPlaying, RightView::Lyrics, RightView::Queue];
+    /// …and in the Focus layout, where the library is one of the views.
+    pub(crate) const WITH_LIBRARY: [RightView; 4] = [
+        RightView::Library,
+        RightView::NowPlaying,
+        RightView::Lyrics,
+        RightView::Queue,
+    ];
+
     pub(crate) fn label(self) -> &'static str {
         match self {
+            RightView::Library => "Library",
             RightView::NowPlaying => "Now Playing",
             RightView::Lyrics => "Lyrics",
             RightView::Queue => "Queue",
         }
     }
-    pub(crate) fn shift(self, delta: isize) -> RightView {
-        let i = RightView::ALL.iter().position(|&v| v == self).unwrap_or(0) as isize;
-        let n = RightView::ALL.len() as isize;
-        RightView::ALL[(i + delta).rem_euclid(n) as usize]
+
+    /// The view `delta` steps along `rotation`, wrapping round.
+    pub(crate) fn shift_in(self, rotation: &[RightView], delta: isize) -> RightView {
+        let i = rotation.iter().position(|&v| v == self).unwrap_or(0) as isize;
+        let n = rotation.len() as isize;
+        rotation[(i + delta).rem_euclid(n) as usize]
     }
 }
 

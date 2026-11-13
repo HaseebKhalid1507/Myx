@@ -52,7 +52,7 @@ pub(crate) fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) 
     ];
     let hints: Vec<_> = hints
         .into_iter()
-        .filter(|(needs_library, ..)| !needs_library || !app.view.zen)
+        .filter(|(needs_library, ..)| !needs_library || app.library_visible())
         .collect();
     let sizes: Vec<(u8, u16)> = hints
         .iter()

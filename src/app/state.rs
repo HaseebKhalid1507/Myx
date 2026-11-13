@@ -240,6 +240,63 @@ impl SearchState {
     }
 }
 
+/// How the screen is arranged, picked from its size every frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayoutMode {
+    /// The library sidebar beside the active view.
+    Full,
+    /// One pane at a time; the library is one of the ←/→ views.
+    Focus,
+}
+
+/// The least room the Full layout needs: below this the sidebar is a strip of
+/// cut-off titles and the view beside it too narrow to read.
+pub(crate) const FULL_MIN_COLS: u16 = 80;
+pub(crate) const FULL_MIN_ROWS: u16 = 14;
+/// How far below those Full holds on once it's up, so a size sitting right on
+/// the edge (a drag, a zoom step) doesn't flip the layout back and forth —
+/// each flip is a full redraw and a cover re-sent.
+const LAYOUT_HYSTERESIS: u16 = 2;
+
+/// The layout for a `cols`×`rows` terminal: `forced` when the config picks one,
+/// else Full when it fits, else Focus.
+pub(crate) fn choose_layout(
+    cols: u16,
+    rows: u16,
+    current: LayoutMode,
+    forced: Option<LayoutMode>,
+) -> LayoutMode {
+    if let Some(layout) = forced {
+        return layout;
+    }
+    let slack = if current == LayoutMode::Full {
+        LAYOUT_HYSTERESIS
+    } else {
+        0
+    };
+    if cols + slack >= FULL_MIN_COLS && rows + slack >= FULL_MIN_ROWS {
+        LayoutMode::Full
+    } else {
+        LayoutMode::Focus
+    }
+}
+
+/// `layout = "…"` from the config: a layout to keep whatever the size, or
+/// `None` for "auto" (and anything unrecognised, which is logged).
+pub(crate) fn forced_layout(setting: &str) -> Option<LayoutMode> {
+    match setting.trim().to_ascii_lowercase().as_str() {
+        "full" => Some(LayoutMode::Full),
+        "focus" => Some(LayoutMode::Focus),
+        "" | "auto" => None,
+        other => {
+            liblog(format!(
+                "config: layout = {other:?} isn't auto, full or focus; using auto"
+            ));
+            None
+        }
+    }
+}
+
 /// What the user is looking at: the right pane's mode, the zen (sidebar
 /// hidden) toggle, the lyrics backing the Lyrics view, and the actions
 /// overlay drawn on top of everything.
@@ -247,7 +304,11 @@ pub(crate) struct ViewState {
     // Which view fills the right pane.
     pub(crate) mode: RightView,
     // Sidebar hidden, so the right view (and its cover) gets the whole width.
+    // In the Focus layout it takes the library out of the ←/→ views instead:
+    // zen means no library anywhere, whatever the layout.
     pub(crate) zen: bool,
+    // The arrangement the screen's size picked (see `choose_layout`).
+    pub(crate) layout: LayoutMode,
     // Lyrics: (timestamp_ms, line). Synced when timestamps are non-zero.
     pub(crate) lyrics: Vec<(u32, String)>,
     pub(crate) lyrics_synced: bool,

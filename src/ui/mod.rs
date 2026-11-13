@@ -40,20 +40,32 @@ pub(crate) fn render(f: &mut Frame, app: &App, out: &mut FrameOut, repaint: ArtR
         out.hits.tabs.clear();
     }
 
-    let right = if app.view.zen || rows.body.height == 0 {
-        // Hidden, not zero-width: a rendered sidebar still claims mouse rects.
-        out.hits.lib = None;
-        out.hits.scroll = None;
-        rows.body
-    } else {
+    // The library's sidebar: Full only, and not under zen.
+    let sidebar = app.view.layout == LayoutMode::Full && !app.view.zen && rows.body.height > 0;
+    // Hidden, not zero-width: a rendered sidebar still claims mouse rects.
+    out.hits.lib = None;
+    out.hits.scroll = None;
+    let right = if sidebar {
         let body = Layout::horizontal([Constraint::Percentage(30), Constraint::Min(24)])
             .spacing(3)
             .split(rows.body);
         render_library(f, app, out, theme, body[0]);
         body[1]
+    } else {
+        rows.body
     };
     out.title_shown = match app.view.mode {
-        RightView::NowPlaying => render_nowplaying_view(f, app, out, theme, right, repaint),
+        // The library as the one pane (Focus). `settle_view` keeps this view
+        // out of Full, where the sidebar has the library.
+        RightView::Library if !sidebar => {
+            if rows.body.height > 0 {
+                render_library(f, app, out, theme, right);
+            }
+            false
+        }
+        RightView::Library | RightView::NowPlaying => {
+            render_nowplaying_view(f, app, out, theme, right, repaint)
+        }
         RightView::Lyrics => render_lyrics(f, app, theme, right),
         RightView::Queue => render_queue_view(f, app, theme, right),
     };
@@ -184,7 +196,7 @@ pub(crate) fn header_fit(width: u16, full: u16, arrows: u16, label: u16) -> (Tab
 }
 
 fn render_header(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, area: Rect) {
-    let views = RightView::ALL;
+    let views = app.rotation();
     let label = app.view.mode.label();
     let full: u16 = 3
         + views.iter().map(|v| v.label().width() as u16).sum::<u16>()
@@ -239,7 +251,10 @@ fn render_header(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, are
             (spans, hits)
         }
         TabsForm::Arrows => {
-            let (prev, next) = (app.view.mode.shift(-1), app.view.mode.shift(1));
+            let (prev, next) = (
+                app.view.mode.shift_in(views, -1),
+                app.view.mode.shift_in(views, 1),
+            );
             let w = label.width() as u16;
             (
                 vec![
