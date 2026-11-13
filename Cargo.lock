@@ -2815,6 +2815,7 @@ dependencies = [
  "ratatui-image",
  "reqwest 0.13.4",
  "rustfft",
+ "rustix 1.1.4",
  "rustls",
  "serde",
  "serde_json",

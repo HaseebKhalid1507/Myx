@@ -261,7 +261,7 @@ fn render_now_playing(f: &mut Frame, app: &mut App, theme: Theme, area: Rect) {
 
     // Album art (or a placeholder box if the image failed to load).
     match app.cover.as_mut() {
-        Some(cover) => cover.render(f, art_rect),
+        Some(cover) => cover.render(f, art_rect, cover.startup_cell()),
         None => f.render_widget(
             Paragraph::new("[ no art ]")
                 .style(theme.muted())

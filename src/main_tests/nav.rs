@@ -252,3 +252,26 @@ fn a_fade_is_long_enough_to_be_smooth_at_the_animation_rate() {
     let steps = FADE_MS / ANIM_FRAME.as_millis() as u64;
     assert!(steps >= 30, "only {steps} steps of recolour");
 }
+
+// ------------------------------------------------------------------ wipe_area
+
+#[test]
+fn wiping_the_art_keeps_the_background_painted_under_it() {
+    // A plain reset would fall back to the terminal's default background — a
+    // see-through hole where the cover was on a translucent terminal.
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+    let mut term = Terminal::new(TestBackend::new(10, 4)).expect("test terminal");
+    term.draw(|f| {
+        f.render_widget(
+            Block::default().style(Style::default().bg(Color::Rgb(30, 20, 40))),
+            f.area(),
+        );
+        f.buffer_mut()[(3, 1)].set_symbol("x");
+        wipe_area(f, Rect::new(2, 1, 4, 2));
+    })
+    .expect("draw");
+    let buf = term.backend().buffer();
+    assert_eq!(buf[(3, 1)].symbol(), " ", "wiped");
+    assert_eq!(buf[(3, 1)].bg, Color::Rgb(30, 20, 40), "background kept");
+}
