@@ -31,6 +31,7 @@ use librespot_playback::mixer::{Mixer, MixerConfig};
 use librespot_playback::player::{self, Player};
 
 use crate::audio::equalizer::{shared_equalizer, EqualizerControl, EqualizerSink};
+use crate::audio::output::{output_available, SilentSink};
 use crate::audio::{EqualizerSettings, VisBands, VisualizationSink};
 pub use playlist::{playlist_tracks, PlaylistTrack};
 
@@ -56,6 +57,9 @@ pub enum EngineEvent {
     /// Playback control works again. Whatever was playing is not resumed — the
     /// new Connect device starts idle.
     Reconnected,
+    /// No audio output device: playing silently instead of crashing. See
+    /// [`crate::audio::output`].
+    NoAudioOutput,
     EndOfTrack {
         uri: String,
     },
@@ -511,12 +515,21 @@ async fn connect(
     let player = {
         let bands = Arc::clone(bands);
         let equalizer = Arc::clone(equalizer);
+        let events = events.clone();
         Player::new(
             player_config,
             session.clone(),
             mixer.get_soft_volume(),
             move || -> Box<dyn Sink> {
-                let real = backend(None, AudioFormat::default());
+                // rodio's sink unwraps the device on this player thread; with
+                // none (startup checked, but it can go — a reconnect rebuilds
+                // this sink) stand in silently and say why, instead of panicking.
+                let real: Box<dyn Sink> = if output_available() {
+                    backend(None, AudioFormat::default())
+                } else {
+                    let _ = events.send(EngineEvent::NoAudioOutput);
+                    Box::new(SilentSink)
+                };
                 let visualizer =
                     Box::new(VisualizationSink::new(real, Arc::clone(&bands), 44_100.0));
                 Box::new(EqualizerSink::new(visualizer, Arc::clone(&equalizer)))
