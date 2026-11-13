@@ -6,6 +6,7 @@ pub(crate) fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) 
     let on = |b: bool| if b { theme.success } else { theme.text_muted };
     let key = |k: &'static str| Span::styled(k, Style::default().fg(theme.primary.into()));
     let lbl = |t: &'static str| Span::styled(t, theme.muted());
+    let repeat = app.svc.engine.repeat_mode();
     let enter_lbl = enter_label(app.selected_item());
     let play_lbl = if app.playback.now.as_ref().is_some_and(|n| n.is_playing) {
         " pause   "
@@ -39,6 +40,17 @@ pub(crate) fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) 
             12,
             Span::styled("s", Style::default().fg(on(app.transport.shuffle).into())),
             lbl(" shuffle   "),
+        ),
+        // Ranked with shuffle, the other mode it lights up for.
+        (
+            false,
+            12,
+            Span::styled("R", Style::default().fg(on(repeat != Repeat::Off).into())),
+            lbl(if repeat == Repeat::One {
+                " repeat one   "
+            } else {
+                " repeat   "
+            }),
         ),
         (false, 9, key("a"), lbl(" actions   ")),
         (false, 16, key("e"), lbl(" eq   ")),

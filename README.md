@@ -86,7 +86,7 @@ myx is running, it keeps going silently and says so in the status line.
 f          find in this list
 space      play · pause          n / b    next · prev
 ⇧ ← →      seek                  s        shuffle
-+ / -      volume                R        repeat
++ / -      volume                R        repeat: off · all · one
 o          sort                  r        reload
 z          hide sidebar          e        equalizer
 q          quit                  T        transparent background
@@ -179,7 +179,7 @@ What each colour paints:
 | `primary` | headings, key hints, the current lyric line, the selected equalizer band, and the start of the logo and progress bar gradients |
 | `accent` | highlighted rows, and the far end of the logo, progress bar and visualizer gradients |
 | `info` | the low end of the visualizer (`primary` is its middle) |
-| `success` | the footer's `s` and `z` hints while shuffle and zen are on, the equalizer's on switch and its bands |
+| `success` | the footer's `s`, `R` and `z` hints while shuffle, repeat and zen are on, the equalizer's on switch and its bands |
 | `text` · `text_muted` | normal and de-emphasised text |
 | `background` · `background_panel` · `background_element` | the screen, the panes on it, and the selected row and popups |
 | `border_active` · `border_subtle` | the bar beside the focused and the unfocused pane; `border_subtle` also dims lyrics already sung |

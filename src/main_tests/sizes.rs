@@ -47,7 +47,6 @@ pub(crate) fn test_app() -> App {
         },
         transport: Transport {
             shuffle: false,
-            repeat: false,
             volume: 80,
             queue: Vec::new(),
             queue_uris: Vec::new(),
@@ -320,26 +319,33 @@ fn the_footer_never_shows_a_hint_cut_short() {
         "o sort",
         "+/- vol",
         "s shuffle",
+        "R repeat",
+        "R repeat one",
         "a actions",
         "e eq",
         "z zen",
         "q quit",
     ];
-    for w in 10..=200u16 {
-        draw(&mut term, &app, w, 30);
-        let text = screen_text(&term);
-        // The last row with anything on it (an outer margin row may follow).
-        let footer = text
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .expect("a footer row")
-            .trim();
-        for piece in footer.split("   ").map(str::trim).filter(|p| !p.is_empty()) {
-            assert!(
-                whole.contains(&piece),
-                "cut hint {piece:?} at width {w}: {footer:?}"
-            );
+    // The repeat hint's label is longer under repeat one. Detached, the engine
+    // can't pass the mode on, but it keeps it.
+    for repeat in [Repeat::Off, Repeat::One] {
+        let _ = app.svc.engine.set_repeat(repeat);
+        for w in 10..=200u16 {
+            draw(&mut term, &app, w, 30);
+            let text = screen_text(&term);
+            // The last row with anything on it (an outer margin row may follow).
+            let footer = text
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .expect("a footer row")
+                .trim();
+            for piece in footer.split("   ").map(str::trim).filter(|p| !p.is_empty()) {
+                assert!(
+                    whole.contains(&piece),
+                    "cut hint {piece:?} at width {w}, {repeat:?}: {footer:?}"
+                );
+            }
         }
     }
 }
@@ -423,7 +429,7 @@ fn leaving_focus_or_turning_zen_on_takes_you_off_the_library_view() {
 
 // ------------------------------------------------------------- keys in Focus
 
-fn chans() -> UiChannels {
+pub(crate) fn chans() -> UiChannels {
     UiChannels {
         meta: flume::unbounded().0,
         lib: flume::unbounded().0,

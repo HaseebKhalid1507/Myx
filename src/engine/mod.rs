@@ -69,6 +69,61 @@ pub enum EngineEvent {
     },
 }
 
+/// Spotify's repeat modes, in the order its repeat button steps through them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Repeat {
+    #[default]
+    Off,
+    /// The playlist, album or list starts over when it runs out.
+    All,
+    /// The current track plays again until it is skipped.
+    One,
+}
+
+impl Repeat {
+    /// The mode after this one: off → all → one → off, like Spotify's button.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::All,
+            Self::All => Self::One,
+            Self::One => Self::Off,
+        }
+    }
+
+    /// librespot's `(repeat context, repeat track)` flags. `One` sets both, so
+    /// a skip — which clears the track flag — leaves the list repeating rather
+    /// than turning repeat off.
+    pub fn flags(self) -> (bool, bool) {
+        (self != Self::Off, self == Self::One)
+    }
+
+    /// The mode for a pair of [`Self::flags`].
+    pub fn from_flags(context: bool, track: bool) -> Self {
+        match (context, track) {
+            (_, true) => Self::One,
+            (true, false) => Self::All,
+            (false, false) => Self::Off,
+        }
+    }
+
+    /// What a skip leaves behind. librespot stops repeating the track on any
+    /// skip (`ConnectState::next_track`) and keeps repeating the list.
+    pub fn after_skip(self) -> Self {
+        match self {
+            Self::One => Self::All,
+            other => other,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::All => "all",
+            Self::One => "one",
+        }
+    }
+}
+
 /// Everything that dies with the access-point connection.
 ///
 /// librespot invalidates the session when its keep-alive ping goes unanswered
@@ -87,6 +142,10 @@ pub struct Engine {
     pub bands: Arc<Mutex<VisBands>>,
     /// `None` only for [`Engine::detached`]: no connection, every command a no-op.
     inner: Option<Arc<Inner>>,
+    /// The repeat mode, which every load carries. librespot clears repeat on
+    /// each load (`handle_load` calls `reset_options`), so setting it once
+    /// lasts only until the next playlist, album or track is started.
+    repeat: Mutex<Repeat>,
 }
 
 /// The half of the engine the reconnect watchdog needs to hold, so it can swap
@@ -145,6 +204,7 @@ impl Engine {
         Self {
             bands: Arc::new(Mutex::new(VisBands::new())),
             inner: None,
+            repeat: Mutex::new(Repeat::Off),
         }
     }
 
@@ -206,7 +266,7 @@ impl Engine {
     pub fn play_context(&self, context_uri: impl Into<String>, shuffle: bool) -> Result<()> {
         let options = LoadRequestOptions {
             start_playing: true,
-            context_options: context_options(shuffle),
+            context_options: context_options(shuffle, self.repeat_mode()),
             ..Default::default()
         };
         self.active_command("load context", |spirc| {
@@ -225,7 +285,7 @@ impl Engine {
         let options = LoadRequestOptions {
             start_playing: true,
             seek_to: position_ms,
-            context_options: context_options(shuffle),
+            context_options: context_options(shuffle, self.repeat_mode()),
             playing_track: track_uri.map(PlayingTrack::Uri),
         };
         self.active_command("load context at", |spirc| {
@@ -245,7 +305,7 @@ impl Engine {
     ) -> Result<()> {
         let options = LoadRequestOptions {
             start_playing: true,
-            context_options: context_options(shuffle),
+            context_options: context_options(shuffle, self.repeat_mode()),
             playing_track: start_uri.map(PlayingTrack::Uri),
             seek_to: start_position_ms,
         };
@@ -260,6 +320,7 @@ impl Engine {
         let options = LoadRequestOptions {
             start_playing: true,
             seek_to: position_ms,
+            context_options: context_options(false, self.repeat_mode()),
             ..Default::default()
         };
         self.active_command("resume track", |spirc| {
@@ -282,7 +343,12 @@ impl Engine {
         self.active_command("toggle", Spirc::play_pause)
     }
     pub fn next(&self) -> Result<()> {
-        self.active_command("next", Spirc::next)
+        self.active_command("next", Spirc::next)?;
+        // librespot has just dropped repeat-one; follow it, or the next load
+        // would turn it back on.
+        let mut repeat = self.repeat.lock().unwrap_or_else(PoisonError::into_inner);
+        *repeat = repeat.after_skip();
+        Ok(())
     }
     pub fn prev(&self) -> Result<()> {
         self.active_command("prev", Spirc::prev)
@@ -290,8 +356,18 @@ impl Engine {
     pub fn shuffle(&self, on: bool) -> Result<()> {
         self.active_command("shuffle", |spirc| spirc.shuffle(on))
     }
-    pub fn repeat(&self, on: bool) -> Result<()> {
-        self.active_command("repeat", |spirc| spirc.repeat(on))
+    /// The repeat mode now, and the one the next load starts with.
+    pub fn repeat_mode(&self) -> Repeat {
+        *self.repeat.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+    /// Switch repeat for what's playing and for everything loaded after it. The
+    /// mode is kept even when the player can't be reached, so the next load
+    /// still honours it.
+    pub fn set_repeat(&self, mode: Repeat) -> Result<()> {
+        *self.repeat.lock().unwrap_or_else(PoisonError::into_inner) = mode;
+        let (context, track) = mode.flags();
+        self.active_command("repeat", |spirc| spirc.repeat(context))?;
+        self.command("repeat track", |spirc| spirc.repeat_track(track))
     }
     /// Set volume in librespot's 0..=65535 range.
     pub fn set_volume(&self, vol: u16) -> Result<()> {
@@ -334,14 +410,16 @@ impl Engine {
     }
 }
 
-/// Server-side shuffle options, or `None` to leave the context's own order.
-fn context_options(shuffle: bool) -> Option<LoadContextOptions> {
-    shuffle.then(|| {
-        LoadContextOptions::Options(CtxOptions {
-            shuffle: true,
-            ..Default::default()
-        })
-    })
+/// How a load starts: shuffled server-side or in the context's own order, and
+/// repeating or not. Always set — a load without them is a load with repeat
+/// off, since librespot resets both before applying these.
+fn context_options(shuffle: bool, repeat: Repeat) -> Option<LoadContextOptions> {
+    let (repeat, repeat_track) = repeat.flags();
+    Some(LoadContextOptions::Options(CtxOptions {
+        shuffle,
+        repeat,
+        repeat_track,
+    }))
 }
 
 /// Fetch a track-seeded radio station via librespot's internal mercury protocol
@@ -458,6 +536,7 @@ pub async fn run(
     creds: Credentials,
     tx: flume::Sender<EngineEvent>,
     initial_volume_pct: u8,
+    initial_repeat: Repeat,
 ) -> Result<Engine> {
     let bands = VisBands::shared();
     let equalizer = shared_equalizer();
@@ -481,6 +560,7 @@ pub async fn run(
     Ok(Engine {
         bands,
         inner: Some(inner),
+        repeat: Mutex::new(initial_repeat),
     })
 }
 
@@ -659,5 +739,54 @@ mod tests {
         // An offline night must settle at the cap rather than grow without
         // bound — the watchdog has to still be trying when the network returns.
         assert_eq!(wait, RETRY_MAX);
+    }
+
+    #[test]
+    fn repeat_steps_off_all_one_like_spotify() {
+        assert_eq!(Repeat::default(), Repeat::Off);
+        assert_eq!(Repeat::Off.next(), Repeat::All);
+        assert_eq!(Repeat::All.next(), Repeat::One);
+        assert_eq!(Repeat::One.next(), Repeat::Off);
+    }
+
+    #[test]
+    fn repeat_one_loops_the_track_and_the_list_behind_it() {
+        assert_eq!(Repeat::Off.flags(), (false, false));
+        assert_eq!(Repeat::All.flags(), (true, false));
+        assert_eq!(Repeat::One.flags(), (true, true));
+        for mode in [Repeat::Off, Repeat::All, Repeat::One] {
+            let (context, track) = mode.flags();
+            assert_eq!(Repeat::from_flags(context, track), mode);
+        }
+    }
+
+    #[test]
+    fn a_skip_ends_repeat_one_but_keeps_the_list_repeating() {
+        assert_eq!(Repeat::One.after_skip(), Repeat::All);
+        assert_eq!(Repeat::All.after_skip(), Repeat::All);
+        assert_eq!(Repeat::Off.after_skip(), Repeat::Off);
+    }
+
+    /// librespot turns repeat off on every load and back on only from these
+    /// options, so a load that leaves them out is a load with repeat off.
+    #[test]
+    fn every_load_carries_the_repeat_mode() {
+        for shuffle in [false, true] {
+            for mode in [Repeat::Off, Repeat::All, Repeat::One] {
+                let Some(LoadContextOptions::Options(o)) = context_options(shuffle, mode) else {
+                    panic!("no options for shuffle={shuffle} {mode:?}");
+                };
+                assert_eq!(o.shuffle, shuffle);
+                assert_eq!((o.repeat, o.repeat_track), mode.flags());
+            }
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn the_repeat_mode_is_kept_when_the_player_is_unreachable() {
+        let engine = Engine::detached();
+        assert!(engine.set_repeat(Repeat::One).is_err());
+        assert_eq!(engine.repeat_mode(), Repeat::One);
     }
 }

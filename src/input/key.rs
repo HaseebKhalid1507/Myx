@@ -200,9 +200,17 @@ pub(crate) fn handle_key(
             let _ = app.svc.engine.shuffle(true);
             play_selected_context(app, true);
         }
+        // Off → all → one, Spotify's order, said on the status line.
         KeyCode::Char('R') => {
-            app.transport.repeat = !app.transport.repeat;
-            let _ = app.svc.engine.repeat(app.transport.repeat);
+            let mode = app.svc.engine.repeat_mode().next();
+            app.status = match app.svc.engine.set_repeat(mode) {
+                Ok(()) => repeat_status(mode).to_string(),
+                // Kept all the same: the next playlist or track starts with it.
+                Err(e) => format!(
+                    "repeat {}, but the player didn't get it: {e:#}",
+                    mode.label()
+                ),
+            };
         }
         KeyCode::Char('r') => {
             app.status = "loading library…".to_string();
@@ -331,6 +339,41 @@ pub(crate) fn handle_key(
     false
 }
 
+/// The key a press means: the letter it types, whatever the terminal's encoding.
+///
+/// Shift+R normally arrives as the text `R`. A terminal that sends it as a
+/// kitty `CSI u` escape instead reaches crossterm as the bare letter plus
+/// SHIFT — `r`, which reloads the library rather than switching repeat — and
+/// one that reports Caps Lock there sends `r` with the lock state. On Unix a
+/// lowercase letter with SHIFT can only come from such an escape (crossterm
+/// adds SHIFT to plain text only for capitals), so the case is worked out the
+/// way the keyboard would: Shift or Caps Lock, not both. Ctrl and Alt
+/// combinations keep their letter. Windows already reports the letter typed.
+pub(crate) fn typed_key(key: crossterm::event::KeyEvent) -> KeyCode {
+    use crossterm::event::KeyEventState;
+    match key.code {
+        KeyCode::Char(c)
+            if !cfg!(windows)
+                && c.is_ascii_lowercase()
+                && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+                && key.modifiers.contains(KeyModifiers::SHIFT)
+                    != key.state.contains(KeyEventState::CAPS_LOCK) =>
+        {
+            KeyCode::Char(c.to_ascii_uppercase())
+        }
+        code => code,
+    }
+}
+
+/// What `R` says it switched to.
+pub(crate) fn repeat_status(mode: Repeat) -> &'static str {
+    match mode {
+        Repeat::Off => "repeat off",
+        Repeat::All => "repeat all — the list starts over when it ends",
+        Repeat::One => "repeat one — this track plays again until you skip",
+    }
+}
+
 /// Keys whose whole effect is on the library pane.
 ///
 /// Zen hides that pane, so these do nothing there rather than moving a selection
@@ -347,4 +390,70 @@ pub(crate) fn drives_library(code: KeyCode) -> bool {
             | KeyCode::Esc
             | KeyCode::Char('/' | 'f' | '[' | ']' | 'j' | 'k' | 'o' | 'r' | 'P' | 'S')
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+
+    fn key(c: char, mods: KeyModifiers, state: KeyEventState) -> KeyEvent {
+        KeyEvent::new_with_kind_and_state(KeyCode::Char(c), mods, KeyEventKind::Press, state)
+    }
+
+    /// What legacy terminals, kitty-protocol ones following the spec, and
+    /// Windows send for Shift+R and Caps Lock + r: the capital itself.
+    #[test]
+    fn a_capital_stays_a_capital() {
+        let none = KeyEventState::NONE;
+        assert_eq!(
+            typed_key(key('R', KeyModifiers::SHIFT, none)),
+            KeyCode::Char('R')
+        );
+        assert_eq!(
+            typed_key(key('R', KeyModifiers::NONE, none)),
+            KeyCode::Char('R')
+        );
+        assert_eq!(
+            typed_key(key('r', KeyModifiers::NONE, none)),
+            KeyCode::Char('r')
+        );
+    }
+
+    #[test]
+    fn ctrl_and_alt_keep_their_letter() {
+        let none = KeyEventState::NONE;
+        for mods in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ] {
+            assert_eq!(
+                typed_key(key('c', mods, none)),
+                KeyCode::Char('c'),
+                "{mods:?}"
+            );
+        }
+    }
+
+    /// `CSI 114;2u`, `CSI 114;65u` and `CSI 114;66u` as crossterm parses them.
+    #[cfg(not(windows))]
+    #[test]
+    fn an_escaped_shift_or_caps_lock_letter_is_the_capital() {
+        let caps = KeyEventState::CAPS_LOCK;
+        let none = KeyEventState::NONE;
+        assert_eq!(
+            typed_key(key('r', KeyModifiers::SHIFT, none)),
+            KeyCode::Char('R')
+        );
+        assert_eq!(
+            typed_key(key('r', KeyModifiers::NONE, caps)),
+            KeyCode::Char('R')
+        );
+        // Both cancel out, as they do when typing.
+        assert_eq!(
+            typed_key(key('r', KeyModifiers::SHIFT, caps)),
+            KeyCode::Char('r')
+        );
+    }
 }
