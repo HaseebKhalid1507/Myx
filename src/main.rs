@@ -415,11 +415,7 @@ async fn boot(
             seek_last_step: Instant::now(),
             seek_last_input: Instant::now(),
         },
-        theme: ThemeState {
-            displayed: startup_theme(),
-            target: startup_theme(),
-            fade: None,
-        },
+        theme: ThemeState::at_startup(),
         status: "loading library…".to_string(),
         browse: BrowseState {
             library: Library::default(),
@@ -610,6 +606,9 @@ async fn run_ui(
                         app.normalize_selection();
                     }
                     app.status = format!("loaded {}", section.label());
+                    if let Some(notice) = app.theme.notice.take() {
+                        app.status = notice;
+                    }
                 }
                 while let Ok(got_any) = libdone_rx.try_recv() {
                     dirty = true;

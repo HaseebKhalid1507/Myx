@@ -95,6 +95,72 @@ New installs start transparent. A config written by an older myx has no
 How see-through it gets is up to the terminal — WezTerm's
 `window_background_opacity`, kitty's `background_opacity`, and so on.
 
+## Themes
+
+By default myx takes its colours from the album art and fades to each new
+cover. To keep one palette instead, set `theme` in `~/.config/myx/config.toml`:
+
+```toml
+theme = "catppuccin"   # album (default), tokyonight, catppuccin, rosepine, gruvbox,
+                       # wal, or the name of your own theme (below)
+```
+
+With `transparent = true` as well, the background is your terminal's and the
+colours never change, so myx sits with the rest of your setup. Restart myx after
+changing the theme. If a theme can't be read, myx says why in the status line
+and uses the album's colours.
+
+### Your own theme
+
+Put `<name>.toml` in `~/.config/myx/themes/` and set `theme = "<name>"`. Start
+from a palette and change only what you want:
+
+```toml
+# ~/.config/myx/themes/mine.toml
+base = "catppuccin"     # optional: a built-in, "wal", or a base16 scheme name
+primary = "#cba6f7"
+accent = "#f5c2e7"
+background = "#11111b"
+```
+
+Or give a few colours and let myx build the rest, the same way it builds a
+theme from album art (any colour you set as well still wins):
+
+```toml
+seed = ["#7aa2f7", "#bb9af7", "#e0af68"]
+```
+
+Colours are `#rrggbb` or `#rgb`. A colour that doesn't parse, or a name myx
+doesn't know, is skipped and reported; the rest of the theme still applies.
+What each colour paints:
+
+| Name | Where you see it |
+|------|------------------|
+| `primary` | headings, key hints, the current lyric line, the selected equalizer band, and the start of the logo and progress bar gradients |
+| `accent` | highlighted rows, and the far end of the logo, progress bar and visualizer gradients |
+| `info` | the low end of the visualizer (`primary` is its middle) |
+| `success` | the footer's `s` and `z` hints while shuffle and zen are on, the equalizer's on switch and its bands |
+| `text` · `text_muted` | normal and de-emphasised text |
+| `background` · `background_panel` · `background_element` | the screen, the panes on it, and the selected row and popups |
+| `border_active` · `border_subtle` | the bar beside the focused and the unfocused pane; `border_subtle` also dims lyrics already sung |
+| `border_dimmest` | separators, empty progress and scrollbar tracks |
+| `secondary` · `error` · `warning` · `border` | accepted, but nothing in myx draws with them yet |
+
+### pywal
+
+`theme = "wal"` uses the colours from your last `wal` run
+(`~/.cache/wal/colors.json`): wal's own background and text exactly, the
+shades between them blended from those two, and the accent colours picked from
+wal's palette. Run `wal` again and restart myx to pick up a new wallpaper's
+colours. myx is designed for dark backgrounds, so light wal schemes (`wal -l`)
+won't look right.
+
+### base16
+
+Drop a base16 scheme into `~/.config/myx/themes/` as `<name>.yaml` (either the
+classic layout or tinted-theming's `palette:` one) and set `theme = "<name>"`.
+It can also be the `base` of your own theme file.
+
 ## Equalizer
 
 Press `e` for the live ten-band equalizer. Choose Flat, Bass Boost, Rock, Jazz,
@@ -145,6 +211,11 @@ normalize_volume = false
 # instead of the album-tinted one. Text and accents still follow the cover.
 # Press T in myx to flip it; this line is rewritten when you do.
 transparent = true
+
+# Colours. "album" follows each cover. To keep one palette instead, use
+# tokyonight, catppuccin, rosepine or gruvbox; "wal" for pywal's colours; or
+# the name of your own theme in ~/.config/myx/themes/ (see Themes above).
+#theme = "album"
 ```
 
 ## Credits
