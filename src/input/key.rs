@@ -223,7 +223,14 @@ pub(crate) fn handle_key(
         KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) => play_selected_context(app, false),
         KeyCode::Enter => match app.activate() {
             Activated::Open(uri, name) => {
-                spawn_detail_fetch(app.svc.webapi.clone(), uri, name, chans.detail.clone());
+                app.status = format!("loading {name}…");
+                spawn_detail_fetch(
+                    app.svc.webapi.clone(),
+                    app.svc.engine.session(),
+                    uri,
+                    name,
+                    chans.detail.clone(),
+                );
             }
             Activated::Radio(uri) => {
                 app.status = "starting radio…".to_string();
