@@ -219,6 +219,53 @@ pub fn query_cell_size(_timeout: std::time::Duration) -> Option<ratatui_image::F
     None
 }
 
+// ------------------------------------------------------------- quit signals
+
+/// The signals that ask a terminal program to go: `SIGTERM` (`kill`), `SIGHUP`
+/// (its terminal was closed) and `SIGINT` (`kill -INT` — Ctrl-C itself arrives
+/// as a key in raw mode). Caught so myx can quit the way `q` does — state
+/// saved, terminal restored, colour subscribers told — instead of dying mid-
+/// frame and leaving the terminal in raw mode on the alternate screen.
+pub struct QuitSignals {
+    #[cfg(unix)]
+    caught: Option<[tokio::signal::unix::Signal; 3]>,
+}
+
+impl QuitSignals {
+    /// Start catching them. Must run inside the tokio runtime. If they can't
+    /// be caught, [`Self::recv`] simply never resolves — the signals keep
+    /// their default effect, as before.
+    pub fn install() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let caught = (|| {
+                Some([
+                    signal(SignalKind::terminate()).ok()?,
+                    signal(SignalKind::hangup()).ok()?,
+                    signal(SignalKind::interrupt()).ok()?,
+                ])
+            })();
+            Self { caught }
+        }
+        #[cfg(not(unix))]
+        Self {}
+    }
+
+    /// Wait for one and say which.
+    pub async fn recv(&mut self) -> &'static str {
+        #[cfg(unix)]
+        if let Some([term, hup, int]) = &mut self.caught {
+            return tokio::select! {
+                _ = term.recv() => "SIGTERM",
+                _ = hup.recv() => "SIGHUP",
+                _ = int.recv() => "SIGINT",
+            };
+        }
+        std::future::pending().await
+    }
+}
+
 #[cfg(test)]
 mod cell_tests {
     use super::*;
@@ -264,53 +311,6 @@ mod cell_tests {
             "another report"
         );
         assert_eq!(wh(parse_cell_report(b"\x1b[6;0;10t")), None);
-    }
-}
-
-// ------------------------------------------------------------- quit signals
-
-/// The signals that ask a terminal program to go: `SIGTERM` (`kill`), `SIGHUP`
-/// (its terminal was closed) and `SIGINT` (`kill -INT` — Ctrl-C itself arrives
-/// as a key in raw mode). Caught so myx can quit the way `q` does — state
-/// saved, terminal restored, colour subscribers told — instead of dying mid-
-/// frame and leaving the terminal in raw mode on the alternate screen.
-pub struct QuitSignals {
-    #[cfg(unix)]
-    caught: Option<[tokio::signal::unix::Signal; 3]>,
-}
-
-impl QuitSignals {
-    /// Start catching them. Must run inside the tokio runtime. If they can't
-    /// be caught, [`Self::recv`] simply never resolves — the signals keep
-    /// their default effect, as before.
-    pub fn install() -> Self {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{signal, SignalKind};
-            let caught = (|| {
-                Some([
-                    signal(SignalKind::terminate()).ok()?,
-                    signal(SignalKind::hangup()).ok()?,
-                    signal(SignalKind::interrupt()).ok()?,
-                ])
-            })();
-            Self { caught }
-        }
-        #[cfg(not(unix))]
-        Self {}
-    }
-
-    /// Wait for one and say which.
-    pub async fn recv(&mut self) -> &'static str {
-        #[cfg(unix)]
-        if let Some([term, hup, int]) = &mut self.caught {
-            return tokio::select! {
-                _ = term.recv() => "SIGTERM",
-                _ = hup.recv() => "SIGHUP",
-                _ = int.recv() => "SIGINT",
-            };
-        }
-        std::future::pending().await
     }
 }
 
