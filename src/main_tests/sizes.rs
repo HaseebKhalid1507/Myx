@@ -47,7 +47,6 @@ pub(crate) fn test_app() -> App {
         },
         transport: Transport {
             shuffle: false,
-            repeat: false,
             volume: 80,
             queue: Vec::new(),
             queue_uris: Vec::new(),
@@ -423,7 +422,7 @@ fn leaving_focus_or_turning_zen_on_takes_you_off_the_library_view() {
 
 // ------------------------------------------------------------- keys in Focus
 
-fn chans() -> UiChannels {
+pub(crate) fn chans() -> UiChannels {
     UiChannels {
         meta: flume::unbounded().0,
         lib: flume::unbounded().0,

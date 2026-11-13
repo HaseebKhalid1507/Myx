@@ -126,7 +126,8 @@ impl ThemeState {
 /// persisted `SavedState` care about. None of it touches the playhead.
 pub(crate) struct Transport {
     pub(crate) shuffle: bool,
-    pub(crate) repeat: bool,
+    // Repeat lives on the engine (`Engine::repeat_mode`): every load has to
+    // carry it, and a skip changes it.
     pub(crate) volume: u8, // 0..=100 (mirrors the 50% mixer default)
     pub(crate) queue: Vec<String>,
     pub(crate) queue_uris: Vec<String>,

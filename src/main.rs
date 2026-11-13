@@ -51,7 +51,7 @@ use myx::audio::{
 };
 use myx::components::{gradient_line, gradient_progress, left_bar_block};
 use myx::cover::Cover;
-use myx::engine::{self, Engine, EngineEvent};
+use myx::engine::{self, Engine, EngineEvent, Repeat};
 use myx::gradient::{self};
 use myx::liblog::{install_librespot_log, liblog};
 use myx::lyrics::parse::parse_lrc;
@@ -346,7 +346,7 @@ async fn boot(
         terminal,
         &mut signals,
         "connecting to Spotify",
-        engine::run(creds, ev_tx, init_vol),
+        engine::run(creds, ev_tx, init_vol, saved.repeat_mode()),
     )
     .await?
     .context("start engine")?;
@@ -439,7 +439,6 @@ async fn boot(
         },
         transport: Transport {
             shuffle: saved.shuffle,
-            repeat: saved.repeat,
             volume: if saved.volume == 0 {
                 80
             } else {

@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("myx-probe: authenticating…");
     let (tx, rx) = flume::unbounded::<EngineEvent>();
-    let engine = engine::run(engine::credentials()?, tx, 50).await?;
+    let engine = engine::run(engine::credentials()?, tx, 50, engine::Repeat::Off).await?;
     println!("myx-probe: Connect device 'myx' is live.");
 
     // If a context URI was passed, start playing it immediately.

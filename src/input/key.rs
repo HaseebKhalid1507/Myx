@@ -200,9 +200,17 @@ pub(crate) fn handle_key(
             let _ = app.svc.engine.shuffle(true);
             play_selected_context(app, true);
         }
+        // Off → all → one, Spotify's order, said on the status line.
         KeyCode::Char('R') => {
-            app.transport.repeat = !app.transport.repeat;
-            let _ = app.svc.engine.repeat(app.transport.repeat);
+            let mode = app.svc.engine.repeat_mode().next();
+            app.status = match app.svc.engine.set_repeat(mode) {
+                Ok(()) => repeat_status(mode).to_string(),
+                // Kept all the same: the next playlist or track starts with it.
+                Err(e) => format!(
+                    "repeat {}, but the player didn't get it: {e:#}",
+                    mode.label()
+                ),
+            };
         }
         KeyCode::Char('r') => {
             app.status = "loading library…".to_string();
@@ -329,6 +337,15 @@ pub(crate) fn handle_key(
         _ => {}
     }
     false
+}
+
+/// What `R` says it switched to.
+pub(crate) fn repeat_status(mode: Repeat) -> &'static str {
+    match mode {
+        Repeat::Off => "repeat off",
+        Repeat::All => "repeat all — the list starts over when it ends",
+        Repeat::One => "repeat one — this track plays again until you skip",
+    }
 }
 
 /// Keys whose whole effect is on the library pane.

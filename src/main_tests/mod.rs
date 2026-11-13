@@ -5,6 +5,7 @@ mod find;
 mod lyrics;
 mod nav;
 mod playlist;
+mod repeat;
 mod search;
 mod sizes;
 mod theme;

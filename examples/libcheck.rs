@@ -6,7 +6,7 @@ use myx::engine;
 async fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (tx, _rx) = flume::unbounded();
-    let engine = engine::run(engine::credentials()?, tx, 50).await?;
+    let engine = engine::run(engine::credentials()?, tx, 50, engine::Repeat::Off).await?;
 
     let token = match engine.web_token().await {
         Ok(t) => {
