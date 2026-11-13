@@ -57,7 +57,9 @@ use myx::lyrics::parse::parse_lrc;
 use myx::reactive::derive_theme;
 use myx::term::{acquire_single_instance_lock, init_terminal, restore_terminal, Term};
 use myx::theme::{Theme, TOKYONIGHT};
-use myx::util::{center_v, fmt_ms, track_id_from_uri, truncate, uri_to_url, urlencode, vol_u16};
+use myx::util::{
+    center_v, fmt_ms, track_id_from_uri, truncate, uri_to_url, urlencode, vol_u16, wrap_balanced,
+};
 use myx::webapi::WebApi;
 use ui::{render, render_loading};
 
