@@ -70,6 +70,10 @@ they are added to, never rewritten.
     shrink to `◀ Now Playing ▶`;
   - the visualizer makes way before the album art shrinks, and nothing on the
     Now Playing screen overlaps anything else.
+- Killing myx (`kill`, closing its terminal window, `kill -INT`) no longer
+  leaves the terminal in raw mode on the alternate screen, or loses the last
+  half-minute of saved state. SIGTERM, SIGHUP and SIGINT now quit the way `q`
+  does: state saved, terminal restored, colour subscribers told.
 
 
 ## [0.5.0] — 2026-09-09
