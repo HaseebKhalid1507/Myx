@@ -319,26 +319,33 @@ fn the_footer_never_shows_a_hint_cut_short() {
         "o sort",
         "+/- vol",
         "s shuffle",
+        "R repeat",
+        "R repeat one",
         "a actions",
         "e eq",
         "z zen",
         "q quit",
     ];
-    for w in 10..=200u16 {
-        draw(&mut term, &app, w, 30);
-        let text = screen_text(&term);
-        // The last row with anything on it (an outer margin row may follow).
-        let footer = text
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .expect("a footer row")
-            .trim();
-        for piece in footer.split("   ").map(str::trim).filter(|p| !p.is_empty()) {
-            assert!(
-                whole.contains(&piece),
-                "cut hint {piece:?} at width {w}: {footer:?}"
-            );
+    // The repeat hint's label is longer under repeat one. Detached, the engine
+    // can't pass the mode on, but it keeps it.
+    for repeat in [Repeat::Off, Repeat::One] {
+        let _ = app.svc.engine.set_repeat(repeat);
+        for w in 10..=200u16 {
+            draw(&mut term, &app, w, 30);
+            let text = screen_text(&term);
+            // The last row with anything on it (an outer margin row may follow).
+            let footer = text
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .expect("a footer row")
+                .trim();
+            for piece in footer.split("   ").map(str::trim).filter(|p| !p.is_empty()) {
+                assert!(
+                    whole.contains(&piece),
+                    "cut hint {piece:?} at width {w}, {repeat:?}: {footer:?}"
+                );
+            }
         }
     }
 }
