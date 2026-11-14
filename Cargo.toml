@@ -1,6 +1,6 @@
 [package]
 name = "myx"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "A lean, beautiful terminal Spotify player"
 authors = ["Haseeb Khalid"]
@@ -118,6 +118,16 @@ required-features = ["mxc"]
 [[example]]
 name = "probe"
 path = "examples/probe.rs"
+required-features = ["streaming"]
+
+[[example]]
+name = "libcheck"
+path = "examples/libcheck.rs"
+required-features = ["streaming"]
+
+[[example]]
+name = "radiocheck"
+path = "examples/radiocheck.rs"
 required-features = ["streaming"]
 
 [profile.release]

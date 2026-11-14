@@ -15,6 +15,8 @@
         "aarch64-darwin"
       ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+      # One version, from Cargo.toml, so the flake can't fall behind a release.
+      cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
     in
     {
       packages = forAllSystems (
@@ -26,7 +28,7 @@
         rec {
           myx = pkgs.rustPlatform.buildRustPackage {
             pname = "myx";
-            version = "0.3.1";
+            version = cargoToml.package.version;
 
             src = lib.cleanSource ./.;
             cargoLock.lockFile = ./Cargo.lock;
