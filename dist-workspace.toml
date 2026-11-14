@@ -23,6 +23,12 @@ tap = "HaseebKhalid1507/homebrew-tap"
 allow-dirty = ["ci"]
 # Skip checking whether the specified configuration files are up to date
 
+# GitHub retired the macos-14 runner cargo-dist defaults to for Apple Silicon
+# ("The configuration 'macos-14-arm64-us-default' is not supported", v0.6.0).
+# macos-26 is what CI's macos-latest runs on.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-26"
+
 # librespot needs ALSA + OpenSSL dev headers on the Linux build runner.
 [dist.dependencies.apt]
 libasound2-dev = '*'
