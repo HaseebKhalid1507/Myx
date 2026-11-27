@@ -89,7 +89,8 @@ space      play · pause          n / b    next · prev
 + / -      volume                R        repeat: off · all · one
 o          sort                  r        reload
 z          hide sidebar          e        equalizer
-q          quit                  T        transparent background
+d          devices               T        transparent background
+q          quit
 ```
 
 `f` finds in whatever list is on screen — a playlist, an album, Liked Songs,
@@ -97,6 +98,21 @@ search results. Type to narrow it (every word has to appear in the title or
 the artist), `↑`/`↓` to pick, `⏎` to play: the whole list plays from that
 track, exactly as it would without the find. `Esc` clears it, and the next
 `Esc` goes back as usual.
+
+`d` lists your Spotify Connect devices — phone, desktop app, speakers, and
+this myx — with ▶ on the one playing. `⏎` moves playback there and keeps it
+playing; `Esc` closes. A phone that's asleep drops off the list, so if it
+isn't there, open Spotify on it. Greyed devices can't be controlled from here.
+
+While another device plays, myx is its remote: Now Playing, the cover,
+lyrics and progress follow that device, and play/pause, skip, seek, volume,
+`s` and `R` — and picking a track or playlist — act on it, not on this
+computer. The footer's `d` names the device being driven, and the
+visualizer and equalizer sit idle, since no sound plays here. Playback only
+moves to this computer when you pick it ("this device") in `d`. If something
+is already playing elsewhere when myx starts, myx comes up as its remote
+instead of offering the track it restored. Controlling other devices needs
+Spotify Premium, as playback in myx does.
 
 Media keys (Play/Pause, Stop, Next, Prev, Volume) work when the terminal is
 focused. On macOS and Linux, AirPods and headphone controls work from anywhere
