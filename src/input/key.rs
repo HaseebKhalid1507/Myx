@@ -269,13 +269,13 @@ pub(crate) fn handle_key(
         }
         KeyCode::Right => {
             app.view.mode = app.view.mode.shift_in(app.rotation(), 1);
-            if app.view.mode == RightView::Queue && app.transport.playback_started {
+            if app.view.mode == RightView::Queue && app.playing_somewhere() {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         KeyCode::Left => {
             app.view.mode = app.view.mode.shift_in(app.rotation(), -1);
-            if app.view.mode == RightView::Queue && app.transport.playback_started {
+            if app.view.mode == RightView::Queue && app.playing_somewhere() {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }

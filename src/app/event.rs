@@ -7,23 +7,41 @@ pub(crate) fn handle_engine_event(
     ev: EngineEvent,
     meta_tx: &flume::Sender<TrackMeta>,
 ) {
-    // Position ticks would bury everything else in the log.
-    if !matches!(ev, EngineEvent::PositionCorrection { .. }) {
+    // Position ticks would bury everything else in the log, and a cluster push
+    // comes with every change on any device (`apply_snapshot` logs the ones
+    // that matter).
+    if !matches!(
+        ev,
+        EngineEvent::PositionCorrection { .. } | EngineEvent::Cluster(_)
+    ) {
         liblog(format!("engine: {ev:?}"));
+    }
+    if app.devices.remote.is_some() {
+        match &ev {
+            // Only the active Connect device plays, so this myx playing means
+            // it took over — a transfer here — whatever the last push said.
+            EngineEvent::TrackChanged { .. } | EngineEvent::Playing { .. } => {
+                leave_remote(app, false);
+            }
+            // This myx's player winding down after handing over: what's on
+            // screen is the remote device's, and must stay.
+            EngineEvent::Paused { .. }
+            | EngineEvent::Stopped
+            | EngineEvent::PositionCorrection { .. }
+            | EngineEvent::EndOfTrack { .. } => return,
+            // The connection dropped, not the music: the remote plays on, so
+            // there's no playhead to stop and nothing to resume here.
+            EngineEvent::Reconnecting => {
+                app.status = "connection dropped — reconnecting…".to_string();
+                return;
+            }
+            _ => {}
+        }
     }
     match ev {
         EngineEvent::TrackChanged { uri } => {
             app.status = "loading track…".to_string();
-            if let Some(track_id) = track_id_from_uri(&uri) {
-                // Record what we're waiting for so an earlier track's reply,
-                // landing late, is discarded instead of overwriting this one.
-                app.session.pending_meta = Some(format!("spotify:track:{track_id}"));
-                let webapi = app.svc.webapi.clone();
-                let tx = meta_tx.clone();
-                tokio::task::spawn_blocking(move || {
-                    let _ = tx.send(fetch_track_meta(&webapi, &track_id));
-                });
-            }
+            request_track_meta(app, &uri, meta_tx);
         }
         EngineEvent::Playing { position_ms, .. } => {
             if !app.transport.playback_started {
@@ -103,7 +121,9 @@ pub(crate) fn handle_engine_event(
             // are no-ops, so play must go back through the resume path. When
             // audio was playing, the main loop resumes it right away.
             let had_playback = std::mem::take(&mut app.transport.playback_started);
-            if let Some(controls) = app.media_controls.as_mut() {
+            // In remote mode the media controls are the remote device's.
+            let local = app.devices.remote.is_none();
+            if let Some(controls) = app.media_controls.as_mut().filter(|_| local) {
                 let _ = controls.set_playback(MediaPlayback::Paused {
                     progress: Some(MediaPosition(Duration::from_millis(
                         app.playback.position_ms() as u64,
@@ -119,7 +139,29 @@ pub(crate) fn handle_engine_event(
             };
         }
         EngineEvent::EndOfTrack { .. } => {}
+        EngineEvent::Cluster(snapshot) => apply_snapshot(app, snapshot, meta_tx),
     }
+}
+
+/// Fetch a track's metadata (cover, theme, lyrics follow from it), when `uri`
+/// is a track. Returns whether a fetch went out.
+pub(crate) fn request_track_meta(
+    app: &mut App,
+    uri: &str,
+    meta_tx: &flume::Sender<TrackMeta>,
+) -> bool {
+    let Some(track_id) = track_id_from_uri(uri) else {
+        return false;
+    };
+    // Record what we're waiting for so an earlier track's reply, landing late,
+    // is discarded instead of overwriting this one.
+    app.session.pending_meta = Some(format!("spotify:track:{track_id}"));
+    let webapi = app.svc.webapi.clone();
+    let tx = meta_tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = tx.send(fetch_track_meta(&webapi, &track_id));
+    });
+    true
 }
 
 /// Is this metadata reply the one we are still waiting for?
@@ -176,12 +218,9 @@ pub(crate) fn apply_meta(
         artist: meta.artist,
         album: meta.album,
         duration_ms: meta.duration_ms,
-        position_ms: app
-            .playback
-            .now
-            .as_ref()
-            .map(|n| n.position_ms)
-            .unwrap_or(0),
+        // Where the playhead is now, not where it was last set: a remote
+        // device's position is set once per push, and the fetch takes time.
+        position_ms: app.playback.position_ms(),
         position_at: Instant::now(),
         is_playing: app
             .playback

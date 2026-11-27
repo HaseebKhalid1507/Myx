@@ -80,6 +80,7 @@ pub(crate) fn test_app() -> App {
             last_ctrl_c: None,
             last_click: None,
         },
+        devices: DevicesState::default(),
         art_repaint: ArtRepaint::Idle,
     }
 }

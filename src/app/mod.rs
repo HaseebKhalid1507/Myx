@@ -15,6 +15,7 @@
 //! edge in the graph, not an aspiration, so don't add more of them.
 
 mod action;
+mod devices;
 mod event;
 mod frame;
 mod library;
@@ -23,6 +24,7 @@ mod playback;
 mod state;
 
 pub(crate) use action::*;
+pub(crate) use devices::*;
 pub(crate) use event::*;
 pub(crate) use frame::*;
 pub(crate) use library::*;
@@ -53,6 +55,9 @@ pub(crate) struct App {
     pub(crate) find: FindState,
     pub(crate) view: ViewState,
     pub(crate) session: SessionState,
+    // Spotify Connect: the devices on the account, and the one myx is the
+    // remote for while another holds playback.
+    pub(crate) devices: DevicesState,
     // What the album art box owes the next frame. See ArtRepaint.
     pub(crate) art_repaint: ArtRepaint,
 }

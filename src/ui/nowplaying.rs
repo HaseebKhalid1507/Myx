@@ -389,7 +389,9 @@ pub(crate) fn render_volume(
     area: Rect,
 ) {
     const VLEV: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let filled = (app.transport.volume as usize * VLEV.len() + 50) / 100;
+    // The remote device's volume in remote mode; none when it can't be set.
+    let volume = app.shown_volume();
+    let filled = (usize::from(volume.unwrap_or(0)) * VLEV.len() + 50) / 100;
     let mut vspans: Vec<Span> = Vec::with_capacity(VLEV.len() + 1);
     for (i, ch) in VLEV.iter().enumerate() {
         let color = if i < filled {
@@ -403,7 +405,10 @@ pub(crate) fn render_volume(
         ));
     }
     vspans.push(Span::styled(
-        format!(" {:>3}%", app.transport.volume),
+        match volume {
+            Some(v) => format!(" {v:>3}%"),
+            None => "   –%".to_string(),
+        },
         theme.muted(),
     ));
     f.render_widget(

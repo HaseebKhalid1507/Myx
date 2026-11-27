@@ -3,6 +3,20 @@
 use crate::*;
 
 pub(crate) fn render_visualizer(f: &mut Frame, app: &App, theme: Theme, area: Rect) {
+    // The spectrum is of this myx's own audio, and in remote mode there is
+    // none: say where the music is instead of leaving a gap.
+    if let Some(remote) = app.devices.remote.as_ref() {
+        if area.height > 0 {
+            let text = format!("playing on {} · no sound here", remote.name);
+            f.render_widget(
+                Paragraph::new(truncate(&text, area.width as usize))
+                    .style(theme.muted())
+                    .alignment(Alignment::Center),
+                center_v(area, 1),
+            );
+        }
+        return;
+    }
     let active = app
         .svc
         .engine

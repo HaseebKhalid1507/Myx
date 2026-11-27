@@ -94,7 +94,12 @@ fn render_header(f: &mut Frame, app: &App, out: &mut FrameOut, theme: Theme, are
         .map(EqualizerPreset::label)
         .unwrap_or("Custom");
     let preamp = app.transport.equalizer.auto_preamp_db();
-    let info = format!("{preset}  ·  AUTO {preamp:+.1} dB");
+    // The curve is this myx's; in remote mode nothing here plays through it.
+    // It still edits, for when playback comes back.
+    let info = match app.devices.remote.as_ref() {
+        Some(remote) => format!("idle · playing on {}", remote.name),
+        None => format!("{preset}  ·  AUTO {preamp:+.1} dB"),
+    };
     let info_right = toggle_rect.x.saturating_sub(2);
     let info_x = row.x.saturating_add(11).min(info_right);
     let info_width = info

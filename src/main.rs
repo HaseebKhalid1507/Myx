@@ -51,7 +51,7 @@ use myx::audio::{
 };
 use myx::components::{gradient_line, gradient_progress, left_bar_block};
 use myx::cover::Cover;
-use myx::engine::{self, Engine, EngineEvent, Repeat};
+use myx::engine::{self, Engine, EngineEvent, Holder, Playback, Repeat, Snapshot};
 use myx::gradient::{self};
 use myx::liblog::{install_librespot_log, liblog, timed, Step};
 use myx::lyrics::parse::parse_lrc;
@@ -493,6 +493,7 @@ async fn boot(
             last_ctrl_c: None,
             last_click: None,
         },
+        devices: DevicesState::default(),
         art_repaint: ArtRepaint::Idle,
     };
 
@@ -811,7 +812,7 @@ async fn run_ui(
                     last_sync = Instant::now();
                     // Refresh the live queue while playing so the snapshot stays
                     // current, then persist it (survives reboot).
-                    if app.transport.playback_started {
+                    if app.playing_somewhere() {
                         spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
                     }
                     save_state(&app);

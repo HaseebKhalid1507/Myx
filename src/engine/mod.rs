@@ -12,6 +12,7 @@
 pub mod auth;
 mod device;
 mod playlist;
+mod remote;
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -37,6 +38,7 @@ use crate::audio::output::{output_available, SilentSink};
 use crate::audio::{EqualizerSettings, VisBands, VisualizationSink};
 use crate::liblog::{liblog, Step};
 pub use playlist::{playlist_tracks, PlaylistTrack};
+pub use remote::{Device, DeviceKind, Holder, Playback, Snapshot};
 
 /// A normalized playback event surfaced to the rest of the app.
 #[derive(Debug, Clone)]
@@ -70,6 +72,10 @@ pub enum EngineEvent {
         uri: String,
         position_ms: u32,
     },
+    /// Spotify Connect's cluster push: who holds playback on the account and
+    /// what it's playing, and the devices on it. Comes on every change, from
+    /// any device. See `engine/remote.rs`.
+    Cluster(Snapshot),
 }
 
 /// Spotify's repeat modes, in the order its repeat button steps through them.
@@ -401,6 +407,10 @@ impl Engine {
             .map(|link| link.session.device_id().to_string())
             .unwrap_or_default()
     }
+    /// The name other devices list this myx under.
+    pub fn device_name(&self) -> String {
+        device::device_name()
+    }
     /// A cheap clone of the session (for off-thread mercury calls like radio).
     ///
     /// # Panics
@@ -660,6 +670,11 @@ async fn connect_via(
         },
         Some(cache),
     );
+    // Before `Spirc::new`, as `remote::subscribe` explains. Without it myx
+    // still plays; it just can't follow another device.
+    let cluster = remote::subscribe(&session)
+        .inspect_err(|e| liblog(format!("engine: {e:#}; other devices won't be followed")))
+        .ok();
 
     let backend = audio_backend::find(None).expect("an audio backend should be available");
     let cfg = crate::config::get();
@@ -755,6 +770,9 @@ async fn connect_via(
     .context("initialize spirc")?;
     drop(login);
     tokio::spawn(spirc_task);
+    if let Some(cluster) = cluster {
+        remote::spawn_feed(cluster, session.device_id().to_string(), events.clone());
+    }
 
     Ok(Link {
         spirc,

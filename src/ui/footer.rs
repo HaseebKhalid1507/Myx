@@ -6,7 +6,8 @@ pub(crate) fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) 
     let on = |b: bool| if b { theme.success } else { theme.text_muted };
     let key = |k: &'static str| Span::styled(k, Style::default().fg(theme.primary.into()));
     let lbl = |t: &'static str| Span::styled(t, theme.muted());
-    let repeat = app.svc.engine.repeat_mode();
+    // In remote mode these are the remote device's: what the keys would change.
+    let repeat = app.shown_repeat();
     let enter_lbl = enter_label(app.selected_item());
     let play_lbl = if app.playback.now.as_ref().is_some_and(|n| n.is_playing) {
         " pause   "
@@ -38,7 +39,7 @@ pub(crate) fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) 
         (
             false,
             12,
-            Span::styled("s", Style::default().fg(on(app.transport.shuffle).into())),
+            Span::styled("s", Style::default().fg(on(app.shown_shuffle()).into())),
             lbl(" shuffle   "),
         ),
         // Ranked with shuffle, the other mode it lights up for.
