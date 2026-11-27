@@ -7,13 +7,25 @@
 
 use crate::*;
 
-#[derive(Default)]
 pub(crate) struct DevicesState {
+    /// This myx's Connect id, as other devices list it.
+    pub(crate) here_id: String,
     /// The device holding playback while it isn't this myx. `Some` is remote
-    /// mode: what's on screen is that device's.
+    /// mode: what's on screen is that device's, and transport keys drive it
+    /// through the Web API.
     pub(crate) remote: Option<Remote>,
     /// The newest cluster change applied, on Spotify's clock.
     pub(crate) last_change_ms: i64,
+}
+
+impl DevicesState {
+    pub(crate) fn new(here_id: String) -> Self {
+        Self {
+            here_id,
+            remote: None,
+            last_change_ms: 0,
+        }
+    }
 }
 
 /// The device remote mode drives, and its settings as last heard. Kept apart
@@ -27,6 +39,7 @@ pub(crate) struct Remote {
     pub(crate) volume: Option<u8>,
     pub(crate) shuffle: bool,
     pub(crate) repeat: Repeat,
+    pub(crate) controllable: bool,
 }
 
 impl Remote {
@@ -37,6 +50,7 @@ impl Remote {
             volume: p.device.volume,
             shuffle: p.shuffle,
             repeat: p.repeat,
+            controllable: p.device.controllable,
         }
     }
 }
@@ -167,12 +181,7 @@ fn follow_remote(app: &mut App, p: Playback, meta_tx: &flume::Sender<TrackMeta>)
                 cover: None,
             });
         }
-        app.transport.source = remote_source(&p.context_uri);
-        app.transport.source_name = p.context_name.clone();
-        // The old queue belongs to the old source; the next sync fetches the
-        // remote device's.
-        app.transport.queue.clear();
-        app.transport.queue_uris.clear();
+        follow_context(app, &p);
     }
     if let Some(n) = app.playback.now.as_mut() {
         n.is_playing = p.is_playing;
@@ -190,6 +199,32 @@ fn follow_remote(app: &mut App, p: Playback, meta_tx: &flume::Sender<TrackMeta>)
         } else {
             MediaPlayback::Paused { progress }
         });
+    }
+}
+
+/// Keep the source in step with the remote's context. A track list started
+/// from here (Liked Songs, a section's tracks) has none on Spotify's side and
+/// keeps the one myx gave it.
+fn follow_context(app: &mut App, p: &Playback) {
+    if p.context_uri.is_empty() {
+        return;
+    }
+    let source = remote_source(&p.context_uri);
+    let same = match (&source, &app.transport.source) {
+        (PlaySource::Context(a), PlaySource::Context(b)) => a == b,
+        _ => false,
+    };
+    if !p.context_name.is_empty() {
+        app.transport.source_name = p.context_name.clone();
+    } else if !same {
+        app.transport.source_name.clear();
+    }
+    if !same {
+        app.transport.source = source;
+        // The old queue belongs to the old source; the next sync fetches the
+        // remote device's.
+        app.transport.queue.clear();
+        app.transport.queue_uris.clear();
     }
 }
 
@@ -222,6 +257,11 @@ pub(crate) fn leave_remote(app: &mut App, stopped: bool) {
             });
         }
     } else {
+        // Shuffle and repeat came with the playback; the volume is the
+        // device's own and stays this myx's. Without this, the first play
+        // here reapplies myx's last settings over the phone's.
+        app.transport.shuffle = remote.shuffle;
+        app.svc.engine.adopt_repeat(remote.repeat);
         app.status = "playing here".to_string();
     }
 }

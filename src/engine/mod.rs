@@ -378,6 +378,12 @@ impl Engine {
         self.active_command("repeat", |spirc| spirc.repeat(context))?;
         self.command("repeat track", |spirc| spirc.repeat_track(track))
     }
+    /// Take the repeat mode playback arrived with — moved here from another
+    /// device, which had it set — as the one to carry, without telling the
+    /// player, which already has it.
+    pub fn adopt_repeat(&self, mode: Repeat) {
+        *self.repeat.lock().unwrap_or_else(PoisonError::into_inner) = mode;
+    }
     /// Set volume in librespot's 0..=65535 range.
     pub fn set_volume(&self, vol: u16) -> Result<()> {
         // Apply to the local software mixer immediately (no network round-trip).

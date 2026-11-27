@@ -19,6 +19,7 @@ pub(crate) fn test_app() -> App {
             cell: ratatui_image::FontSize::new(10, 22),
             picker: Picker::halfblocks(),
             webapi: Arc::new(Mutex::new(WebApi::offline())),
+            player: flume::unbounded().0,
         },
         media_controls: None,
         #[cfg(all(feature = "mxc", unix))]
@@ -80,10 +81,13 @@ pub(crate) fn test_app() -> App {
             last_ctrl_c: None,
             last_click: None,
         },
-        devices: DevicesState::default(),
+        devices: DevicesState::new(HERE_ID.to_string()),
         art_repaint: ArtRepaint::Idle,
     }
 }
+
+/// The test app's own Connect device id.
+pub(crate) const HERE_ID: &str = "0000000000000000000000000000000000000000";
 
 /// `test_app` with a library, a track playing (cover, synced lyrics) and a queue.
 pub(crate) fn playing_app() -> App {

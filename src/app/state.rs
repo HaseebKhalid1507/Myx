@@ -2,13 +2,16 @@
 
 use crate::*;
 
-/// Long-lived services the UI talks to. All three are used through `&self`
+/// Long-lived services the UI talks to. All of them are used through `&self`
 /// (the `Arc<Mutex<_>>` is only ever cloned), so grouping them costs no
 /// borrow flexibility.
 pub(crate) struct Services {
     pub(crate) engine: Engine,
     pub(crate) picker: Picker,
     pub(crate) webapi: Arc<Mutex<WebApi>>,
+    /// The Web API player worker (`api::player`): commands for a remote
+    /// device, in order.
+    pub(crate) player: flume::Sender<PlayerRequest>,
     /// The terminal's cell size in pixels *now*. Starts as the picker's
     /// startup measurement and is measured again after resizes, because a
     /// font change mid-session changes it and the picker's copy can't be.

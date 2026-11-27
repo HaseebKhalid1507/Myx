@@ -20,37 +20,14 @@ pub(crate) fn handle_media_control_event(
     ev: MediaControlEvent,
     radio_tx: &flume::Sender<Result<Radio, String>>,
 ) {
+    // Like the keys, these drive whichever device holds playback.
     match ev {
-        MediaControlEvent::Next => {
-            let _ = app.svc.engine.next();
-        }
-        MediaControlEvent::Previous => {
-            let _ = app.svc.engine.prev();
-        }
-        MediaControlEvent::Toggle => {
-            if app.transport.playback_started {
-                let _ = app.svc.engine.toggle();
-            } else {
-                // Resume the persisted source (context/radio/liked).
-                resume_source(app, radio_tx);
-                app.transport.playback_started = true;
-            }
-        }
-        MediaControlEvent::Play => {
-            if app.transport.playback_started {
-                let _ = app.svc.engine.play();
-            } else {
-                // Resume the persisted source (context/radio/liked).
-                resume_source(app, radio_tx);
-                app.transport.playback_started = true;
-            }
-        }
-        MediaControlEvent::Pause => {
-            let _ = app.svc.engine.pause();
-        }
-        MediaControlEvent::Stop => {
-            app.svc.engine.stop();
-        }
+        MediaControlEvent::Next => app.next(),
+        MediaControlEvent::Previous => app.prev(),
+        MediaControlEvent::Toggle => app.play_pause(radio_tx),
+        MediaControlEvent::Play => app.play(radio_tx),
+        MediaControlEvent::Pause => app.pause(),
+        MediaControlEvent::Stop => app.stop(),
         MediaControlEvent::Seek(direction) => match direction {
             SeekDirection::Backward => app.playback.seek_step(-5_000),
             SeekDirection::Forward => app.playback.seek_step(5_000),
@@ -60,8 +37,7 @@ pub(crate) fn handle_media_control_event(
             SeekDirection::Forward => app.playback.seek_step(duration.as_millis() as i64),
         },
         MediaControlEvent::SetPosition(MediaPosition(duration)) => {
-            app.playback
-                .seek_to(&app.svc.engine, duration.as_millis() as u32);
+            app.seek_to(duration.as_millis() as u32);
         }
         _ => {}
     }

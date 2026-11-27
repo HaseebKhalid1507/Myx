@@ -15,6 +15,7 @@
 //! edge in the graph, not an aspiration, so don't add more of them.
 
 mod action;
+mod control;
 mod devices;
 mod event;
 mod frame;
@@ -24,6 +25,7 @@ mod playback;
 mod state;
 
 pub(crate) use action::*;
+pub(crate) use control::*;
 pub(crate) use devices::*;
 pub(crate) use event::*;
 pub(crate) use frame::*;
@@ -178,9 +180,12 @@ impl App {
         self.status = format!("starting {name}…");
         self.transport.source = PlaySource::Context(uri.clone());
         self.transport.source_name = name;
-        if let Err(e) = self.svc.engine.play_context(uri, shuffle) {
-            self.status = format!("couldn't play: {e:#}");
-        }
+        let load = Load::Context {
+            uri,
+            track: None,
+            position_ms: 0,
+        };
+        self.play_load(load, shuffle);
     }
 
     /// Play whatever's selected (in the current section, or in search results).
@@ -208,13 +213,12 @@ impl App {
                     self.transport.source_name = "Liked Songs".to_string();
                     self.status = "starting Liked Songs…".to_string();
                     // Honour the current shuffle toggle instead of a dedicated row.
-                    if let Err(e) =
-                        self.svc
-                            .engine
-                            .play_tracks(uris, None, 0, self.transport.shuffle)
-                    {
-                        self.status = format!("couldn't play: {e:#}");
-                    }
+                    let load = Load::Tracks {
+                        uris,
+                        start: None,
+                        position_ms: 0,
+                    };
+                    self.play_load(load, self.transport.shuffle);
                 }
                 return Activated::None;
             }
@@ -248,30 +252,25 @@ impl App {
                 // An artist context is Spotify's own track list, not the
                 // search-built Popular rows shown here, so the picked track may
                 // not be in it — play the rows as shown instead.
-                let result = if ctx.starts_with("spotify:artist:") {
-                    let uris = d
-                        .items
-                        .iter()
-                        .filter(|i| i.is_track())
-                        .map(|i| i.uri.clone())
-                        .collect();
-                    self.svc.engine.play_tracks(
-                        uris,
-                        Some(item.uri.clone()),
-                        0,
-                        self.transport.shuffle,
-                    )
+                let load = if ctx.starts_with("spotify:artist:") {
+                    Load::Tracks {
+                        uris: d
+                            .items
+                            .iter()
+                            .filter(|i| i.is_track())
+                            .map(|i| i.uri.clone())
+                            .collect(),
+                        start: Some(item.uri.clone()),
+                        position_ms: 0,
+                    }
                 } else {
-                    self.svc.engine.play_context_at(
-                        ctx,
-                        Some(item.uri.clone()),
-                        0,
-                        self.transport.shuffle,
-                    )
+                    Load::Context {
+                        uri: ctx,
+                        track: Some(item.uri.clone()),
+                        position_ms: 0,
+                    }
                 };
-                if let Err(e) = result {
-                    self.status = format!("couldn't play: {e:#}");
-                }
+                self.play_load(load, self.transport.shuffle);
                 return Activated::None;
             }
             // Section track list.
@@ -289,13 +288,12 @@ impl App {
                 self.transport.source = PlaySource::None;
                 self.transport.source_name = self.browse.section.label().to_string();
             }
-            if let Err(e) =
-                self.svc
-                    .engine
-                    .play_tracks(uris, Some(item.uri.clone()), 0, self.transport.shuffle)
-            {
-                self.status = format!("couldn't play: {e:#}");
-            }
+            let load = Load::Tracks {
+                uris,
+                start: Some(item.uri.clone()),
+                position_ms: 0,
+            };
+            self.play_load(load, self.transport.shuffle);
             return Activated::None;
         }
         // Otherwise it's a context (artist / album / playlist) — open it.
