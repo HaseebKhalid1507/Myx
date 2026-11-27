@@ -6,6 +6,19 @@ they are added to, never rewritten.
 
 ## [Unreleased]
 
+### Added
+
+- **`device_name`** in `config.toml`: the name this myx goes by in Spotify's
+  device lists. Without it, myx is now `myx · <hostname>` instead of plain
+  `myx`, so two machines can be told apart.
+
+### Fixed
+
+- Spotify saw a new device every time myx started or reconnected. librespot
+  makes up a device id per session unless it's given one, so each launch was a
+  stranger that happened to share the name. myx now makes one id per install,
+  keeps it in `~/.cache/myx/device_id`, and reuses it, renamed or not.
+
 
 ## [0.6.0] — 2026-11-13
 

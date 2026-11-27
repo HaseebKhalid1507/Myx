@@ -41,6 +41,9 @@ pub struct Config {
     /// "auto" fits the screen; "full" or "focus" keeps one arrangement
     /// whatever the size. A string for the same reason as `theme`.
     pub layout: String,
+    /// The name Spotify's device lists show for this myx. Unset or blank means
+    /// `myx · <hostname>`.
+    pub device_name: Option<String>,
 }
 
 impl Default for Config {
@@ -55,6 +58,7 @@ impl Default for Config {
             transparent: false,
             theme: "album".to_string(),
             layout: "auto".to_string(),
+            device_name: None,
         }
     }
 }
@@ -109,6 +113,10 @@ transparent = true
 # room, one pane at a time (the library is one of the ←/→ views) when there
 # isn't. \"full\" or \"focus\" keeps one of them whatever the size.
 #layout = \"auto\"
+
+# The name this myx goes by in Spotify's device lists: your phone's, the
+# desktop app's, and myx's own. Leave it commented for \"myx · <hostname>\".
+#device_name = \"desk\"
 ";
 
 impl Config {
@@ -281,6 +289,9 @@ mod tests {
 
         let c = Config::parse("theme = \"gruvbox\"").expect("valid toml");
         assert_eq!(c.theme, "gruvbox");
+
+        let c = Config::parse("device_name = \"desk\"").expect("valid toml");
+        assert_eq!(c.device_name.as_deref(), Some("desk"));
     }
 
     #[test]
@@ -338,6 +349,7 @@ mod tests {
         assert_eq!(c.bitrate, d.bitrate);
         assert_eq!(c.normalize_volume, d.normalize_volume);
         assert_eq!(c.theme, d.theme);
+        assert!(c.device_name.is_none());
         // The one live key: new installs start transparent, while a config
         // without the line keeps the album background, which is the default.
         assert!(c.transparent);

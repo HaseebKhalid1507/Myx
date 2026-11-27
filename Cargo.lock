@@ -2805,6 +2805,7 @@ dependencies = [
  "crossterm",
  "flume",
  "fs2",
+ "gethostname",
  "image",
  "librespot-connect",
  "librespot-core",
