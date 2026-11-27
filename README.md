@@ -261,6 +261,10 @@ transparent = true
 # room, one pane at a time (the library is one of the ←/→ views) when there
 # isn't. "full" or "focus" keeps one of them whatever the size.
 #layout = "auto"
+
+# The name this myx goes by in Spotify's device lists: your phone's, the
+# desktop app's, and myx's own. Leave it out for "myx · <hostname>".
+#device_name = "desk"
 ```
 
 ## Debug log

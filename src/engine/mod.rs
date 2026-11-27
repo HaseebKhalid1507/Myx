@@ -10,6 +10,7 @@
 //! © 2021 Thang Pham), stripped to just what myx needs.
 
 pub mod auth;
+mod device;
 mod playlist;
 
 use std::future::Future;
@@ -654,6 +655,7 @@ async fn connect_via(
     let session = Session::new(
         SessionConfig {
             ap_port,
+            device_id: device::device_id(),
             ..SessionConfig::default()
         },
         Some(cache),
@@ -726,7 +728,7 @@ async fn connect_via(
     });
 
     let connect_config = ConnectConfig {
-        name: "myx".to_string(),
+        name: device::device_name(),
         device_type: DeviceType::Computer,
         // Carry the live volume across a reconnect — the mixer outlives the
         // connection, so the new device must not announce a stale level.
