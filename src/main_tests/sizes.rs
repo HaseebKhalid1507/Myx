@@ -19,6 +19,7 @@ pub(crate) fn test_app() -> App {
             cell: ratatui_image::FontSize::new(10, 22),
             picker: Picker::halfblocks(),
             webapi: Arc::new(Mutex::new(WebApi::offline())),
+            player: flume::unbounded().0,
         },
         media_controls: None,
         #[cfg(all(feature = "mxc", unix))]
@@ -80,9 +81,13 @@ pub(crate) fn test_app() -> App {
             last_ctrl_c: None,
             last_click: None,
         },
+        devices: DevicesState::new(HERE_ID.to_string(), "myx · test".to_string()),
         art_repaint: ArtRepaint::Idle,
     }
 }
+
+/// The test app's own Connect device id.
+pub(crate) const HERE_ID: &str = "0000000000000000000000000000000000000000";
 
 /// `test_app` with a library, a track playing (cover, synced lyrics) and a queue.
 pub(crate) fn playing_app() -> App {
@@ -132,7 +137,7 @@ pub(crate) fn playing_app() -> App {
 }
 
 /// Draw `app` into `term` (resized to `w`×`h`).
-fn draw(term: &mut Terminal<TestBackend>, app: &App, w: u16, h: u16) {
+pub(crate) fn draw(term: &mut Terminal<TestBackend>, app: &App, w: u16, h: u16) {
     term.backend_mut().resize(w, h);
     term.resize(ratatui::layout::Rect::new(0, 0, w, h))
         .expect("resize");
@@ -152,6 +157,7 @@ fn sizes() -> impl Iterator<Item = (u16, u16)> {
 enum Overlay {
     None,
     Actions,
+    Devices,
     Equalizer,
     SearchPrompt,
     FindPrompt,
@@ -159,6 +165,7 @@ enum Overlay {
 
 fn with_overlay(app: &mut App, overlay: Overlay) {
     app.view.actions = None;
+    app.devices.menu = None;
     app.view.equalizer = None;
     app.search.input_mode = false;
     app.find.typing = false;
@@ -168,6 +175,7 @@ fn with_overlay(app: &mut App, overlay: Overlay) {
             let item = LibItem::track("x".into(), "y".into(), "spotify:track:x".into());
             app.view.actions = Some(build_action_menu(None, &item));
         }
+        Overlay::Devices => app.open_devices(),
         Overlay::Equalizer => app.view.equalizer = Some(EqualizerOverlay::default()),
         Overlay::SearchPrompt => app.search.input_mode = true,
         Overlay::FindPrompt => {
@@ -177,7 +185,7 @@ fn with_overlay(app: &mut App, overlay: Overlay) {
     }
 }
 
-fn sweep(mut app: App, label: &str) {
+pub(crate) fn sweep(mut app: App, label: &str) {
     // Same 1:2 cell shape as a real terminal, tiny in pixels: the cover is
     // re-encoded for every size, and at 10x22 px a cell that's thousands of
     // pixels per frame for nothing a crash test needs.
@@ -193,6 +201,7 @@ fn sweep(mut app: App, label: &str) {
             let overlays = [
                 Overlay::None,
                 Overlay::Actions,
+                Overlay::Devices,
                 Overlay::Equalizer,
                 Overlay::SearchPrompt,
                 Overlay::FindPrompt,
@@ -234,7 +243,7 @@ fn playing_never_panics_at_any_size() {
 }
 
 /// The whole screen as text, row by row.
-fn screen_text(term: &Terminal<TestBackend>) -> String {
+pub(crate) fn screen_text(term: &Terminal<TestBackend>) -> String {
     let buf = term.backend().buffer();
     let area = buf.area;
     (0..area.height)
@@ -322,14 +331,30 @@ fn the_footer_never_shows_a_hint_cut_short() {
         "R repeat",
         "R repeat one",
         "a actions",
+        "d devices",
+        "d on Pixel 7",
         "e eq",
         "z zen",
         "q quit",
     ];
     // The repeat hint's label is longer under repeat one. Detached, the engine
-    // can't pass the mode on, but it keeps it.
-    for repeat in [Repeat::Off, Repeat::One] {
+    // can't pass the mode on, but it keeps it. In remote mode `d` names the
+    // device instead, and repeat is that device's.
+    let remote = Remote {
+        device_id: "p".to_string(),
+        name: "Pixel 7".to_string(),
+        volume: Some(40),
+        shuffle: false,
+        repeat: Repeat::One,
+        controllable: true,
+    };
+    for (repeat, remote) in [
+        (Repeat::Off, None),
+        (Repeat::One, None),
+        (Repeat::Off, Some(remote)),
+    ] {
         let _ = app.svc.engine.set_repeat(repeat);
+        app.devices.remote = remote;
         for w in 10..=200u16 {
             draw(&mut term, &app, w, 30);
             let text = screen_text(&term);

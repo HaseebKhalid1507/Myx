@@ -51,7 +51,9 @@ use myx::audio::{
 };
 use myx::components::{gradient_line, gradient_progress, left_bar_block};
 use myx::cover::Cover;
-use myx::engine::{self, Engine, EngineEvent, Repeat};
+use myx::engine::{
+    self, Device, DeviceKind, Engine, EngineEvent, Holder, Playback, Repeat, Snapshot,
+};
 use myx::gradient::{self};
 use myx::liblog::{install_librespot_log, liblog, timed, Step};
 use myx::lyrics::parse::parse_lrc;
@@ -429,12 +431,17 @@ async fn boot(
         liblog("media controls unavailable; continuing without native integration");
     }
 
+    // Commands for a remote device, done in order by the player worker that
+    // `run_ui` starts.
+    let (player_tx, player_rx) = flume::unbounded::<PlayerRequest>();
+    let devices = DevicesState::new(engine.device_id(), engine.device_name());
     let app = App {
         svc: Services {
             engine,
             cell: picker.font_size(),
             picker,
             webapi,
+            player: player_tx,
         },
         media_controls,
         #[cfg(all(feature = "mxc", unix))]
@@ -493,10 +500,11 @@ async fn boot(
             last_ctrl_c: None,
             last_click: None,
         },
+        devices,
         art_repaint: ArtRepaint::Idle,
     };
 
-    run_ui(terminal, app, ev_rx, signals).await
+    run_ui(terminal, app, ev_rx, player_rx, signals).await
 }
 
 struct Radio {
@@ -523,6 +531,7 @@ async fn run_ui(
     terminal: &mut Term,
     mut app: App,
     ev_rx: flume::Receiver<EngineEvent>,
+    player_rx: flume::Receiver<PlayerRequest>,
     mut signals: QuitSignals,
 ) -> Result<MxcHandle> {
     // Ends with the first frame on screen: the library fetch and media keys
@@ -579,6 +588,9 @@ async fn run_ui(
         chans.lib.clone(),
         chans.libdone.clone(),
     );
+    let (reply_tx, reply_rx) = flume::unbounded::<PlayerReply>();
+    spawn_player_worker(app.svc.webapi.clone(), player_rx, reply_tx);
+    app.check_other_devices_at_launch();
 
     // Re-enrich the restored last-played track (cover / theme / lyrics).
     if let Some(uri) = app.session.restore_uri.take() {
@@ -625,7 +637,7 @@ async fn run_ui(
     let mut dirty = true;
     let mut last_layout = (app.view.mode, app.view.zen, app.view.layout);
     let forced_layout = forced_layout(&myx::config::get().layout);
-    let mut overlay_open = app.view.actions.is_some();
+    let mut overlay_open = app.popup_open();
     // A popup overwrites inline-image pixels. Replay the cached cover after the
     // popup-free frame instead of blanking it for one visible frame first.
     let mut restore_art = false;
@@ -644,7 +656,8 @@ async fn run_ui(
                 break;
             }
             _ = frame.tick() => {
-                app.playback.flush_seek(&app.svc.engine, Instant::now());
+                app.flush_seek(Instant::now());
+                app.refresh_devices_if_due(Instant::now());
                 // Drain library updates deterministically before rendering. Keeping
                 // this solely as a select arm could starve under a hot player-event
                 // stream / 60fps visualizer — which looked like a frozen library.
@@ -688,11 +701,17 @@ async fn run_ui(
                     dirty = true;
                     match rad {
                         Ok(radio) if !radio.uris.is_empty() => {
-                            if let Err(e) = app.svc.engine.play_tracks(radio.uris, None, radio.start_position_ms, false) {
-                                app.status = format!("couldn't play radio: {e:#}");
+                            let load = Load::Tracks {
+                                uris: radio.uris,
+                                start: None,
+                                position_ms: radio.start_position_ms,
+                            };
+                            // On a remote device, its own push says it's playing.
+                            let remote = app.devices.remote.is_some();
+                            if app.play_load(load, false) {
+                                app.transport.playback_started |= !remote;
+                                app.status = "radio started".to_string();
                             }
-                            app.transport.playback_started = true;
-                            app.status = "radio started".to_string();
                             // Grab the freshly-populated station queue shortly after.
                             let webapi = app.svc.webapi.clone();
                             let tx = chans.queue.clone();
@@ -708,6 +727,11 @@ async fn run_ui(
                             app.status = format!("radio failed: {e}");
                         }
                     }
+                }
+                // The player worker's replies, drained here for the same reason.
+                while let Ok(reply) = reply_rx.try_recv() {
+                    dirty = true;
+                    handle_player_reply(&mut app, reply, &chans.meta);
                 }
 
                 // The visualizer only animates while it is on screen; on Queue
@@ -750,7 +774,7 @@ async fn run_ui(
                 // pixels, so the cover has to be sent again once it closes.
                 // Opening one must not wipe: the image would be redrawn a frame
                 // later, back on top of the popup.
-                let overlay = app.view.actions.is_some();
+                let overlay = app.popup_open();
                 if overlay != overlay_open {
                     overlay_open = overlay;
                     if !overlay {
@@ -811,7 +835,7 @@ async fn run_ui(
                     last_sync = Instant::now();
                     // Refresh the live queue while playing so the snapshot stays
                     // current, then persist it (survives reboot).
-                    if app.transport.playback_started {
+                    if app.playing_somewhere() {
                         spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
                     }
                     save_state(&app);
@@ -822,6 +846,12 @@ async fn run_ui(
                 let Ok(ev) = ev else { break };
                 let reconnected = matches!(ev, EngineEvent::Reconnected);
                 handle_engine_event(&mut app, ev, &chans.meta);
+                // The new connection's cluster feed only speaks on a change;
+                // ask who plays what, in case another device took over (or
+                // stopped) while it was down.
+                if reconnected {
+                    app.refresh_player_state();
+                }
                 // The replacement Connect device starts empty; reload what was
                 // playing so a dropped access point costs a gap, not the track.
                 if reconnected && std::mem::take(&mut app.transport.resume_after_reconnect) {

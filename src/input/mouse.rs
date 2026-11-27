@@ -16,6 +16,10 @@ pub(crate) fn handle_mouse(
         handle_equalizer_mouse(app, out, m);
         return false;
     }
+    // So is the devices menu, which has no hit rects of its own.
+    if app.devices.menu.is_some() {
+        return false;
+    }
 
     if matches!(
         m.kind,
@@ -53,8 +57,7 @@ pub(crate) fn handle_mouse(
                     consumed = true;
                     let offset = (m.column - vr.x) as u32;
                     let vol = (((offset + 1) * 100) / vr.width as u32).min(100) as u8;
-                    app.transport.volume = vol;
-                    let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+                    app.set_volume(vol);
                 }
             }
         }
@@ -68,8 +71,7 @@ pub(crate) fn handle_mouse(
                 {
                     if let Some(dur) = app.playback.now.as_ref().map(|n| n.duration_ms) {
                         let frac = (m.column - bar.x) as f32 / bar.width as f32;
-                        app.playback
-                            .seek_to(&app.svc.engine, (frac * dur as f32) as u32);
+                        app.seek_to((frac * dur as f32) as u32);
                     }
                 }
             }
@@ -128,14 +130,8 @@ pub(crate) fn handle_mouse(
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
     ) {
         match m.kind {
-            MouseEventKind::ScrollUp => {
-                app.transport.volume = (app.transport.volume + 5).min(100);
-                let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
-            }
-            MouseEventKind::ScrollDown => {
-                app.transport.volume = app.transport.volume.saturating_sub(5);
-                let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
-            }
+            MouseEventKind::ScrollUp => app.nudge_volume(5),
+            MouseEventKind::ScrollDown => app.nudge_volume(-5),
             _ => {}
         }
     }

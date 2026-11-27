@@ -8,6 +8,18 @@ they are added to, never rewritten.
 
 ### Added
 
+- **Devices, and myx as a remote** (#49). `d` lists your Spotify Connect
+  devices with ▶ on the one playing; `⏎` moves playback there and keeps it
+  playing. While another device plays — your phone, say — myx follows it:
+  Now Playing, the cover, lyrics and progress are the phone's, and the
+  transport keys, volume, shuffle, repeat and picking a track act on the
+  phone rather than pulling playback onto the computer, which any key used
+  to do. The footer names the device being driven. Playback comes back only
+  when you pick "this device" in `d`, carrying the phone's shuffle and
+  repeat with it. If the phone is already playing when myx starts, myx comes
+  up as its remote instead of offering the track it restored. Devices that
+  can't be controlled are greyed; refusals (Premium needed, a device asleep,
+  rate limits) are said on the status line.
 - **`device_name`** in `config.toml`: the name this myx goes by in Spotify's
   device lists. Without it, myx is now `myx · <hostname>` instead of plain
   `myx`, so two machines can be told apart.

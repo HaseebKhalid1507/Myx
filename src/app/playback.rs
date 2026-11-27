@@ -105,20 +105,34 @@ impl PlaybackState {
             n.position_at = Instant::now();
         }
     }
-    /// Seek to an absolute position (clamped), updating the local display too.
-    pub(crate) fn seek_to(&mut self, engine: &Engine, position_ms: u32) {
-        let Some(dur) = self.now.as_ref().map(|n| n.duration_ms) else {
+    /// Play or pause the playhead from where it is, ahead of the player
+    /// saying so — for a remote device, which says so a round trip later.
+    pub(crate) fn set_playing(&mut self, playing: bool) {
+        if !playing {
+            self.freeze();
             return;
-        };
+        }
+        let position_ms = self.position_ms();
+        if let Some(n) = self.now.as_mut() {
+            n.position_ms = position_ms;
+            n.position_at = Instant::now();
+            n.is_playing = true;
+        }
+    }
+    /// Move the playhead to an absolute position (clamped to the track) on
+    /// screen, and return it for the player — this myx's or a remote device's
+    /// (see `App::seek_to`). `None` with nothing playing.
+    pub(crate) fn seek_to(&mut self, position_ms: u32) -> Option<u32> {
+        let dur = self.now.as_ref().map(|n| n.duration_ms)?;
         let new = position_ms.min(dur);
-        let _ = engine.seek(new);
         self.set_local_position(new, false);
+        Some(new)
     }
     /// One Shift+arrow press, moving the playhead by `delta_ms`.
     ///
     /// A seek per key repeat overshot the track and made librespot flush and
     /// refill its audio buffer 30×/s — that pile-up was the stutter. Repeats are
-    /// throttled and the engine seek deferred to `flush_seek`.
+    /// throttled and the engine seek deferred to `settled_seek`.
     pub(crate) fn seek_step(&mut self, delta_ms: i64) {
         let now = Instant::now();
         if self.seek_target.is_some() && now.duration_since(self.seek_last_step) < SEEK_REPEAT {
@@ -136,14 +150,13 @@ impl PlaybackState {
         self.seek_last_input = now;
         self.set_local_position(target, false);
     }
-    /// Commit a finished scrub as a single engine seek, once the keys stop.
-    pub(crate) fn flush_seek(&mut self, engine: &Engine, now: Instant) {
+    /// A finished scrub, once the keys have stopped: where to seek, once.
+    /// `App::flush_seek` sends it.
+    pub(crate) fn settled_seek(&mut self, now: Instant) -> Option<u32> {
         if now.duration_since(self.seek_last_input) < SEEK_SETTLE {
-            return;
+            return None;
         }
-        if let Some(target) = self.seek_target.take() {
-            self.seek_to(engine, target);
-        }
+        self.seek_target.take()
     }
 }
 

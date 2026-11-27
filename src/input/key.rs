@@ -41,6 +41,11 @@ pub(crate) fn handle_key(
         return false;
     }
 
+    if app.devices.menu.is_some() {
+        handle_devices_key(app, code, &chans.radio);
+        return false;
+    }
+
     // --- Search input mode captures everything ---
     if app.search.input_mode {
         match code {
@@ -134,6 +139,7 @@ pub(crate) fn handle_key(
         KeyCode::Char('e') => {
             app.view.equalizer = Some(EqualizerOverlay::default());
         }
+        KeyCode::Char('d') => app.open_devices(),
         KeyCode::Char('/') => {
             app.search.input_mode = true;
             app.search.clear();
@@ -158,36 +164,21 @@ pub(crate) fn handle_key(
             }
             // Nothing to back out of — Esc no longer quits (use q or Ctrl-C twice).
         }
+        // The transport keys drive whichever device holds playback: this myx,
+        // or the one it's the remote for (see `app/control.rs`).
         KeyCode::Char(' ') | KeyCode::Char('p') | KeyCode::Media(MediaKeyCode::PlayPause) => {
-            if app.transport.playback_started {
-                let _ = app.svc.engine.toggle();
-            } else {
-                // Resume the persisted source (context/radio/liked).
-                resume_source(app, &chans.radio);
-                app.transport.playback_started = true;
-            }
+            app.play_pause(&chans.radio);
         }
-        KeyCode::Media(MediaKeyCode::Stop) => {
-            app.svc.engine.stop();
-        }
-        KeyCode::Char('n') | KeyCode::Media(MediaKeyCode::TrackNext) => {
-            let _ = app.svc.engine.next();
-        }
-        KeyCode::Char('b') | KeyCode::Media(MediaKeyCode::TrackPrevious) => {
-            let _ = app.svc.engine.prev();
-        }
+        KeyCode::Media(MediaKeyCode::Stop) => app.stop(),
+        KeyCode::Char('n') | KeyCode::Media(MediaKeyCode::TrackNext) => app.next(),
+        KeyCode::Char('b') | KeyCode::Media(MediaKeyCode::TrackPrevious) => app.prev(),
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Media(MediaKeyCode::RaiseVolume) => {
-            app.transport.volume = (app.transport.volume + 5).min(100);
-            let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+            app.nudge_volume(5);
         }
         KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Media(MediaKeyCode::LowerVolume) => {
-            app.transport.volume = app.transport.volume.saturating_sub(5);
-            let _ = app.svc.engine.set_volume(vol_u16(app.transport.volume));
+            app.nudge_volume(-5);
         }
-        KeyCode::Char('s') => {
-            app.transport.shuffle = !app.transport.shuffle;
-            let _ = app.svc.engine.shuffle(app.transport.shuffle);
-        }
+        KeyCode::Char('s') => app.set_shuffle(!app.shown_shuffle()),
         // Play the highlighted playlist / album / artist outright. Enter still
         // opens; this is the direct route that used to require two Enters or
         // the actions menu.
@@ -195,15 +186,15 @@ pub(crate) fn handle_key(
         KeyCode::Char('S') => {
             // Flip the global toggle too, or the footer would show shuffle off
             // while playback is shuffled, and `resume_source` would later
-            // replay this context unshuffled.
-            app.transport.shuffle = true;
-            let _ = app.svc.engine.shuffle(true);
+            // replay this context unshuffled. A remote device takes it before
+            // the context, which it then starts shuffled.
+            app.set_shuffle(true);
             play_selected_context(app, true);
         }
         // Off → all → one, Spotify's order, said on the status line.
         KeyCode::Char('R') => {
-            let mode = app.svc.engine.repeat_mode().next();
-            app.status = match app.svc.engine.set_repeat(mode) {
+            let mode = app.shown_repeat().next();
+            app.status = match app.set_repeat(mode) {
                 Ok(()) => repeat_status(mode).to_string(),
                 // Kept all the same: the next playlist or track starts with it.
                 Err(e) => format!(
@@ -269,13 +260,13 @@ pub(crate) fn handle_key(
         }
         KeyCode::Right => {
             app.view.mode = app.view.mode.shift_in(app.rotation(), 1);
-            if app.view.mode == RightView::Queue && app.transport.playback_started {
+            if app.view.mode == RightView::Queue && app.playing_somewhere() {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }
         KeyCode::Left => {
             app.view.mode = app.view.mode.shift_in(app.rotation(), -1);
-            if app.view.mode == RightView::Queue && app.transport.playback_started {
+            if app.view.mode == RightView::Queue && app.playing_somewhere() {
                 spawn_queue_fetch(app.svc.webapi.clone(), chans.queue.clone());
             }
         }

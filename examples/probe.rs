@@ -58,6 +58,10 @@ async fn main() -> anyhow::Result<()> {
                     EngineEvent::PositionCorrection { uri, position_ms } => {
                         println!("↔ position  {uri} @ {position_ms}ms")
                     }
+                    EngineEvent::Cluster(snap) => {
+                        let devices = snap.devices.map_or(0, |d| d.len());
+                        println!("⇄ cluster   {:?} ({devices} devices)", snap.holder)
+                    }
                 }
             }
             cmd = cmd_rx.recv_async() => {
