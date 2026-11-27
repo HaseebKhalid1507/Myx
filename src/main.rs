@@ -590,6 +590,7 @@ async fn run_ui(
     );
     let (reply_tx, reply_rx) = flume::unbounded::<PlayerReply>();
     spawn_player_worker(app.svc.webapi.clone(), player_rx, reply_tx);
+    app.check_other_devices_at_launch();
 
     // Re-enrich the restored last-played track (cover / theme / lyrics).
     if let Some(uri) = app.session.restore_uri.take() {

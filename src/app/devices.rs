@@ -146,8 +146,13 @@ pub(crate) fn apply_snapshot(app: &mut App, snap: Snapshot, meta_tx: &flume::Sen
     }
     match snap.holder {
         Holder::Elsewhere(p) => {
+            let here = &app.devices.here_id;
+            let had_playback = app.transport.playback_started
+                || app.devices.active.as_ref().is_some_and(|a| a == here);
             app.devices.active = Some(p.device.id.clone());
-            follow_remote(app, p, meta_tx);
+            if follows(app.devices.remote.is_some(), p.is_playing, had_playback) {
+                follow_remote(app, p, meta_tx);
+            }
         }
         Holder::Here => {
             app.devices.active = Some(app.devices.here_id.clone());
@@ -158,6 +163,16 @@ pub(crate) fn apply_snapshot(app: &mut App, snap: Snapshot, meta_tx: &flume::Sen
             leave_remote(app, true);
         }
     }
+}
+
+/// Whether another device holding playback takes the screen: when it's
+/// playing, when it took playback from this myx (`had_playback`: this myx had
+/// something loaded, or was the active device), or when myx already follows a
+/// device. A phone left paused an hour ago, still nominally active, doesn't
+/// replace the track this myx restored at launch — but once it plays, or
+/// anything else on it moves while myx follows it, it does.
+pub(crate) fn follows(following: bool, playing_there: bool, had_playback: bool) -> bool {
+    following || playing_there || had_playback
 }
 
 /// Another device holds playback: drive it, and show what it plays.
@@ -316,6 +331,18 @@ mod tests {
         for uri in ["spotify:station:track:1", "", "spotify:track:1"] {
             assert!(matches!(remote_source(uri), PlaySource::None), "{uri}");
         }
+    }
+
+    #[test]
+    fn a_paused_device_elsewhere_takes_the_screen_only_from_a_myx_that_had_playback() {
+        // (following, playing there, had playback)
+        assert!(follows(false, true, false), "it's playing");
+        assert!(follows(false, false, true), "it took playback from here");
+        assert!(follows(true, false, false), "already following: it paused");
+        assert!(
+            !follows(false, false, false),
+            "a phone paused an hour ago, at launch"
+        );
     }
 
     #[test]

@@ -662,3 +662,78 @@ fn remote_mode_says_theres_no_sound_here() {
     assert!(text.contains("d on Pixel 7"), "{text}");
     assert!(text.contains(" 40%"), "the phone's volume: {text}");
 }
+
+// ------------------------------------------------------------------ launch
+
+/// `playing_app` as launch leaves it: the saved track restored and paused,
+/// nothing loaded in the player.
+fn launched_app() -> App {
+    let mut app = playing_app();
+    app.transport.playback_started = false;
+    app.playback.now.as_mut().unwrap().is_playing = false;
+    app
+}
+
+fn player_says(app: &mut App, active: Option<Playback>) {
+    handle_player_reply(app, PlayerReply::State(Ok(active)), &flume::unbounded().0);
+}
+
+#[test]
+fn at_launch_myx_asks_whos_playing_unless_given_something_to_play() {
+    let mut app = launched_app();
+    let rx = watch_player(&mut app);
+    app.check_other_devices_at_launch();
+    assert!(matches!(rx.try_recv(), Ok(PlayerRequest::State)));
+    // A URI on the command line is playing here already.
+    app.transport.playback_started = true;
+    app.check_other_devices_at_launch();
+    assert!(rx.try_iter().next().is_none());
+}
+
+#[tokio::test]
+async fn at_launch_a_device_already_playing_is_followed_instead_of_the_restored_track() {
+    let mut app = launched_app();
+    player_says(&mut app, Some(phone("spotify:track:new", true)));
+    assert!(app.devices.remote.is_some());
+    assert_eq!(
+        app.session.pending_meta.as_deref(),
+        Some("spotify:track:new")
+    );
+    assert!(app.playback.now.as_ref().unwrap().is_playing);
+}
+
+#[test]
+fn at_launch_a_device_left_paused_leaves_the_restored_track_alone() {
+    let mut app = launched_app();
+    player_says(&mut app, Some(phone("spotify:track:new", false)));
+    assert!(app.devices.remote.is_none());
+    assert_eq!(app.playback.now.as_ref().unwrap().uri, "spotify:track:0");
+    // It's still the active device, as the menu shows.
+    assert_eq!(app.devices.active.as_deref(), Some(PHONE_ID));
+    // Once it plays, it's followed.
+    apply(
+        &mut app,
+        push(Holder::Elsewhere(phone("spotify:track:0", true)), 2),
+    );
+    assert!(app.devices.remote.is_some());
+}
+
+#[test]
+fn a_device_taking_playback_from_this_myx_is_followed_even_paused() {
+    let mut app = playing_app();
+    apply(
+        &mut app,
+        push(Holder::Elsewhere(phone("spotify:track:0", false)), 1),
+    );
+    assert!(app.devices.remote.is_some());
+    assert!(!app.playback.now.as_ref().unwrap().is_playing);
+}
+
+#[test]
+fn nothing_playing_anywhere_at_launch_keeps_the_restored_track() {
+    let mut app = launched_app();
+    player_says(&mut app, None);
+    assert!(app.devices.remote.is_none());
+    assert_eq!(app.playback.now.as_ref().unwrap().uri, "spotify:track:0");
+    assert_eq!(app.devices.active, None);
+}

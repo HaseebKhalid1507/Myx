@@ -307,6 +307,18 @@ impl App {
     pub(crate) fn refresh_player_state(&self) {
         let _ = self.svc.player.send(PlayerRequest::State);
     }
+
+    /// At launch: is another device already playing? Then myx follows it as
+    /// its remote rather than offering the track it restored. The cluster
+    /// push can't say: Spirc's first cluster comes back as the reply to its
+    /// own announcement, which this myx's listener never sees, and the next
+    /// push waits for a change. A URI given on the command line is playing
+    /// here already, and asks nothing.
+    pub(crate) fn check_other_devices_at_launch(&self) {
+        if !self.transport.playback_started {
+            self.refresh_player_state();
+        }
+    }
 }
 
 /// Apply what the player worker found.
