@@ -10,19 +10,35 @@ use crate::*;
 pub(crate) struct DevicesState {
     /// This myx's Connect id, as other devices list it.
     pub(crate) here_id: String,
+    /// The name other devices list this myx under.
+    pub(crate) here_name: String,
     /// The device holding playback while it isn't this myx. `Some` is remote
     /// mode: what's on screen is that device's, and transport keys drive it
     /// through the Web API.
     pub(crate) remote: Option<Remote>,
+    /// The active device's id, as last heard (push, `GET /me/player`, or the
+    /// device list); `None` when nothing plays anywhere.
+    pub(crate) active: Option<String>,
+    /// The devices `GET /me/player/devices` listed last; `None` until it has.
+    pub(crate) listed: Option<Vec<Device>>,
+    /// The devices the last cluster push carried.
+    pub(crate) pushed: Vec<Device>,
+    /// The devices menu (`d`), while it's open.
+    pub(crate) menu: Option<DevicesMenu>,
     /// The newest cluster change applied, on Spotify's clock.
     pub(crate) last_change_ms: i64,
 }
 
 impl DevicesState {
-    pub(crate) fn new(here_id: String) -> Self {
+    pub(crate) fn new(here_id: String, here_name: String) -> Self {
         Self {
             here_id,
+            here_name,
             remote: None,
+            active: None,
+            listed: None,
+            pushed: Vec::new(),
+            menu: None,
             last_change_ms: 0,
         }
     }
@@ -125,10 +141,22 @@ pub(crate) fn apply_snapshot(app: &mut App, snap: Snapshot, meta_tx: &flume::Sen
         }
         app.devices.last_change_ms = snap.changed_ms;
     }
+    if let Some(devices) = snap.devices {
+        app.devices.pushed = devices;
+    }
     match snap.holder {
-        Holder::Elsewhere(p) => follow_remote(app, p, meta_tx),
-        Holder::Here => leave_remote(app, false),
-        Holder::Nobody => leave_remote(app, true),
+        Holder::Elsewhere(p) => {
+            app.devices.active = Some(p.device.id.clone());
+            follow_remote(app, p, meta_tx);
+        }
+        Holder::Here => {
+            app.devices.active = Some(app.devices.here_id.clone());
+            leave_remote(app, false);
+        }
+        Holder::Nobody => {
+            app.devices.active = None;
+            leave_remote(app, true);
+        }
     }
 }
 

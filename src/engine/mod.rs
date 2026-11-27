@@ -378,6 +378,14 @@ impl Engine {
         self.active_command("repeat", |spirc| spirc.repeat(context))?;
         self.command("repeat track", |spirc| spirc.repeat_track(track))
     }
+    /// Pull playback onto this myx from the device playing it: the context,
+    /// the track and where it was, as Spotify's own device picker does.
+    /// Deliberately not an `active_command`: claiming the active-device role
+    /// first would make this myx active with nothing loaded, and Spirc ignores
+    /// a transfer onto a device that's already active.
+    pub fn transfer_here(&self) -> Result<()> {
+        self.command("transfer", |spirc| spirc.transfer(None))
+    }
     /// Take the repeat mode playback arrived with — moved here from another
     /// device, which had it set — as the one to carry, without telling the
     /// player, which already has it.

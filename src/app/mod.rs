@@ -16,6 +16,7 @@
 
 mod action;
 mod control;
+mod device_menu;
 mod devices;
 mod event;
 mod frame;
@@ -26,6 +27,7 @@ mod state;
 
 pub(crate) use action::*;
 pub(crate) use control::*;
+pub(crate) use device_menu::*;
 pub(crate) use devices::*;
 pub(crate) use event::*;
 pub(crate) use frame::*;

@@ -9,6 +9,12 @@ pub(crate) fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) 
     // In remote mode these are the remote device's: what the keys would change.
     let repeat = app.shown_repeat();
     let enter_lbl = enter_label(app.selected_item());
+    // In remote mode `d` names the device the keys drive, and ranks with play:
+    // which device you're steering matters as much as what it plays.
+    let (devices_rank, devices_lbl) = match &app.devices.remote {
+        Some(remote) => (2, format!(" on {}   ", truncate(&remote.name, 24))),
+        None => (10, " devices   ".to_string()),
+    };
     let play_lbl = if app.playback.now.as_ref().is_some_and(|n| n.is_playing) {
         " pause   "
     } else {
@@ -54,6 +60,12 @@ pub(crate) fn render_footer(f: &mut Frame, app: &App, theme: Theme, area: Rect) 
             }),
         ),
         (false, 9, key("a"), lbl(" actions   ")),
+        (
+            false,
+            devices_rank,
+            key("d"),
+            Span::styled(devices_lbl, theme.muted()),
+        ),
         (false, 16, key("e"), lbl(" eq   ")),
         (
             false,

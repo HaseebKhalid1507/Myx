@@ -16,6 +16,10 @@ pub(crate) fn handle_mouse(
         handle_equalizer_mouse(app, out, m);
         return false;
     }
+    // So is the devices menu, which has no hit rects of its own.
+    if app.devices.menu.is_some() {
+        return false;
+    }
 
     if matches!(
         m.kind,

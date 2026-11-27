@@ -76,6 +76,12 @@ pub(crate) fn command_call(device_id: &str, command: &PlayerCommand) -> Call {
             None,
         ),
         PlayerCommand::Start(load) => to("PUT", "play", Some(start_body(load))),
+        // The device goes in the body here, not the query.
+        PlayerCommand::Transfer => Call {
+            method: "PUT",
+            url: format!("{API}/me/player"),
+            body: Some(serde_json::json!({ "device_ids": [device_id], "play": true })),
+        },
     }
 }
 
@@ -152,6 +158,18 @@ pub(crate) fn failure(status: u16, body: &str, retry_after: Option<u64>) -> Stri
     }
 }
 
+/// The devices `GET /me/player/devices` lists. A device with no name is no
+/// use in a list.
+pub(crate) fn parse_devices(v: &serde_json::Value) -> Vec<Device> {
+    v["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(web_device)
+        .filter(|d| !d.name.is_empty())
+        .collect()
+}
+
 fn web_device(d: &serde_json::Value) -> Device {
     let id = d["id"].as_str().unwrap_or("");
     let volume = d["volume_percent"]
@@ -199,7 +217,8 @@ pub(crate) fn parse_player(v: &serde_json::Value) -> Option<Playback> {
 
 /// Requests that piled up behind a slow one, minus those a later one makes
 /// pointless: of back-to-back volume changes or seeks for the same device only
-/// the last is sent, and of back-to-back state checks, one. Order is kept.
+/// the last is sent, and of back-to-back state or device-list checks, one.
+/// Order is kept.
 pub(crate) fn coalesce(batch: Vec<PlayerRequest>) -> Vec<PlayerRequest> {
     let mut out: Vec<PlayerRequest> = Vec::with_capacity(batch.len());
     for request in batch {
@@ -238,7 +257,8 @@ fn superseded(earlier: &PlayerRequest, later: &PlayerRequest) -> bool {
                 ..
             },
         ) => a == b,
-        (PlayerRequest::State, PlayerRequest::State) => true,
+        (PlayerRequest::State, PlayerRequest::State)
+        | (PlayerRequest::Devices, PlayerRequest::Devices) => true,
         _ => false,
     }
 }
@@ -302,6 +322,14 @@ fn call_api(
     Err(failure(429, "", retry_after))
 }
 
+/// `GET /me/player/devices`: the account's devices.
+pub(crate) fn fetch_devices(webapi: &Arc<Mutex<WebApi>>) -> Result<Vec<Device>, String> {
+    let token = token_of(webapi).ok_or("not signed in to the Web API")?;
+    let call = Call::get(format!("{API}/me/player/devices"));
+    let reply = call_api(&http_client(), &token, &call)?;
+    Ok(reply.as_ref().map(parse_devices).unwrap_or_default())
+}
+
 /// `GET /me/player`: what the active device is playing, if any device is.
 pub(crate) fn fetch_player_state(webapi: &Arc<Mutex<WebApi>>) -> Result<Option<Playback>, String> {
     let token = token_of(webapi).ok_or("not signed in to the Web API")?;
@@ -336,6 +364,7 @@ fn run(
             })
         }
         PlayerRequest::State => Some(PlayerReply::State(fetch_player_state(webapi))),
+        PlayerRequest::Devices => Some(PlayerReply::Devices(fetch_devices(webapi))),
     }
 }
 
@@ -528,6 +557,42 @@ mod tests {
     }
 
     #[test]
+    fn a_transfer_names_the_device_in_the_body_and_keeps_it_playing() {
+        let c = call(PlayerCommand::Transfer);
+        assert_eq!(
+            (c.method, c.url.as_str()),
+            ("PUT", &*format!("{API}/me/player"))
+        );
+        assert_eq!(
+            c.body,
+            Some(json!({ "device_ids": ["abc def"], "play": true }))
+        );
+    }
+
+    #[test]
+    fn the_device_list_marks_what_cant_be_driven() {
+        let v = json!({ "devices": [
+            { "id": "p", "name": "Pixel", "type": "Smartphone", "is_active": true,
+              "is_restricted": false, "supports_volume": true, "volume_percent": 64 },
+            { "id": "s", "name": "Sonos", "type": "Speaker", "is_active": false,
+              "is_restricted": true, "supports_volume": true, "volume_percent": 20 },
+            { "id": null, "name": "TV", "type": "TV", "is_active": false,
+              "is_restricted": false, "supports_volume": false, "volume_percent": null },
+            { "id": "x", "name": "", "type": "Computer" },
+        ]});
+        let devices = parse_devices(&v);
+        assert_eq!(devices.len(), 3, "a nameless device is no use in a list");
+        let (pixel, sonos, tv) = (&devices[0], &devices[1], &devices[2]);
+        assert_eq!(pixel.kind, DeviceKind::Phone);
+        assert_eq!(pixel.volume, Some(64));
+        assert!(pixel.is_active && pixel.controllable);
+        assert!(!sonos.controllable, "restricted");
+        assert!(!tv.controllable, "no id to send commands to");
+        assert_eq!(tv.volume, None);
+        assert!(parse_devices(&json!({})).is_empty());
+    }
+
+    #[test]
     fn the_player_reply_reads_as_the_active_devices_playback() {
         let v = json!({
             "device": { "id": "p", "name": "Pixel", "type": "Smartphone",
@@ -573,6 +638,8 @@ mod tests {
             command("q", Seek(3)),
             PlayerRequest::State,
             PlayerRequest::State,
+            PlayerRequest::Devices,
+            PlayerRequest::Devices,
             command("p", Volume(65)),
         ];
         assert_eq!(
@@ -583,6 +650,7 @@ mod tests {
                 command("p", Seek(2)),
                 command("q", Seek(3)),
                 PlayerRequest::State,
+                PlayerRequest::Devices,
                 command("p", Volume(65)),
             ]
         );

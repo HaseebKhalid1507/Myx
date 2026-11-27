@@ -434,7 +434,7 @@ async fn boot(
     // Commands for a remote device, done in order by the player worker that
     // `run_ui` starts.
     let (player_tx, player_rx) = flume::unbounded::<PlayerRequest>();
-    let devices = DevicesState::new(engine.device_id());
+    let devices = DevicesState::new(engine.device_id(), engine.device_name());
     let app = App {
         svc: Services {
             engine,
@@ -636,7 +636,7 @@ async fn run_ui(
     let mut dirty = true;
     let mut last_layout = (app.view.mode, app.view.zen, app.view.layout);
     let forced_layout = forced_layout(&myx::config::get().layout);
-    let mut overlay_open = app.view.actions.is_some();
+    let mut overlay_open = app.popup_open();
     // A popup overwrites inline-image pixels. Replay the cached cover after the
     // popup-free frame instead of blanking it for one visible frame first.
     let mut restore_art = false;
@@ -656,6 +656,7 @@ async fn run_ui(
             }
             _ = frame.tick() => {
                 app.flush_seek(Instant::now());
+                app.refresh_devices_if_due(Instant::now());
                 // Drain library updates deterministically before rendering. Keeping
                 // this solely as a select arm could starve under a hot player-event
                 // stream / 60fps visualizer — which looked like a frozen library.
@@ -772,7 +773,7 @@ async fn run_ui(
                 // pixels, so the cover has to be sent again once it closes.
                 // Opening one must not wipe: the image would be redrawn a frame
                 // later, back on top of the popup.
-                let overlay = app.view.actions.is_some();
+                let overlay = app.popup_open();
                 if overlay != overlay_open {
                     overlay_open = overlay;
                     if !overlay {

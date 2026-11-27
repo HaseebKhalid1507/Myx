@@ -41,6 +41,11 @@ pub(crate) fn handle_key(
         return false;
     }
 
+    if app.devices.menu.is_some() {
+        handle_devices_key(app, code, &chans.radio);
+        return false;
+    }
+
     // --- Search input mode captures everything ---
     if app.search.input_mode {
         match code {
@@ -134,6 +139,7 @@ pub(crate) fn handle_key(
         KeyCode::Char('e') => {
             app.view.equalizer = Some(EqualizerOverlay::default());
         }
+        KeyCode::Char('d') => app.open_devices(),
         KeyCode::Char('/') => {
             app.search.input_mode = true;
             app.search.clear();

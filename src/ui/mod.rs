@@ -77,6 +77,8 @@ pub(crate) fn render(f: &mut Frame, app: &App, out: &mut FrameOut, repaint: ArtR
 
     if app.view.actions.is_some() {
         render_actions_overlay(f, app, theme, area);
+    } else if app.devices.menu.is_some() {
+        render_devices_overlay(f, app, theme, area);
     } else if app.view.equalizer.is_some() {
         // Keep album art visible: the editor lives in the active pane and
         // positions itself in free space around the cover.

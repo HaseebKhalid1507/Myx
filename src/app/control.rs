@@ -23,6 +23,8 @@ pub(crate) enum PlayerCommand {
     Repeat(Repeat),
     /// Start something new there.
     Start(Load),
+    /// Move playback there, and keep it playing.
+    Transfer,
 }
 
 impl PlayerCommand {
@@ -38,6 +40,7 @@ impl PlayerCommand {
             Self::Shuffle(_) => "switch shuffle",
             Self::Repeat(_) => "switch repeat",
             Self::Start(_) => "start playback",
+            Self::Transfer => "move playback",
         }
     }
 }
@@ -71,12 +74,15 @@ pub(crate) enum PlayerRequest {
     /// `GET /me/player`: who plays what. The cluster push only says when
     /// something changes, so a fresh connection asks.
     State,
+    /// `GET /me/player/devices`, for the devices menu.
+    Devices,
 }
 
 /// What the worker found.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PlayerReply {
     State(Result<Option<Playback>, String>),
+    Devices(Result<Vec<Device>, String>),
     /// For the status line: a command that failed, or one worth confirming.
     Status(String),
 }
@@ -324,5 +330,6 @@ pub(crate) fn handle_player_reply(
             liblog(format!("player: couldn't ask who's playing: {e}"));
             app.status = format!("couldn't check your other devices: {e}");
         }
+        PlayerReply::Devices(listed) => apply_device_list(app, listed),
     }
 }
